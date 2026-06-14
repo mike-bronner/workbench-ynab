@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# Editor / tooling
+.idea/
+.vscode/
+*.swp
+
+# Node (build tooling only — see below for the vendored runtime)
+node_modules/
+npm-debug.log*
+
+# Python (if any tooling lands here)
+__pycache__/
+*.pyc
+.venv/
+.venv-stable/
+
+# Local runtime / state
+run/
+*.log
+
+# Secrets — never commit. The YNAB token lives in macOS Keychain, never on disk.
+.env
+*.token
+config.local.json
+
+# NOTE: vendor/ is intentionally TRACKED. The YNAB MCP bundle is vendored into
+# this repo on purpose (frozen, offline, reproducible). Do not add vendor/ here.
