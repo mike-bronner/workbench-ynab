@@ -122,6 +122,17 @@ out="$(run --verify)"; rc=$?
 assert "exits 0 when no matches remain" "[ $rc -eq 0 ]"
 assert "reports a zero TOTAL" \
   "printf '%s' \"\$out\" | grep -E 'TOTAL +0' >/dev/null"
+# Per-surface 0 assertions — a TOTAL of 0 alone would still pass if a future
+# change silently dropped a surface; assert each surface individually reports 0.
+for surface_label in \
+  'session logs' \
+  'project transcripts' \
+  'tool-result caches' \
+  'Desktop config' \
+  'git-tracked repo tree'; do
+  assert "per-surface: '$surface_label' reports 0 matches" \
+    "printf '%s' \"\$out\" | grep -E '$surface_label +0' >/dev/null"
+done
 
 # ---------------------------------------------------------------------------
 echo "== --detect AFTER scrub (marker, not a plaintext token) =="
@@ -133,6 +144,8 @@ echo "== scrub is idempotent =="
 out="$(run '')"; rc=$?
 assert "second scrub exits 0 with zero modified" \
   "[ $rc -eq 0 ] && printf '%s' \"\$out\" | grep -E 'TOTAL +[0-9]+ +0' >/dev/null"
+assert "marker is still present after the idempotent second pass" \
+  "grep -qF -- \"\$MARKER\" \"$SESS/2026-06-12/a.log.md\""
 
 # ---------------------------------------------------------------------------
 echo "== --detect on a config with no YNAB token =="
@@ -141,6 +154,62 @@ printf '{"mcpServers":{"other":{"command":"bash"}}}\n' > "$CLEAN_DESK"
 out="$(printf '%s\n' x \
   | YNAB_SCRUB_DESKTOP_CONFIG="$CLEAN_DESK" bash "$SCRUB" --detect 2>&1)"; rc=$?
 assert "exits 0 when no YNAB token field is present" "[ $rc -eq 0 ]"
+
+# ---------------------------------------------------------------------------
+# FAIL-CLOSED behaviour: a file/surface the tool cannot read or enumerate must
+# never be reported clean — it forces a non-zero exit so a leaked-token copy
+# can't hide behind a swallowed error. (chmod 000 is meaningless under root, so
+# the unreadable-file cases are skipped there.)
+# ---------------------------------------------------------------------------
+echo "== --verify FAILS CLOSED on an unreadable file =="
+if [ "$(id -u)" -eq 0 ]; then
+  echo "  (skipped: running as root — chmod 000 wouldn't block reads)"
+else
+  UNREAD="$SESS/2026-06-12/unreadable.log.md"
+  printf 'leaked %s here\n' "$SYNTH_TOKEN" > "$UNREAD"
+  chmod 000 "$UNREAD"
+  out="$(run --verify)"; rc=$?
+  assert "verify exits non-zero when a file can't be read" "[ $rc -ne 0 ]"
+  assert "verify flags it unscannable (fails closed, not reported clean)" \
+    "printf '%s' \"\$out\" | grep -qiE 'unscannable|could not scan|UNRESOLVED'"
+  assert "verify still never prints the token value on failure" "! contains_token \"\$out\""
+  chmod 644 "$UNREAD"
+  rm -f "$UNREAD"
+fi
+
+# ---------------------------------------------------------------------------
+echo "== scrub FAILS CLOSED on an unreadable file =="
+if [ "$(id -u)" -eq 0 ]; then
+  echo "  (skipped: running as root — chmod 000 wouldn't block reads)"
+else
+  UNREAD="$SESS/2026-06-12/unreadable.log.md"
+  printf 'leaked %s here\n' "$SYNTH_TOKEN" > "$UNREAD"
+  chmod 000 "$UNREAD"
+  out="$(run '')"; rc=$?
+  assert "scrub exits non-zero when a file can't be read" "[ $rc -ne 0 ]"
+  assert "scrub reports a non-zero Unreadable count" \
+    "printf '%s' \"\$out\" | grep -qiE 'unreadable|could not read'"
+  assert "scrub never prints the token value even on failure" "! contains_token \"\$out\""
+  chmod 644 "$UNREAD"
+  assert "the unreadable file still holds the token (NOT silently skipped-clean)" \
+    "grep -qF -- \"\$SYNTH_TOKEN\" \"$UNREAD\""
+  rm -f "$UNREAD"
+fi
+
+# ---------------------------------------------------------------------------
+echo "== --verify FAILS CLOSED when the repo tree can't be enumerated =="
+NOTGIT="$(mktemp -d)"
+out="$(printf '%s\n' "$SYNTH_TOKEN" \
+  | YNAB_SCRUB_SESSIONS_ROOT="$SESS" \
+    YNAB_SCRUB_PROJECTS_ROOT="$PROJ" \
+    YNAB_SCRUB_DESKTOP_CONFIG="$DESK" \
+    YNAB_SCRUB_REPO_ROOT="$NOTGIT" \
+    bash "$SCRUB" --verify 2>&1)"; rc=$?
+assert "verify exits non-zero when the repo surface can't be git-enumerated" "[ $rc -ne 0 ]"
+assert "verify flags the repo tree unscannable, not zero-scanned-clean" \
+  "printf '%s' \"\$out\" | grep -qiE 'unscannable|not fully enumerated|could not scan'"
+assert "verify never prints the token value on the repo-enumeration failure" "! contains_token \"\$out\""
+rm -rf "$NOTGIT"
 
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

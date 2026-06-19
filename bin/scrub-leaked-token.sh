@@ -26,17 +26,27 @@
 #     variable, or a hard-coded literal.
 #   * The token is NEVER printed to stdout or stderr.
 #   * The token is handed to `perl` via a child-process environment variable
-#     rather than as an argv string, so it never appears in `ps` output, and it
-#     is never written to a temporary file on disk.
+#     rather than as an argv string, so it never appears in the process argv
+#     listing (`ps aux`), and it is never written to a temporary file on disk.
+#     (An environment variable is still readable by the SAME user via `ps eww`
+#     or /proc/<pid>/environ — env-over-argv narrows the exposure to same-user
+#     introspection during the brief perl invocation; it does not eliminate it.)
+#
+# FAIL CLOSED — a remediation tool that cannot read a file must never report it
+# clean. Every count distinguishes a genuine zero-match from a file it could not
+# read or scan; an unscannable file is surfaced and forces a non-zero exit so a
+# leaked-token copy can never hide behind a swallowed error.
 #
 set -euo pipefail
 
 readonly REDACTION_MARKER='[YNAB-TOKEN-REDACTED]'
 
 # Resolve the repo root from this script's location (bin/ -> repo root). Used by
-# --verify to scan the git-tracked tree.
+# --verify to scan the git-tracked tree. The YNAB_SCRUB_REPO_ROOT override (like
+# the surface overrides below) lets the test harness point the repo surface at a
+# sandbox to exercise the enumeration-failure path.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="${YNAB_SCRUB_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 # Leak-surface roots. Defaults are the real on-disk paths from the incident;
 # the YNAB_SCRUB_* overrides exist so the test harness can point at a sandbox.
@@ -46,6 +56,11 @@ DESKTOP_CONFIG="${YNAB_SCRUB_DESKTOP_CONFIG:-$HOME/Library/Application Support/C
 
 # The token, once read. Module-scoped so the perl helpers can reach it via env.
 TOKEN=""
+
+# Enumeration accumulators (filled by enumerate/_collect; subshell-local under
+# the process substitution that drives each surface loop).
+_ENUM_FILES=()
+_ENUM_STATUS=OK
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 
@@ -63,14 +78,32 @@ read_token() {
   TOKEN="$tok"
 }
 
-# Count occurrences of the token in one file. The token is passed to perl via
-# the environment (never argv), and matched literally via quotemeta.
+# Count occurrences of the token in one file. Prints the integer match count and
+# returns 0 on success. Returns non-zero (printing nothing) when the file cannot
+# be read or perl cannot scan it — this is FAIL CLOSED: a scan failure is NOT a
+# zero-match, and the caller must treat it as unresolved rather than clean. The
+# token is passed to perl via the environment (never argv) and matched literally
+# via quotemeta.
 count_in_file() {
-  YNAB_SCRUB_TOK="$TOKEN" perl -0777 -ne '
-    my $t = quotemeta($ENV{YNAB_SCRUB_TOK});
-    my $c = () = /$t/g;
-    print $c;
-  ' "$1" 2>/dev/null || printf '0'
+  local file="$1" out rc
+  # An unreadable file is a scan failure, not a clean file.
+  [ -r "$file" ] || return 2
+  if out="$(YNAB_SCRUB_TOK="$TOKEN" perl -0777 -ne '
+      my $t = quotemeta($ENV{YNAB_SCRUB_TOK});
+      my $c = () = /$t/g;
+      print $c;
+    ' "$file" 2>/dev/null)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 0 ] || return 2
+  # perl must have produced a pure integer; anything else means it didn't scan
+  # the file cleanly, so fail closed.
+  case "$out" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  printf '%s' "$out"
 }
 
 # Redact every occurrence in one file, in place. No backup file is written and
@@ -82,27 +115,68 @@ redact_in_file() {
   ' "$1"
 }
 
-# Emit the NUL-delimited list of files for a named surface. Missing roots emit
-# nothing (and the surface simply reports zero scanned).
+# Run a NUL-emitting file-list command ("$@"), append its output to _ENUM_FILES,
+# and flip _ENUM_STATUS to FAIL if the command exited non-zero (e.g. a `find`
+# permission error mid-walk). A FAIL surface is treated as UNSCANNABLE by the
+# callers — fail closed — instead of being silently reported clean. Only the
+# command's numeric exit code transits the temp file; the token is never
+# involved here.
+_collect() {
+  local rc_file rc f
+  rc_file="$(mktemp)"
+  while IFS= read -r -d '' f; do _ENUM_FILES+=("$f"); done \
+    < <( "$@" 2>/dev/null; printf '%s' "$?" >"$rc_file" )
+  rc="$(cat "$rc_file" 2>/dev/null || printf '1')"
+  rm -f "$rc_file"
+  [ "$rc" = 0 ] || _ENUM_STATUS=FAIL
+}
+
+# Enumerate the git-tracked repo tree. Fail closed if REPO_ROOT isn't a readable
+# git work tree or `git ls-files` errors — otherwise a git failure would be
+# swallowed and the surface would falsely report zero files scanned.
+_collect_repo() {
+  if [ "$(git -C "$REPO_ROOT" rev-parse --is-inside-work-tree 2>/dev/null)" != true ]; then
+    _ENUM_STATUS=FAIL
+    return 0
+  fi
+  local rc_file rc rel
+  rc_file="$(mktemp)"
+  while IFS= read -r -d '' rel; do _ENUM_FILES+=("$REPO_ROOT/$rel"); done \
+    < <( git -C "$REPO_ROOT" ls-files -z 2>/dev/null; printf '%s' "$?" >"$rc_file" )
+  rc="$(cat "$rc_file" 2>/dev/null || printf '1')"
+  rm -f "$rc_file"
+  [ "$rc" = 0 ] || _ENUM_STATUS=FAIL
+}
+
+# Emit a NUL-delimited record stream for a named surface: a LEADING status
+# record ('OK' or 'FAIL'), then one record per file. A missing root is a
+# legitimate empty surface (status OK, zero files). 'FAIL' means an existing
+# surface could not be fully enumerated — the caller fails closed.
 enumerate() {
+  _ENUM_FILES=()
+  _ENUM_STATUS=OK
   case "$1" in
-    sessions) [ -d "$SESSIONS_ROOT" ] && find "$SESSIONS_ROOT" -type f -name '*.log.md' -print0 2>/dev/null ;;
-    jsonl)    [ -d "$PROJECTS_ROOT" ] && find "$PROJECTS_ROOT" -type f -name '*.jsonl' -print0 2>/dev/null ;;
-    toolres)  [ -d "$PROJECTS_ROOT" ] && find "$PROJECTS_ROOT" -type f -path '*/tool-results/*.txt' -print0 2>/dev/null ;;
-    desktop)  [ -f "$DESKTOP_CONFIG" ] && printf '%s\0' "$DESKTOP_CONFIG" ;;
-    repo)     ( cd "$REPO_ROOT" && git ls-files -z 2>/dev/null ) \
-                | while IFS= read -r -d '' rel; do printf '%s\0' "$REPO_ROOT/$rel"; done ;;
+    sessions) [ -d "$SESSIONS_ROOT" ] && _collect find "$SESSIONS_ROOT" -type f -name '*.log.md' -print0 ;;
+    jsonl)    [ -d "$PROJECTS_ROOT" ] && _collect find "$PROJECTS_ROOT" -type f -name '*.jsonl' -print0 ;;
+    toolres)  [ -d "$PROJECTS_ROOT" ] && _collect find "$PROJECTS_ROOT" -type f -path '*/tool-results/*.txt' -print0 ;;
+    desktop)  [ -f "$DESKTOP_CONFIG" ] && _ENUM_FILES+=("$DESKTOP_CONFIG") ;;
+    repo)     _collect_repo ;;
   esac
+  printf '%s\0' "$_ENUM_STATUS"
+  # set -u-safe expansion: an empty array must expand to nothing, not error
+  # (older bash, incl. macOS 3.2, treats "${arr[@]}" on an empty array as unset).
+  local f
+  for f in ${_ENUM_FILES[@]+"${_ENUM_FILES[@]}"}; do printf '%s\0' "$f"; done
   return 0
 }
 
 do_scrub() {
   read_token 'Enter the OLD (leaked) YNAB token to scrub (input hidden): '
   printf 'Redacting every occurrence with %s\n\n' "$REDACTION_MARKER"
-  printf '%-30s %9s %9s\n' 'Surface' 'Scanned' 'Modified'
-  printf '%-30s %9s %9s\n' '------------------------------' '---------' '---------'
+  printf '%-30s %9s %9s %11s\n' 'Surface' 'Scanned' 'Modified' 'Unreadable'
+  printf '%-30s %9s %9s %11s\n' '------------------------------' '---------' '---------' '-----------'
 
-  local total_scanned=0 total_modified=0
+  local total_scanned=0 total_modified=0 total_unreadable=0
   local surfaces=(
     "sessions:session logs"
     "jsonl:project transcripts"
@@ -111,33 +185,54 @@ do_scrub() {
   )
   for entry in "${surfaces[@]}"; do
     local key="${entry%%:*}" label="${entry#*:}"
-    local scanned=0 modified=0 n
-    while IFS= read -r -d '' file; do
+    local scanned=0 modified=0 unreadable=0 first=1 n
+    while IFS= read -r -d '' rec; do
+      if [ "$first" = 1 ]; then
+        first=0
+        if [ "$rec" != OK ]; then
+          unreadable=$((unreadable + 1))
+          printf '  ! surface not fully enumerated (left unscrubbed): %s\n' "$label" >&2
+        fi
+        continue
+      fi
       scanned=$((scanned + 1))
-      n="$(count_in_file "$file")"
-      if [ "${n:-0}" -gt 0 ]; then
-        redact_in_file "$file"
-        modified=$((modified + 1))
+      if n="$(count_in_file "$rec")"; then
+        if [ "$n" -gt 0 ]; then
+          redact_in_file "$rec"
+          modified=$((modified + 1))
+        fi
+      else
+        # Could not read this file — do NOT count it clean; leave it unscrubbed.
+        unreadable=$((unreadable + 1))
+        printf '  ! could not read (left unscrubbed): %s\n' "$rec" >&2
       fi
     done < <(enumerate "$key")
-    printf '%-30s %9d %9d\n' "$label" "$scanned" "$modified"
+    printf '%-30s %9d %9d %11d\n' "$label" "$scanned" "$modified" "$unreadable"
     total_scanned=$((total_scanned + scanned))
     total_modified=$((total_modified + modified))
+    total_unreadable=$((total_unreadable + unreadable))
   done
 
-  printf '%-30s %9s %9s\n' '------------------------------' '---------' '---------'
-  printf '%-30s %9d %9d\n\n' 'TOTAL' "$total_scanned" "$total_modified"
+  printf '%-30s %9s %9s %11s\n' '------------------------------' '---------' '---------' '-----------'
+  printf '%-30s %9d %9d %11d\n\n' 'TOTAL' "$total_scanned" "$total_modified" "$total_unreadable"
   printf 'Done — %d file(s) modified across %d scanned.\n' "$total_modified" "$total_scanned"
+  if [ "$total_unreadable" -gt 0 ]; then
+    printf '\nWARNING — %d file(s)/surface(s) could not be read and were left\n' "$total_unreadable" >&2
+    printf 'UNSCRUBBED; the leaked token may still be present in them. Fix the\n' >&2
+    printf 'permissions (or re-run with sufficient privileges), scrub again, and\n' >&2
+    printf 'confirm with `%s --verify`.\n' "$(basename "$0")" >&2
+    return 1
+  fi
   printf 'Now run `%s --verify` to confirm zero remaining matches.\n' "$(basename "$0")"
 }
 
 do_verify() {
   read_token 'Enter the OLD (leaked) YNAB token to verify against (input hidden): '
   printf 'Scanning for any remaining occurrences...\n\n'
-  printf '%-30s %9s\n' 'Surface' 'Matches'
-  printf '%-30s %9s\n' '------------------------------' '---------'
+  printf '%-30s %9s %12s\n' 'Surface' 'Matches' 'Unscannable'
+  printf '%-30s %9s %12s\n' '------------------------------' '---------' '------------'
 
-  local total=0
+  local total=0 total_unscannable=0
   local surfaces=(
     "sessions:session logs"
     "jsonl:project transcripts"
@@ -147,19 +242,35 @@ do_verify() {
   )
   for entry in "${surfaces[@]}"; do
     local key="${entry%%:*}" label="${entry#*:}"
-    local matches=0 n
-    while IFS= read -r -d '' file; do
-      n="$(count_in_file "$file")"
-      matches=$((matches + ${n:-0}))
+    local matches=0 unscannable=0 first=1 n
+    while IFS= read -r -d '' rec; do
+      if [ "$first" = 1 ]; then
+        first=0
+        if [ "$rec" != OK ]; then
+          unscannable=$((unscannable + 1))
+          printf '  ! surface not fully enumerated: %s\n' "$label" >&2
+        fi
+        continue
+      fi
+      if n="$(count_in_file "$rec")"; then
+        matches=$((matches + n))
+      else
+        unscannable=$((unscannable + 1))
+        printf '  ! could not scan (treated as UNRESOLVED): %s\n' "$rec" >&2
+      fi
     done < <(enumerate "$key")
-    printf '%-30s %9d\n' "$label" "$matches"
+    printf '%-30s %9d %12d\n' "$label" "$matches" "$unscannable"
     total=$((total + matches))
+    total_unscannable=$((total_unscannable + unscannable))
   done
 
-  printf '%-30s %9s\n' '------------------------------' '---------'
-  printf '%-30s %9d\n\n' 'TOTAL' "$total"
-  if [ "$total" -gt 0 ]; then
-    printf 'FAIL — %d remaining match(es). Re-run the scrub.\n' "$total" >&2
+  printf '%-30s %9s %12s\n' '------------------------------' '---------' '------------'
+  printf '%-30s %9d %12d\n\n' 'TOTAL' "$total" "$total_unscannable"
+  if [ "$total" -gt 0 ] || [ "$total_unscannable" -gt 0 ]; then
+    [ "$total" -gt 0 ] && \
+      printf 'FAIL — %d remaining match(es). Re-run the scrub.\n' "$total" >&2
+    [ "$total_unscannable" -gt 0 ] && \
+      printf 'FAIL — %d file(s)/surface(s) could not be scanned; cannot certify them clean. Failing closed.\n' "$total_unscannable" >&2
     return 1
   fi
   printf 'OK — no remaining matches across any surface.\n'
