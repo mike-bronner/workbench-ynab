@@ -35,4 +35,4 @@ Mirrors the sibling workbench plugins (`workbench-core`, `workbench-bujo`, `work
 
 ## License
 
-See [issue tracker](https://github.com/mike-bronner/workbench-ynab/issues) — license selection is tracked as an early backlog item.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
