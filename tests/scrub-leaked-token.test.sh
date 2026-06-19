@@ -156,6 +156,19 @@ out="$(printf '%s\n' x \
 assert "exits 0 when no YNAB token field is present" "[ $rc -eq 0 ]"
 
 # ---------------------------------------------------------------------------
+echo "== --detect with a missing config (nothing to detect) =="
+# The migration hook (#77) may run before a Desktop config exists at all. An
+# absent config is a legitimate clean result, NOT a fail-closed case: there is
+# no file to misread, so the [ ! -f "$cfg" ] branch must report "nothing to
+# detect" and exit 0.
+MISSING_DESK="$SANDBOX/does-not-exist.json"
+out="$(printf '%s\n' x \
+  | YNAB_SCRUB_DESKTOP_CONFIG="$MISSING_DESK" bash "$SCRUB" --detect 2>&1)"; rc=$?
+assert "exits 0 when the Desktop config is absent" "[ $rc -eq 0 ]"
+assert "reports there is nothing to detect" \
+  "printf '%s' \"\$out\" | grep -qF 'Nothing to detect'"
+
+# ---------------------------------------------------------------------------
 echo "== --detect FAILS CLOSED on an unparseable config =="
 # A config that exists but is malformed JSON must NOT be reported clean — jq's
 # failure has to surface as a non-zero exit, not be swallowed into a false
@@ -206,6 +219,15 @@ else
   assert "scrub exits non-zero when a file can't be read" "[ $rc -ne 0 ]"
   assert "scrub reports a non-zero Unreadable count" \
     "printf '%s' \"\$out\" | grep -qiE 'unreadable|could not read'"
+  # Assert the Unreadable column BY VALUE, not just that some warning text exists
+  # — one unreadable file under the session-logs surface must show as exactly 1
+  # in that surface's row (Surface | Scanned | Modified | Unreadable), mirroring
+  # the per-surface integer assertions on the --verify side. A loose substring
+  # match would pass even on a miscount.
+  assert "scrub Unreadable column for session logs equals 1 (asserted by value)" \
+    "printf '%s' \"\$out\" | grep -E 'session logs +[0-9]+ +[0-9]+ +1\$' >/dev/null"
+  assert "scrub TOTAL Unreadable equals 1 (asserted by value)" \
+    "printf '%s' \"\$out\" | grep -E 'TOTAL +[0-9]+ +[0-9]+ +1\$' >/dev/null"
   assert "scrub never prints the token value even on failure" "! contains_token \"\$out\""
   chmod 644 "$UNREAD"
   assert "the unreadable file still holds the token (NOT silently skipped-clean)" \
@@ -227,6 +249,53 @@ assert "verify flags the repo tree unscannable, not zero-scanned-clean" \
   "printf '%s' \"\$out\" | grep -qiE 'unscannable|not fully enumerated|could not scan'"
 assert "verify never prints the token value on the repo-enumeration failure" "! contains_token \"\$out\""
 rm -rf "$NOTGIT"
+
+# ---------------------------------------------------------------------------
+# FAIL-CLOSED on an ENUMERATION failure of a REAL on-disk surface. The repo test
+# above only exercises _collect_repo (git ls-files); the three real surfaces
+# (sessions/jsonl/tool-results) walk via _collect + `find`. This drives `find`
+# itself to exit non-zero mid-walk — a chmod 000 sub-directory under $SESS it
+# can't descend into — so _collect flips _ENUM_STATUS=FAIL. That is distinct from
+# an unreadable *file* (count_in_file -> 2, tested above): here the surface can't
+# be fully enumerated, so it must be reported "not fully enumerated" and force a
+# non-zero exit, never reported clean. (chmod 000 is meaningless under root.)
+# ---------------------------------------------------------------------------
+echo "== --verify FAILS CLOSED when a real surface can't be fully enumerated =="
+if [ "$(id -u)" -eq 0 ]; then
+  echo "  (skipped: running as root — chmod 000 wouldn't block find)"
+else
+  LOCKED="$SESS/2026-06-12/locked"
+  mkdir -p "$LOCKED"
+  chmod 000 "$LOCKED"
+  out="$(run --verify)"; rc=$?
+  assert "verify exits non-zero when find can't fully enumerate the surface" "[ $rc -ne 0 ]"
+  assert "verify flags the session-logs surface not fully enumerated" \
+    "printf '%s' \"\$out\" | grep -qF 'not fully enumerated: session logs'"
+  assert "verify counts the un-enumerated surface as Unscannable (value = 1)" \
+    "printf '%s' \"\$out\" | grep -E 'session logs +0 +1\$' >/dev/null"
+  assert "verify never prints the token value on an enumeration failure" "! contains_token \"\$out\""
+  chmod 755 "$LOCKED"
+  rmdir "$LOCKED"
+fi
+
+# ---------------------------------------------------------------------------
+echo "== scrub FAILS CLOSED when a real surface can't be fully enumerated =="
+if [ "$(id -u)" -eq 0 ]; then
+  echo "  (skipped: running as root — chmod 000 wouldn't block find)"
+else
+  LOCKED="$SESS/2026-06-12/locked"
+  mkdir -p "$LOCKED"
+  chmod 000 "$LOCKED"
+  out="$(run '')"; rc=$?
+  assert "scrub exits non-zero when find can't fully enumerate the surface" "[ $rc -ne 0 ]"
+  assert "scrub flags the session-logs surface not fully enumerated (left unscrubbed)" \
+    "printf '%s' \"\$out\" | grep -qF 'not fully enumerated (left unscrubbed): session logs'"
+  assert "scrub counts the un-enumerated surface as Unreadable (value = 1)" \
+    "printf '%s' \"\$out\" | grep -E 'session logs +[0-9]+ +[0-9]+ +1\$' >/dev/null"
+  assert "scrub never prints the token value on an enumeration failure" "! contains_token \"\$out\""
+  chmod 755 "$LOCKED"
+  rmdir "$LOCKED"
+fi
 
 # ---------------------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
