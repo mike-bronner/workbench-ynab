@@ -1,0 +1,376 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mike-bronner/workbench-ynab/blob/main/assets/changeset-schema.json",
+  "title": "YNAB Write-Back Change-Set",
+  "description": "Canonical, versioned envelope describing a set of proposed, human-approvable changes to a YNAB budget ledger. A change-set is the single contract shared by propose, approve, dry-run, apply, and audit across Sprint 4 (M4) write-back. It produces no writes by itself and never moves real money (money_movement is always false). All monetary amounts are YNAB milliunits (integers; divide by 1000 for display).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generated_at",
+    "budget_id",
+    "budget_name",
+    "source",
+    "money_movement",
+    "operations"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semantic version of this change-set schema (MAJOR.MINOR.PATCH). See changeset-contract.md for the increment rules."
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 / RFC 3339 timestamp marking when the change-set was produced."
+    },
+    "budget_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "YNAB budget id the entire change-set targets. Every operation's budget_id must match this."
+    },
+    "budget_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable budget name, carried for display and audit."
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Provenance of the change-set: the review run id that produced it, or the literal \"manual\"."
+    },
+    "money_movement": {
+      "type": "boolean",
+      "const": false,
+      "description": "Hard invariant: a change-set NEVER moves real money. Always false. The M4-2 write-safety guardrail asserts this before any apply runs (categorize/allocate/dedup/reconcile are ledger-only)."
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ordered list of typed operations. Apply executes them in array order.",
+      "items": { "$ref": "#/$defs/operation" }
+    }
+  },
+  "$defs": {
+    "risk": {
+      "type": "string",
+      "enum": ["low", "medium", "destructive"],
+      "description": "Blast radius of the operation. destructive operations require extra confirmation at apply time."
+    },
+    "milliunits": {
+      "type": "integer",
+      "description": "Monetary amount in YNAB milliunits (integer; divide by 1000 for display, e.g. 250000 = $250.00). Never a pre-divided float."
+    },
+    "clearedStatus": {
+      "type": "string",
+      "enum": ["cleared", "uncleared", "reconciled"],
+      "description": "YNAB transaction cleared status."
+    },
+    "operation": {
+      "description": "A single typed operation. Discriminated on the `type` field; exactly one subtype schema matches.",
+      "oneOf": [
+        { "$ref": "#/$defs/categorizeOp" },
+        { "$ref": "#/$defs/allocateOp" },
+        { "$ref": "#/$defs/deleteDuplicateOp" },
+        { "$ref": "#/$defs/reconcileOp" }
+      ]
+    },
+    "categorizeOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Set or overwrite a transaction's category. Applied via ynab_update_transaction(s) (M4-6).",
+      "required": [
+        "id",
+        "type",
+        "budget_id",
+        "transaction_id",
+        "before",
+        "after",
+        "rationale",
+        "risk"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable per-operation id (UUID or deterministic key). Used for idempotent resume and audit."
+        },
+        "type": { "const": "categorize" },
+        "budget_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Budget id; must equal the envelope budget_id."
+        },
+        "transaction_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Target transaction whose category is being set."
+        },
+        "before": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Snapshot of the transaction's category before the change.",
+          "required": ["category_id"],
+          "properties": {
+            "category_id": {
+              "type": ["string", "null"],
+              "description": "Current category id, or null if the transaction is uncategorized."
+            },
+            "category_name": {
+              "type": ["string", "null"],
+              "description": "Current category name, or null if uncategorized."
+            }
+          }
+        },
+        "after": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Proposed category after the change.",
+          "required": ["category_id"],
+          "properties": {
+            "category_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Proposed category id."
+            },
+            "category_name": {
+              "type": "string",
+              "description": "Proposed category name (display only)."
+            }
+          }
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "description": "One-line human-readable reason, sourced from the review."
+        },
+        "risk": { "$ref": "#/$defs/risk" }
+      }
+    },
+    "allocateOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Set a category's budgeted amount for a given month. Applied via ynab_update_category (M4-7).",
+      "required": [
+        "id",
+        "type",
+        "budget_id",
+        "category_id",
+        "month",
+        "before",
+        "after",
+        "rationale",
+        "risk"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable per-operation id (UUID or deterministic key)."
+        },
+        "type": { "const": "allocate" },
+        "budget_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Budget id; must equal the envelope budget_id."
+        },
+        "category_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Target category whose budgeted amount is being set."
+        },
+        "month": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-01$",
+          "description": "Budget month as YNAB's first-of-month date, e.g. 2026-06-01."
+        },
+        "before": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Snapshot of the budgeted amount before the change.",
+          "required": ["budgeted"],
+          "properties": {
+            "budgeted": {
+              "$ref": "#/$defs/milliunits",
+              "description": "Current budgeted amount for the month, in milliunits (integer)."
+            }
+          }
+        },
+        "after": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Proposed budgeted amount after the change.",
+          "required": ["budgeted"],
+          "properties": {
+            "budgeted": {
+              "$ref": "#/$defs/milliunits",
+              "description": "Proposed budgeted amount for the month, in milliunits (integer)."
+            }
+          }
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "description": "One-line human-readable reason, sourced from the review."
+        },
+        "risk": { "$ref": "#/$defs/risk" }
+      }
+    },
+    "deleteDuplicateOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Remove a duplicate transaction. Applied via ynab_delete_transaction (M4-8). Always destructive.",
+      "required": [
+        "id",
+        "type",
+        "budget_id",
+        "transaction_id",
+        "before",
+        "after",
+        "rationale",
+        "risk"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable per-operation id (UUID or deterministic key)."
+        },
+        "type": { "const": "delete_duplicate" },
+        "budget_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Budget id; must equal the envelope budget_id."
+        },
+        "transaction_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The duplicate transaction to delete."
+        },
+        "before": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Snapshot of the duplicate transaction before deletion, for audit and undo reference.",
+          "required": ["amount", "date"],
+          "properties": {
+            "amount": {
+              "$ref": "#/$defs/milliunits",
+              "description": "Transaction amount in milliunits (integer; negative for outflow)."
+            },
+            "date": {
+              "type": "string",
+              "format": "date",
+              "description": "Transaction date (YYYY-MM-DD)."
+            },
+            "payee_name": {
+              "type": ["string", "null"],
+              "description": "Payee name, if any."
+            },
+            "category_name": {
+              "type": ["string", "null"],
+              "description": "Category name, if any."
+            },
+            "import_id": {
+              "type": ["string", "null"],
+              "description": "YNAB import_id used to confirm the duplicate, if any."
+            }
+          }
+        },
+        "after": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Proposed post-state: the transaction is removed from the ledger.",
+          "required": ["deleted"],
+          "properties": {
+            "deleted": {
+              "const": true,
+              "description": "Transaction removed from the ledger."
+            }
+          }
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "description": "One-line human-readable reason, sourced from the review."
+        },
+        "risk": {
+          "const": "destructive",
+          "description": "delete_duplicate is always destructive (irreversible removal)."
+        }
+      }
+    },
+    "reconcileOp": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Mark transactions cleared/reconciled and/or reconcile an account. Applied via ynab_reconcile_account plus ynab_update_transaction(s) (M4-9).",
+      "required": [
+        "id",
+        "type",
+        "budget_id",
+        "account_id",
+        "before",
+        "after",
+        "rationale",
+        "risk"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable per-operation id (UUID or deterministic key)."
+        },
+        "type": { "const": "reconcile" },
+        "budget_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Budget id; must equal the envelope budget_id."
+        },
+        "account_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Target account to reconcile."
+        },
+        "transaction_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Optional transactions to mark cleared/reconciled as part of this reconciliation."
+        },
+        "before": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Snapshot of the account/transaction state before reconciliation.",
+          "properties": {
+            "cleared_balance": {
+              "$ref": "#/$defs/milliunits",
+              "description": "Account cleared balance before reconciliation, in milliunits (integer)."
+            },
+            "reconciled_balance": {
+              "$ref": "#/$defs/milliunits",
+              "description": "Account reconciled balance before reconciliation, in milliunits (integer)."
+            },
+            "cleared": { "$ref": "#/$defs/clearedStatus" }
+          }
+        },
+        "after": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Proposed state after reconciliation.",
+          "properties": {
+            "reconciled_balance": {
+              "$ref": "#/$defs/milliunits",
+              "description": "Account reconciled balance after reconciliation, in milliunits (integer)."
+            },
+            "cleared": { "$ref": "#/$defs/clearedStatus" }
+          }
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "description": "One-line human-readable reason, sourced from the review."
+        },
+        "risk": { "$ref": "#/$defs/risk" }
+      }
+    }
+  }
+}

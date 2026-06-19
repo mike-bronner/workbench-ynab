@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-06-19T14:30:00Z",
+  "budget_id": "b1f2c3d4-1111-4a2b-9c3d-000000000001",
+  "budget_name": "Family Budget",
+  "source": "review-2026-06-19T14-00-00Z",
+  "money_movement": false,
+  "operations": [
+    {
+      "id": "op-allocate-0001",
+      "type": "allocate",
+      "budget_id": "b1f2c3d4-1111-4a2b-9c3d-000000000001",
+      "category_id": "c0000000-0000-4000-8000-0000000000c1",
+      "month": "2026-06-01",
+      "before": {
+        "budgeted": 0
+      },
+      "after": {
+        "budgeted": 250000
+      },
+      "rationale": "Ready-to-Assign surplus available; fund Groceries to its monthly target of $250.00.",
+      "risk": "low"
+    }
+  ]
+}
