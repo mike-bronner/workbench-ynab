@@ -282,8 +282,29 @@ do_detect() {
     printf 'No Claude Desktop config at:\n  %s\nNothing to detect.\n' "$cfg"
     return 0
   fi
-  local val
-  val="$(jq -r '.mcpServers.ynab.env.YNAB_ACCESS_TOKEN // empty' "$cfg" 2>/dev/null || true)"
+  # FAIL CLOSED: capture jq's exit status instead of swallowing it with `|| true`.
+  # A config that exists but cannot be parsed (malformed JSON, or jq missing/
+  # erroring) must NEVER be reported clean — that is the precise moment a still-
+  # plaintext token could slip past the migration command (#77) into connector
+  # removal. stderr stays suppressed because a jq parse error can echo a fragment
+  # of the offending config, which may contain the token. A non-zero jq exit is
+  # kept distinct from "valid JSON, key absent" (jq exits 0 with empty output),
+  # which is a legitimate clean result.
+  local val rc
+  if val="$(jq -r '.mcpServers.ynab.env.YNAB_ACCESS_TOKEN // empty' "$cfg" 2>/dev/null)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    printf '⚠️  UNPARSEABLE DESKTOP CONFIG — cannot certify it token-free\n' >&2
+    printf '    Location: %s\n' "$cfg" >&2
+    printf '    `jq` could not parse the config (malformed JSON, or jq is missing).\n' >&2
+    printf '    A remediation tool must never report a file it cannot read as clean,\n' >&2
+    printf '    so this fails closed. Inspect the config by hand, then re-run —\n' >&2
+    printf '    see docs/token-rotation.md.\n' >&2
+    return 1
+  fi
   if [ -z "$val" ] || [ "$val" = "$REDACTION_MARKER" ]; then
     printf 'No plaintext YNAB token in the Desktop config (good).\n'
     return 0

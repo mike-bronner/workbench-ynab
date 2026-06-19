@@ -156,6 +156,23 @@ out="$(printf '%s\n' x \
 assert "exits 0 when no YNAB token field is present" "[ $rc -eq 0 ]"
 
 # ---------------------------------------------------------------------------
+echo "== --detect FAILS CLOSED on an unparseable config =="
+# A config that exists but is malformed JSON must NOT be reported clean — jq's
+# failure has to surface as a non-zero exit, not be swallowed into a false
+# "no token (good)". This is the gate #77 invokes before removing the connector.
+BAD_DESK="$SANDBOX/malformed_config.json"
+printf '{"mcpServers": {"ynab": {"env": {"YNAB_ACCESS_TOKEN": "%s"\n' "$SYNTH_TOKEN" \
+  > "$BAD_DESK"   # truncated/unbalanced JSON — jq cannot parse it
+out="$(printf '%s\n' x \
+  | YNAB_SCRUB_DESKTOP_CONFIG="$BAD_DESK" bash "$SCRUB" --detect 2>&1)"; rc=$?
+assert "exits non-zero on a malformed config (fails closed)" "[ $rc -ne 0 ]"
+assert "does NOT falsely report the config clean" \
+  "! printf '%s' \"\$out\" | grep -qF 'No plaintext YNAB token'"
+assert "warns the config could not be parsed" \
+  "printf '%s' \"\$out\" | grep -qiE 'unparseable|could not parse|cannot certify'"
+assert "never prints the token value on the parse failure" "! contains_token \"\$out\""
+
+# ---------------------------------------------------------------------------
 # FAIL-CLOSED behaviour: a file/surface the tool cannot read or enumerate must
 # never be reported clean — it forces a non-zero exit so a leaked-token copy
 # can't hide behind a swallowed error. (chmod 000 is meaningless under root, so
