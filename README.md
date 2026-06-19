@@ -24,6 +24,10 @@ It turns a proven, hand-run weekly financial review into a first-class plugin: a
 
 First-time configuration is a one-time token paste. Run the `/workbench-ynab:setup` command (delivered in a later sprint) — it walks you through pasting your YNAB Personal Access Token into the macOS Keychain and verifies the vendored MCP launches. Nothing to install or configure by hand.
 
+## Persona & configuration
+
+The assistant has a default voice named **Hobbes** that you can rename. Optional settings live in `config.json` in the plugin data directory — **outside this repo, so they survive plugin updates** — never in the repo and never holding your token. See [`docs/persona.md`](docs/persona.md) for the persona asset, the `persona` config object (`name`, `voice_overrides`), and the loader contract.
+
 ## Privacy & safety
 
 - Your YNAB Personal Access Token is stored in the **macOS Keychain** — never in this repo, never in a config file, never logged.
