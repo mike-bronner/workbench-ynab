@@ -1,0 +1,80 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-06-19T14:30:00Z",
+  "budget_id": "b1f2c3d4-1111-4a2b-9c3d-000000000001",
+  "budget_name": "Family Budget",
+  "source": "manual",
+  "money_movement": false,
+  "operations": [
+    {
+      "id": "op-categorize-0001",
+      "type": "categorize",
+      "budget_id": "b1f2c3d4-1111-4a2b-9c3d-000000000001",
+      "transaction_id": "t0000000-0000-4000-8000-00000000a001",
+      "before": {
+        "category_id": null,
+        "category_name": null
+      },
+      "after": {
+        "category_id": "c0000000-0000-4000-8000-0000000000c1",
+        "category_name": "Groceries"
+      },
+      "rationale": "Whole Foods purchase matches the Groceries category by payee history.",
+      "risk": "low"
+    },
+    {
+      "id": "op-allocate-0001",
+      "type": "allocate",
+      "budget_id": "b1f2c3d4-1111-4a2b-9c3d-000000000001",
+      "category_id": "c0000000-0000-4000-8000-0000000000c1",
+      "month": "2026-06-01",
+      "before": {
+        "budgeted": 0
+      },
+      "after": {
+        "budgeted": 250000
+      },
+      "rationale": "Ready-to-Assign surplus available; fund Groceries to its monthly target of $250.00.",
+      "risk": "low"
+    },
+    {
+      "id": "op-delete-duplicate-0001",
+      "type": "delete_duplicate",
+      "budget_id": "b1f2c3d4-1111-4a2b-9c3d-000000000001",
+      "transaction_id": "t0000000-0000-4000-8000-00000000d002",
+      "before": {
+        "amount": -54990,
+        "date": "2026-06-12",
+        "payee_name": "Amazon",
+        "category_name": "Shopping",
+        "import_id": "YNAB:-54990:2026-06-12:1"
+      },
+      "after": {
+        "deleted": true
+      },
+      "rationale": "Exact duplicate of transaction t0000000-0000-4000-8000-00000000d001 (same amount, date, and import_id); safe to remove.",
+      "risk": "destructive"
+    },
+    {
+      "id": "op-reconcile-0001",
+      "type": "reconcile",
+      "budget_id": "b1f2c3d4-1111-4a2b-9c3d-000000000001",
+      "account_id": "a0000000-0000-4000-8000-00000000ac01",
+      "transaction_ids": [
+        "t0000000-0000-4000-8000-00000000r001",
+        "t0000000-0000-4000-8000-00000000r002"
+      ],
+      "before": {
+        "cleared_balance": 1200000,
+        "reconciled_balance": 1145010,
+        "cleared": "cleared"
+      },
+      "after": {
+        "reconciled_balance": 1200000,
+        "cleared": "reconciled"
+      },
+      "rationale": "Bank statement balance matches the cleared balance of $1,200.00; reconcile the checking account.",
+      "risk": "medium"
+    }
+  ]
+}
