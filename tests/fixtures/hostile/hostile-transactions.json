@@ -1,0 +1,99 @@
+{
+  "_fixture": "Hostile / adversarial YNAB transaction inputs (GAP-13 hostile-input handling, GAP-18 HTML-escape of YNAB strings). Every consumer that renders or processes YNAB strings — the HTML report, the classifier, the change-set emitter — must survive these without crashing, mis-rendering, or allowing injection. Amounts are integer milliunits.",
+  "data": {
+    "budget": {
+      "id": "budget-fixture-hostile",
+      "name": "Hostile <script>alert(1)</script> Budget",
+      "currency_format": {
+        "iso_code": "USD",
+        "decimal_digits": 2,
+        "decimal_separator": ".",
+        "group_separator": ",",
+        "currency_symbol": "$",
+        "symbol_first": true,
+        "display_symbol": true
+      },
+      "accounts": [
+        {
+          "id": "acct-hostile",
+          "name": "Account & <b>Co</b>",
+          "type": "checking",
+          "on_budget": true,
+          "closed": false,
+          "balance": 0,
+          "cleared_balance": 0,
+          "uncleared_balance": 0,
+          "deleted": false
+        }
+      ],
+      "transactions": [
+        {
+          "id": "txn-emoji-memo",
+          "date": "2026-06-10",
+          "amount": -1599,
+          "memo": "Coffee ☕️🥐 with the team 🎉 — émojis & ünïcôde",
+          "cleared": "cleared",
+          "approved": true,
+          "account_id": "acct-hostile",
+          "payee_id": null,
+          "category_id": null,
+          "transfer_account_id": null,
+          "deleted": false
+        },
+        {
+          "id": "txn-zero-amount",
+          "date": "2026-06-11",
+          "amount": 0,
+          "memo": "Zero-amount placeholder entry",
+          "cleared": "uncleared",
+          "approved": false,
+          "account_id": "acct-hostile",
+          "payee_id": null,
+          "category_id": null,
+          "transfer_account_id": null,
+          "deleted": false
+        },
+        {
+          "id": "txn-html-injection",
+          "date": "2026-06-12",
+          "amount": -100000,
+          "memo": "<img src=x onerror=alert('xss')> \"quoted\" & 'apostrophe'",
+          "cleared": "cleared",
+          "approved": true,
+          "account_id": "acct-hostile",
+          "payee_id": null,
+          "category_id": null,
+          "transfer_account_id": null,
+          "deleted": false
+        },
+        {
+          "id": "txn-null-fields",
+          "date": "2026-06-13",
+          "amount": -2500,
+          "memo": null,
+          "cleared": "cleared",
+          "approved": true,
+          "account_id": "acct-hostile",
+          "payee_id": null,
+          "category_id": null,
+          "transfer_account_id": null,
+          "deleted": false
+        },
+        {
+          "id": "txn-very-long-memo",
+          "date": "2026-06-14",
+          "amount": -99999999,
+          "memo": "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua ut enim ad minim veniam quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat duis aute irure dolor in reprehenderit",
+          "cleared": "cleared",
+          "approved": true,
+          "account_id": "acct-hostile",
+          "payee_id": null,
+          "category_id": null,
+          "transfer_account_id": null,
+          "deleted": false
+        }
+      ]
+    },
+    "server_knowledge": 7
+  }
+}
