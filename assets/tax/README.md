@@ -1,0 +1,107 @@
+# Tax profile
+
+The **tax profile** is the data-driven, shareable description of a taxpayer's
+filing situation that the workbench-ynab review skills use to produce a
+tax-aware report (Schedule C / A / 1 / SE awareness, medical-threshold tracking,
+quarterly estimated taxes).
+
+This directory holds the **schema and types** — the generic, shareable shape.
+It deliberately contains **no real taxpayer data**. A real taxpayer's numbers
+become one *instance* of this schema, stored outside the repo (see
+[Where the live profile lives](#where-the-live-profile-lives)).
+
+| File | Purpose |
+| --- | --- |
+| [`tax-profile.schema.json`](./tax-profile.schema.json) | Canonical JSON Schema (draft 2020-12). Source of truth for the shape. |
+| [`tax-profile.d.ts`](./tax-profile.d.ts) | TypeScript declaration (`TaxProfile` + supporting types) for the engine to import. Zero runtime overhead. |
+| [`tax-profile.example.json`](./tax-profile.example.json) | A valid instance built entirely from placeholder values. |
+
+## Generic and shareable — a locked decision
+
+Nothing in this schema, its defaults, or the bundled example may be specific to
+one user. Display names are placeholders (`"Business A"`); there are no real
+person, lender, bank, business, or account names or numbers anywhere. The
+owner's real numbers are migrated into a *config instance* (issue M3-5), never
+into the schema or any prompt.
+
+## Money units — dollars, not milliunits
+
+Every monetary amount in a tax profile is in **dollars**.
+
+The vendored YNAB MCP returns amounts in **milliunits** (1000 milliunits = $1).
+**Divide YNAB milliunits by 1000 to get dollars** before comparing them against
+anything in a tax profile. Conflating the two is a classic, expensive bug — the
+schema's `description` fields restate this on every dollar field.
+
+Rates (`thresholds.medicalAgiPercent`, `thresholds.seTaxRate`) are **fractions**,
+not dollars and not percentages: `0.075` means 7.5%.
+
+## Where the live profile lives
+
+The tax profile is read by the **skills**, never by the vendored third-party
+YNAB MCP (the MCP only receives the token and its package-native env from the
+launcher — it cannot read plugin config). The profile therefore lives alongside
+the plugin's other config **outside the repo**, so it survives plugin updates:
+
+```
+~/.claude/plugins/data/workbench-ynab-claude-workbench/tax-profile.json
+```
+
+This follows the same data-dir convention `workbench-core` uses — for example
+`hooks/mcp-memory.sh` there reads
+`~/.claude/plugins/data/workbench-core-claude-workbench/config.json` via `jq`.
+The tax profile is a sibling `tax-profile.json` in the workbench-ynab data dir.
+
+To create one, copy [`tax-profile.example.json`](./tax-profile.example.json) to
+that path and replace the placeholder values with your own:
+
+```sh
+mkdir -p ~/.claude/plugins/data/workbench-ynab-claude-workbench
+cp assets/tax/tax-profile.example.json \
+   ~/.claude/plugins/data/workbench-ynab-claude-workbench/tax-profile.json
+# then edit tax-profile.json with your real numbers — it stays on your machine,
+# outside this repo, and is never committed.
+```
+
+## Defaults and overrides
+
+The bundled **default US ruleset** (issue M3-3) supplies the standard
+deductions, thresholds, schedule-line data, and estimated-tax due dates. A live
+profile only needs to specify what differs: the `overrides` object is
+deep-merged **on top of** the defaults by the profile loader (M3-3), so users
+change individual values without restating the whole ruleset.
+
+## Shape overview
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schemaVersion` | string \| integer | Targets a schema version so migrations are detectable. **Required.** |
+| `filingStatus` | enum | `single` \| `mfj` \| `mfs` \| `hoh` \| `qw`. **Required.** |
+| `taxYear` | integer | The profile is year-aware. **Required.** |
+| `standardDeductionByYear` | object | `filingStatus → year → dollars`. |
+| `businessEntities[]` | array | Each has `id`, `displayName`, `schedule`, `scheduleLineMap` (inner shape owned by M3-2). |
+| `itemized` | object | Schedule A: `medical`, `salt` (with `saltCap`), `interest`, `charitable`. |
+| `adjustments` | object | Schedule 1: `seTaxHalfDeduction`, `studentLoanInterest`, `iraContributions`. |
+| `thresholds` | object | `medicalAgiPercent` (0.075), `seTaxRate` (0.153), `saltCap` (10000). |
+| `quarterlyEstimatedDueDates[]` | array | `{ quarter, month, day }` parts; Q4 falls in January of the following year. |
+| `overrides` | object | User-override layer merged over the default ruleset by M3-3. |
+
+The schema is the authoritative reference — see
+[`tax-profile.schema.json`](./tax-profile.schema.json) for every field's
+constraints and `description`.
+
+## Validating an instance
+
+The schema is JSON Schema **draft 2020-12**. Validate any instance against it
+with [`ajv`](https://ajv.js.org/) (or any draft-2020-12 validator):
+
+```sh
+npx ajv-cli@5 validate --spec=draft2020 \
+  -s assets/tax/tax-profile.schema.json \
+  -d assets/tax/tax-profile.example.json
+```
+
+A passing run exits `0` with no validation errors.
+
+> **Not tax advice.** This tool organizes financial data and surfaces
+> tax-relevant signals. It is not a substitute for professional tax advice.

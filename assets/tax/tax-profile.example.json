@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "1",
+  "filingStatus": "mfj",
+  "taxYear": 2025,
+  "standardDeductionByYear": {
+    "single": { "2024": 14600, "2025": 15000 },
+    "mfj": { "2024": 29200, "2025": 30000 },
+    "mfs": { "2024": 14600, "2025": 15000 },
+    "hoh": { "2024": 21900, "2025": 22500 },
+    "qw": { "2024": 29200, "2025": 30000 }
+  },
+  "businessEntities": [
+    {
+      "id": "biz-a",
+      "displayName": "Business A",
+      "schedule": "C",
+      "scheduleLineMap": {
+        "note": "Detailed shape is defined by issue M3-2; placeholder content only.",
+        "advertising": "Category Group Placeholder 1",
+        "officeExpense": "Category Group Placeholder 2"
+      }
+    }
+  ],
+  "itemized": {
+    "medical": {
+      "categoryGroups": ["Category Group Placeholder — Medical"]
+    },
+    "salt": {
+      "saltCap": 10000,
+      "categoryGroups": ["Category Group Placeholder — Taxes"]
+    },
+    "interest": {
+      "categoryGroups": ["Category Group Placeholder — Mortgage Interest"]
+    },
+    "charitable": {
+      "categoryGroups": ["Category Group Placeholder — Charity"]
+    }
+  },
+  "adjustments": {
+    "seTaxHalfDeduction": { "enabled": true },
+    "studentLoanInterest": { "amount": 0 },
+    "iraContributions": { "amount": 0 }
+  },
+  "thresholds": {
+    "medicalAgiPercent": 0.075,
+    "seTaxRate": 0.153,
+    "saltCap": 10000
+  },
+  "quarterlyEstimatedDueDates": [
+    { "quarter": 1, "month": 4, "day": 15 },
+    { "quarter": 2, "month": 6, "day": 15 },
+    { "quarter": 3, "month": 9, "day": 15 },
+    { "quarter": 4, "month": 1, "day": 15 }
+  ],
+  "overrides": {
+    "thresholds": {
+      "saltCap": 10000
+    }
+  }
+}
