@@ -12,6 +12,18 @@ It turns a proven, hand-run weekly financial review into a first-class plugin: a
 - **Propose → approve → apply** — surface categorizations, Ready-to-Assign allocations, duplicate fixes, and reconciliation as a proposed change-set you approve before anything is written.
 - **Never move money** — write-back is strictly ledger-only (categorize/allocate/dedup/reconcile). The plugin never initiates transfers or payments.
 
+## Prerequisites
+
+- **macOS** — setup stores your YNAB token in the macOS Keychain, and the launcher and vendored MCP run on macOS.
+- **System `node`** — the vendored YNAB MCP is a Node bundle launched by `bin/launcher.sh`; a system Node runtime must be on `PATH` (no `npx`-on-demand).
+- **`jq`** — used by the launcher and setup tooling to read and validate JSON.
+- **`security(1)`** — the macOS Keychain CLI; stores and retrieves the YNAB Personal Access Token.
+- **`workbench-core@claude-workbench`** — shared memory vault, session lifecycle, and plugin infrastructure.
+
+## Setup
+
+First-time configuration is a one-time token paste. Run the `/workbench-ynab:setup` command (delivered in a later sprint) — it walks you through pasting your YNAB Personal Access Token into the macOS Keychain and verifies the vendored MCP launches. Nothing to install or configure by hand.
+
 ## Privacy & safety
 
 - Your YNAB Personal Access Token is stored in the **macOS Keychain** — never in this repo, never in a config file, never logged.
