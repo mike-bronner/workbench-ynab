@@ -88,6 +88,19 @@ assert_contains "error names the missing path"   "$err" "config not found"
 assert_contains "error points at /workbench-ynab:setup" "$err" "/workbench-ynab:setup"
 assert_empty    "_cfg returns empty when config file is missing" "$(_cfg '.budget.name')"
 
+echo "jq absent — guard errors, names jq, non-zero exit:"
+# Config file present, so the guard advances past the file check to the jq check.
+# Run with PATH pointed at an empty dir so `command -v jq` fails — the command
+# substitution subshell confines the PATH change, leaving the rest of the suite
+# untouched. _require_config relies only on bash builtins, so it still runs.
+YNAB_CONFIG_FILE="$FIXTURE"
+EMPTY_BIN="$SANDBOX/empty-bin"
+mkdir -p "$EMPTY_BIN"
+err="$(PATH="$EMPTY_BIN" _require_config 2>&1)"; rc=$?
+assert_eq       "_require_config exit code is non-zero when jq absent" "1" "$rc"
+assert_contains "error names jq as required"            "$err" "jq is required"
+assert_contains "error tells the user to install jq"    "$err" "install jq"
+
 echo "shipped example config reads through the loader:"
 if [ -f "$EXAMPLE" ]; then
   YNAB_CONFIG_FILE="$EXAMPLE"

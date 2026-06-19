@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
   "budget": {
-    "name": "Personal 2024",
+    "name": "<YOUR_BUDGET_NAME>",
     "id": null
   },
   "business": {
-    "name": "GeneaLabs",
-    "accounts": ["GeneaLabs Checking"],
+    "name": "<YOUR_BUSINESS_NAME>",
+    "accounts": ["<YOUR_BUSINESS_CHECKING_ACCOUNT>"],
     "category_group": "Business Expenses",
     "expense_categories": ["Software", "Contractors", "Office", "Hosting"]
   },
@@ -36,7 +36,7 @@
     }
   ],
   "persona": {
-    "name": "Hobbes",
+    "name": "<PERSONA_NAME>",
     "voice_overrides": null
   },
   "report": {
