@@ -3,7 +3,7 @@
 # verify-bundle.sh — integrity check for the vendored YNAB MCP artifact.
 #
 # Asserts that the committed bundle still matches the provenance recorded in
-# vendored.json and that the entrypoint shim is intact and executable. This is
+# vendored.json and that the entrypoint shim is present and executable. This is
 # the regression guard for the vendored artifact: the bundle is the FROZEN copy
 # of record, so any hand-edit (or a marker that drifts from the file) must fail
 # loudly here.
