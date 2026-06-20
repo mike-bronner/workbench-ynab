@@ -83,7 +83,7 @@ done
 
 # AC: a Schedule SE record covering the SE tax line at the 15.3% rate.
 assert_jq "schedSE present, schedule SE, category==tax, household-level" \
-  'any(.lines[]; .id=="schedSE" and .schedule=="SE" and .category=="tax" and .appliesToBusinessEntities==false)'
+  'any(.lines[]; .id=="schedSE" and .schedule=="SE" and .category=="tax" and (.lineLabel|length>0) and (.description|length>0) and .appliesToBusinessEntities==false)'
 assert_jq "schedSE carries the 15.3% rate" \
   'any(.lines[]; .id=="schedSE" and .rate==0.153)'
 
