@@ -37,11 +37,15 @@
 # WHY JSONL (one JSON object per line) and NOT a single growing JSON array
 #   Append-only is trivial and crash-safe with JSONL: a new record is one
 #   `>>` of a newline-terminated line — no read, no parse, no rewrite of what is
-#   already on disk, and a process killed mid-write can at worst leave one
-#   trailing partial line that readers skip. A single JSON array would force a
-#   read-modify-write of the whole file on every append (O(n) and not crash-safe:
-#   a truncated rewrite loses the entire history). Append-only integrity is the
-#   whole point of an audit log, so JSONL is the correct shape.
+#   already on disk. Because the writer always newline-terminates a complete
+#   record, a process killed mid-append can at worst leave one partial,
+#   UNTERMINATED trailing line — which the read helpers skip, so every complete
+#   record before it still reads back after a crash. (A malformed line in the
+#   BODY, by contrast, is corruption the readers surface loudly rather than
+#   silently swallow — see _audit_jsonl_parse_program.) A single JSON array would
+#   force a read-modify-write of the whole file on every append (O(n) and not
+#   crash-safe: a truncated rewrite loses the entire history). Append-only
+#   integrity is the whole point of an audit log, so JSONL is the correct shape.
 #
 # THE WRITER CONTRACT — _audit_append <operation_json> <result_json> <dry_run>
 #   operation_json  The change-set operation (see assets/changeset-schema.json):
@@ -121,6 +125,26 @@ def fixmu:
 JQ
 }
 
+# _audit_jsonl_parse_program
+#   Echo the jq `parse_jsonl` definition: split slurped raw input (`jq -R -s`) into
+#   lines and parse each as one JSON record, emitting a stream of record objects.
+#   Crash tolerance: the writer always newline-terminates a complete record, so an
+#   append killed mid-write can only ever leave a partial, UNTERMINATED final line.
+#   `split("\n")` puts that fragment — or the empty string after a clean trailing
+#   newline — in the LAST element, which is parsed leniently (`fromjson?` → skipped
+#   on failure). Every BODY line is parsed strictly: a malformed line there is
+#   corruption an audit trail must surface, not silently swallow, so it errors the
+#   read. Requires `jq -R -s` (raw input, slurped).
+_audit_jsonl_parse_program() {
+  cat <<'JQ'
+def parse_jsonl:
+  split("\n") as $lines
+  | ($lines | length) as $n
+  | range(0; $n) as $i
+  | if $i == $n - 1 then ($lines[$i] | fromjson?) else ($lines[$i] | fromjson) end;
+JQ
+}
+
 # --- writer -----------------------------------------------------------------
 
 # _audit_append <operation_json> <result_json> <dry_run>
@@ -191,8 +215,9 @@ _audit_append() {
 #   Print the last N records (default 10) from the CURRENT month's file, with
 #   milliunit amounts divided by 1000 for display, to STDOUT. Output is JSONL
 #   (one JSON object per line), not a JSON array — a caller wanting an array can
-#   `jq -s`. Diagnostics (e.g. no file yet, or a jq format failure) go to STDERR;
-#   absence is not an error.
+#   `jq -s`. A partial trailing line (from a crash mid-append) is skipped; a
+#   malformed BODY line fails the read. Diagnostics (e.g. no file yet, or a
+#   body-corruption failure) go to STDERR; absence is not an error.
 _audit_read_last() {
   local n="${1:-10}" file
   file="$(_audit_file)"
@@ -200,11 +225,15 @@ _audit_read_last() {
     echo "audit-log: no audit file for $(_audit_month) at $file" 1>&2
     return 0
   fi
-  # A jq failure (e.g. a corrupt line) also carries the `audit-log:` prefix every
-  # other error path uses — jq's own detail still reaches STDERR. The pipeline's
-  # exit status is jq's, so `if !` keys on the format step.
-  if ! tail -n "$n" "$file" | jq "$(_audit_fixmu_program)
-.before |= fixmu | .after |= fixmu"; then
+  # Slurp the last N lines as raw text (`-R -s`) and parse line-by-line via
+  # parse_jsonl so a malformed TRAILING line — the most a crash mid-append can
+  # leave — is skipped while every complete record still reads back. A malformed
+  # BODY line, by contrast, makes jq exit non-zero; the pipeline's exit status is
+  # jq's, so `if !` keys on it and adds the `audit-log:` prefix every other error
+  # path uses (jq's own detail still reaches STDERR).
+  if ! tail -n "$n" "$file" | jq -R -s "$(_audit_fixmu_program)
+$(_audit_jsonl_parse_program)
+parse_jsonl | .before |= fixmu | .after |= fixmu"; then
     echo "audit-log: failed to format records from $file" 1>&2
     return 1
   fi
@@ -214,7 +243,9 @@ _audit_read_last() {
 #   Print every record whose run_id matches, across ALL monthly files in the
 #   audit dir (chronological order), with milliunit amounts divided by 1000 for
 #   display, to STDOUT. Output is JSONL (one JSON object per line), not a JSON
-#   array — a caller wanting an array can `jq -s`. Diagnostics go to STDERR.
+#   array — a caller wanting an array can `jq -s`. A partial trailing line (from a
+#   crash mid-append) is skipped; a malformed BODY line fails the read.
+#   Diagnostics go to STDERR.
 _audit_read_run() {
   local rid="${1:-}"
   if [ -z "$rid" ]; then
@@ -240,11 +271,15 @@ _audit_read_run() {
     return 0
   fi
 
-  # A jq failure (e.g. a corrupt line) also carries the `audit-log:` prefix every
-  # other error path uses — jq's own detail still reaches STDERR. The pipeline's
-  # exit status is jq's, so `if !` keys on the format step.
-  if ! cat "${files[@]}" | jq --arg rid "$rid" "$(_audit_fixmu_program)
-select(.run_id == \$rid) | .before |= fixmu | .after |= fixmu"; then
+  # Slurp every monthly file as raw text (`-R -s`) and parse via parse_jsonl so a
+  # malformed TRAILING line — only ever the current month's, the one file still
+  # being appended to — is skipped while every complete record still reads back. A
+  # malformed BODY line makes jq exit non-zero; the pipeline's exit status is jq's,
+  # so `if !` keys on it and adds the `audit-log:` prefix (jq's detail still reaches
+  # STDERR).
+  if ! cat "${files[@]}" | jq -R -s --arg rid "$rid" "$(_audit_fixmu_program)
+$(_audit_jsonl_parse_program)
+parse_jsonl | select(.run_id == \$rid) | .before |= fixmu | .after |= fixmu"; then
     echo "audit-log: failed to format records from $dir" 1>&2
     return 1
   fi

@@ -217,6 +217,47 @@ assert_jq "delete read via run-C: before.amount shown as -54.99 (÷1000)" "$DEL_
 assert_jq "delete read via run-C: after.amount shown as 12.34 (÷1000)"   "$DEL_RUN" '.after.amount == 12.34'
 
 # ---------------------------------------------------------------------------
+# Crash recovery (the JSONL crash-safety claim): the writer always newline-
+# terminates a complete record, so an append killed mid-write can only leave one
+# partial, UNTERMINATED trailing line. The read helpers must SKIP that fragment and
+# still emit every complete record before it. A malformed line in the BODY, by
+# contrast, is corruption an audit trail must surface, so it still fails the read.
+echo "crash recovery: readers skip a partial TRAILING line, keep the good records:"
+export YNAB_AUDIT_DIR="$SANDBOX/partial"
+export YNAB_AUDIT_MONTH="2026-06"
+export YNAB_AUDIT_TIMESTAMP="2026-06-15T17:00:00Z"
+_audit_append "$CATEGORIZE_OP" "$CATEGORIZE_RES" false   # one good record (run-A)
+PFILE="$YNAB_AUDIT_DIR/audit-2026-06.jsonl"
+# Simulate a crash mid-append: a partial, unterminated line (no newline).
+printf '%s' '{"operation_id":"op-truncat' >> "$PFILE"
+
+PL_OUT="$(_audit_read_last 10 2>/dev/null)"; rc=$?
+assert_eq "read_last exits 0 despite a partial trailing line"        "0" "$rc"
+assert_jq "read_last still emits the good record"                    "$PL_OUT" '.operation_id == "op-cat-1"'
+assert_eq "read_last emits exactly the one good record"              "1" "$(printf '%s' "$PL_OUT" | jq -s 'length')"
+assert_eq "read_last drops the partial line (no op-truncat record)"  "0" \
+  "$(printf '%s' "$PL_OUT" | jq -s 'map(select(.operation_id == "op-truncat")) | length')"
+
+PR_OUT="$(_audit_read_run run-A 2>/dev/null)"; rc=$?
+assert_eq "read_run exits 0 despite a partial trailing line"         "0" "$rc"
+assert_jq "read_run still emits the good record"                     "$PR_OUT" '.operation_id == "op-cat-1"'
+
+# A malformed line in the BODY (terminated → not the trailing fragment) is
+# corruption: the read must FAIL loudly with the audit-log: prefix, not skip it.
+echo "crash recovery: a malformed BODY line fails the read (corruption surfaced):"
+export YNAB_AUDIT_DIR="$SANDBOX/corrupt-body"
+export YNAB_AUDIT_MONTH="2026-06"
+export YNAB_AUDIT_TIMESTAMP="2026-06-15T17:05:00Z"
+_audit_append "$CATEGORIZE_OP" "$CATEGORIZE_RES" false   # good record (becomes a BODY line)
+CFILE="$YNAB_AUDIT_DIR/audit-2026-06.jsonl"
+printf '%s\n' 'not-json-corruption-in-the-body' >> "$CFILE"   # terminated → a BODY line
+_audit_append "$ALLOCATE_OP" "$ALLOCATE_RES" false       # another good record after it
+_audit_read_last 10 >/dev/null 2>&1; rc=$?
+assert_eq "read_last FAILS on a malformed body line (exit 1)"        "1" "$rc"
+cb_err="$(_audit_read_last 10 2>&1 1>/dev/null)"
+assert_contains "body-corruption diagnostic names audit-log on STDERR" "$cb_err" "audit-log:"
+
+# ---------------------------------------------------------------------------
 echo "diagnostics go to STDERR, never STDOUT; invalid JSON fails cleanly:"
 export YNAB_AUDIT_DIR="$SANDBOX/p6"
 export YNAB_AUDIT_MONTH="2026-06"

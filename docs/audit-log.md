@@ -36,12 +36,17 @@ world-readable by default.
 | | JSONL (append one line) | One growing JSON array |
 |---|---|---|
 | Append cost | `>>` one line — no read, no parse | read-modify-**write** the whole file (O(n)) |
-| Crash safety | a kill mid-write leaves at most one partial trailing line readers skip | a truncated rewrite can lose the **entire** history |
+| Crash safety | a kill mid-write leaves at most one partial **trailing** line, which the readers skip — every complete record before it still reads back | a truncated rewrite can lose the **entire** history |
 | Rewrites existing data? | **never** | every append |
 
 Append-only integrity is the entire point of an audit log, so JSONL is the
 correct shape. The writer only ever `>>`-appends — it never rewrites,
-truncates, or seeks.
+truncates, or seeks. Because each complete record is newline-terminated, the
+only thing a crash mid-append can leave is one **unterminated trailing** line;
+the read helpers skip exactly that line (see [Reading the log](#reading-the-log))
+and emit every record before it. A malformed line in the **body** is a
+different matter — corruption an audit trail must not silently swallow — so the
+readers surface it loudly instead.
 
 ## The writer — `_audit_append <operation_json> <result_json> <dry_run>`
 
@@ -100,9 +105,12 @@ bash bin/audit-log.sh run run-A
 ```
 
 Both helpers print **JSONL** (one JSON object per line), not a JSON array — a
-caller wanting an array can pipe through `jq -s`. A jq-level format failure (e.g.
-a corrupt line) is reported on `STDERR` with the `audit-log:` prefix, alongside
-jq's own detail.
+caller wanting an array can pipe through `jq -s`. They tolerate a crash:
+a partial, unterminated **trailing** line (all a kill mid-append can leave) is
+**skipped**, and every complete record before it is still emitted. A malformed
+line in the **body** — interior corruption, not a crash artifact — is instead
+reported on `STDERR` with the `audit-log:` prefix (alongside jq's own detail)
+and fails the read, so the corruption is never silently swallowed.
 
 The raw log keeps milliunit integers; only the read path divides by 1000, so the
 on-disk record stays the exact value that was applied.
