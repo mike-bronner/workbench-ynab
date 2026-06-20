@@ -1,0 +1,176 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/mike-bronner/workbench-ynab/assets/config.schema.json",
+  "title": "workbench-ynab config.json",
+  "description": "User configuration for the workbench-ynab plugin. Lives OUTSIDE the repo at $HOME/.claude/plugins/data/workbench-ynab-claude-workbench/config.json so it survives plugin updates. Read by plugin SKILLS and commands via bin/config.sh — never by the vendored MCP launcher. All tax logic is data-driven: any user's situation is one config instance, never a schema constant.",
+  "type": "object",
+  "required": ["schema_version", "budget", "tax_profile", "persona", "report"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Config schema version, for forward migration. Increment when a breaking change to this shape ships; the loader/setup can then migrate older files."
+    },
+    "budget": {
+      "type": "object",
+      "description": "The target YNAB budget to review. Replaces the prototype's hardcoded budget name.",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Human-readable budget name as shown in YNAB. Required."
+        },
+        "id": {
+          "type": ["string", "null"],
+          "description": "Optional YNAB budget id (UUID). When null, the budget is resolved by name. Optional."
+        }
+      }
+    },
+    "business": {
+      "type": "object",
+      "description": "Optional side-business configuration. Replaces the prototype's hardcoded business name, business checking account, and expense categories. Omit entirely if the user has no business.",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Business display name, used in report headings and Schedule C context."
+        },
+        "accounts": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Names of the YNAB accounts that belong to the business (e.g. a business checking account)."
+        },
+        "category_group": {
+          "type": "string",
+          "description": "Name of the YNAB category group that holds business expense categories."
+        },
+        "expense_categories": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Names of the YNAB categories treated as deductible business expenses."
+        }
+      }
+    },
+    "tax_profile": {
+      "type": "object",
+      "description": "Data-driven tax profile. Holds only generic tax parameters — filing status, public IRS amounts/rates, due dates, and which schedules apply. No personal income figures, account ids, or names. The canonical, deeply-validated tax sub-schema is owned by the Sprint 2 tax engine (issues #20/#21/#22); this envelope defines the top-level shape the loader and setup rely on.",
+      "additionalProperties": true,
+      "required": ["filing_status", "schedules"],
+      "properties": {
+        "filing_status": {
+          "type": "string",
+          "enum": ["single", "married_filing_jointly", "married_filing_separately", "head_of_household", "qualifying_surviving_spouse"],
+          "description": "IRS filing status. Drives standard-deduction and bracket selection downstream."
+        },
+        "standard_deduction": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Standard deduction amount for the filing status and tax year. A PUBLIC IRS figure (not a personal amount); the user verifies it for the current year."
+        },
+        "medical_agi_threshold_pct": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Fraction of AGI above which unreimbursed medical expenses become deductible on Schedule A (e.g. 0.075 for 7.5%). Public IRS rule."
+        },
+        "se_tax_rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Self-employment tax rate applied to net SE earnings (e.g. 0.153 for 15.3%). Public IRS rule."
+        },
+        "quarterly_due_dates": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-1][0-9]-[0-3][0-9]$"
+          },
+          "description": "Estimated-tax quarterly due dates as MM-DD strings (year-agnostic; the active year is resolved at runtime)."
+        },
+        "schedules": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["C", "A", "SE", "1"]
+          },
+          "minItems": 1,
+          "description": "Which IRS schedules apply to this profile. Required and non-empty."
+        }
+      }
+    },
+    "mapping_rules": {
+      "type": "array",
+      "description": "Payee/category to tax-line mapping rules, expressed as DATA (not code). Each rule matches transactions and assigns a schedule/tax-line. The full matching engine and heuristics are owned by the Sprint 2 classifier (issue #23); this envelope defines the array shape the loader exposes.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["match"],
+        "properties": {
+          "match": {
+            "type": "object",
+            "description": "Match criteria. Any combination of the keys below; all present keys must match.",
+            "additionalProperties": true,
+            "properties": {
+              "payee_contains": {
+                "type": "string",
+                "description": "Case-insensitive substring matched against the transaction payee."
+              },
+              "category": {
+                "type": "string",
+                "description": "Exact YNAB category name to match."
+              },
+              "category_group": {
+                "type": "string",
+                "description": "Exact YNAB category group name to match."
+              }
+            }
+          },
+          "schedule": {
+            "type": "string",
+            "enum": ["C", "A", "SE", "1"],
+            "description": "Schedule this rule maps matched transactions onto."
+          },
+          "tax_line": {
+            "type": "string",
+            "description": "Human-readable tax line / category the matched transactions roll up into."
+          }
+        }
+      }
+    },
+    "persona": {
+      "type": "object",
+      "description": "The financial-review persona. The name is a CONFIG FIELD, not a constant: the default voice is supplied by the persona skill (issue #36), and the user may rename it here.",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Display name of the review persona. When omitted, the persona skill applies its shipped default name."
+        },
+        "voice_overrides": {
+          "type": ["object", "null"],
+          "description": "Optional per-user voice/tone overrides for the persona. Null or omitted to use the shipped voice.",
+          "additionalProperties": true
+        }
+      }
+    },
+    "report": {
+      "type": "object",
+      "description": "Report output configuration.",
+      "additionalProperties": false,
+      "required": ["output_dir"],
+      "properties": {
+        "output_dir": {
+          "type": "string",
+          "description": "Directory where generated HTML reports are written. Supports ~ and environment-variable expansion at use time."
+        },
+        "template_path": {
+          "type": ["string", "null"],
+          "description": "Path to the frozen HTML report template. When null, the plugin's bundled template under assets/ is used. The bundled template is frozen in Sprint 3 (issue #42)."
+        }
+      }
+    }
+  }
+}
