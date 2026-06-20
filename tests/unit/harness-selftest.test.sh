@@ -15,6 +15,7 @@ source "$ROOT/tests/lib/assert.sh"
 test_assert_helpers_work() {
   assert_eq "abc" "abc"
   assert_contains "hello world" "world"
+  assert_exact_line "$(printf 'alpha\nbeta\ngamma')" "beta"
   assert_file_exists "$ROOT/scripts/test.sh"
   assert_dir_exists "$ROOT/tests"
 }
@@ -26,6 +27,9 @@ test_assert_helpers_work() {
 test_failing_assertions_are_caught() {
   if (assert_eq "a" "b") 2>/dev/null; then fail "assert_eq passed on unequal values"; fi
   if (assert_contains "abc" "z") 2>/dev/null; then fail "assert_contains passed on a missing needle"; fi
+  # The whole point of assert_exact_line: a substring-only match must NOT pass.
+  if (assert_exact_line "ynab_list_budgets_v2" "ynab_list_budgets") 2>/dev/null; then fail "assert_exact_line passed on a substring-only match"; fi
+  if (assert_exact_line "$(printf 'alpha\ngamma')" "beta") 2>/dev/null; then fail "assert_exact_line passed on a missing line"; fi
   if (assert_file_exists "$ROOT/no/such/file") 2>/dev/null; then fail "assert_file_exists passed on a missing path"; fi
   if (assert_file_exists "$ROOT/tests") 2>/dev/null; then fail "assert_file_exists passed on a directory"; fi
   if (assert_dir_exists "$ROOT/scripts/test.sh") 2>/dev/null; then fail "assert_dir_exists passed on a regular file"; fi

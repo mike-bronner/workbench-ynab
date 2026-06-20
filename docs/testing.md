@@ -106,6 +106,8 @@ run_tests          # discovers every test_* function, runs each, reports ✓/✗
 ```
 
 `tests/lib/assert.sh` provides `assert_eq`, `assert_contains`,
+`assert_exact_line` (a **whole newline-bounded line** must match, not just a
+substring — for set-membership over a newline-separated list),
 `assert_file_exists` (a **regular file**, not a directory), `assert_dir_exists`,
 `assert_json_valid`, `fail`, and the `run_tests` runner. A failed assertion (or
 any non-zero command under `set -e`) fails that test; `run_tests` exits non-zero

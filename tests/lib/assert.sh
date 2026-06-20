@@ -40,6 +40,20 @@ assert_contains() {
   esac
 }
 
+# assert_exact_line <haystack> <line> [message] — <line> must appear as a WHOLE
+# newline-bounded line in <haystack> (exact match), not merely as a substring.
+# Use for set-membership over a newline-separated list (e.g. a tool-name list),
+# where assert_contains's substring match would let `ynab_list_budgets_v2`
+# satisfy a `ynab_list_budgets` check even if the original were removed.
+assert_exact_line() {
+  if printf '%s\n' "$1" | grep -qxF -- "$2"; then
+    :
+  else
+    printf '  assert_exact_line failed: [%s] has no line exactly [%s]%s\n' "$1" "$2" "${3:+ — $3}" >&2
+    return 1
+  fi
+}
+
 # assert_file_exists <path> — a regular file must exist (not a directory).
 assert_file_exists() {
   if [ ! -f "$1" ]; then

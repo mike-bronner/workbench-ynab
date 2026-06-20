@@ -62,20 +62,26 @@ TOOLS_LIST_REQ='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
 FAILURE_EVIDENCE="$ROOT/tests/integration/offline-boot-failure.txt"
 
 # --- node_modules check (must hold BEFORE we launch) ------------------------
-# Walk the Node module-resolution path from the bundle's directory up to the
-# repo root, reporting the first `node_modules` found. Beyond the root is the
-# checkout host's business and not the repo's to assert; within the repo, ANY
-# node_modules on this chain would let a non-self-contained bundle resolve and
-# turn a green boot into a lie.
+# Walk the FULL Node module-resolution path from the bundle's directory up to
+# the filesystem root, reporting the first `node_modules` found. Node's CommonJS
+# resolution consults a `node_modules` in EVERY ancestor directory up to `/`, so
+# one above the repo root (a parent dir, $HOME, ...) is just as capable of
+# letting a non-self-contained bundle resolve a missing dep and turn a green
+# boot into a lie. AC #2 requires NONE anywhere on the resolution path, so the
+# walk does NOT stop at the repo root — it terminates only when `dirname` stops
+# changing (i.e. at `/`). That fails exactly when the proof could be compromised,
+# which is what AC #2 wants. ($NODE_PATH and $HOME/.node_modules are separate,
+# non-standard resolution inputs and are out of scope for this check.)
 _resolution_node_modules() {
-  local d="$ROOT/vendor/ynab-mcp"
+  local d="$ROOT/vendor/ynab-mcp" parent
   while :; do
     if [ -d "$d/node_modules" ]; then
       printf '%s\n' "$d/node_modules"
       return 0
     fi
-    [ "$d" = "$ROOT" ] && break
-    d="$(dirname "$d")"
+    parent="$(dirname "$d")"
+    [ "$parent" = "$d" ] && break   # reached `/` — dirname no longer changes
+    d="$parent"
   done
   return 0
 }
@@ -85,8 +91,11 @@ NM_VIOLATION="$(_resolution_node_modules)"
 INPUT_FILE="$(mktemp)"
 STDOUT_CAP="$(mktemp)"
 STDERR_CAP="$(mktemp)"
-TIMEOUT_MARKER="$(mktemp)"
-rm -f "$TIMEOUT_MARKER"
+# Timeout marker: a path DERIVED from an already-unique mktemp'd file, never
+# pre-created. The killer writes it iff the timeout fires, so its mere existence
+# is the single source of truth for "timed out" — there is no mktemp-then-delete
+# window in which the path could be reused (the TOCTOU the security pass flagged).
+TIMEOUT_MARKER="$STDOUT_CAP.timedout"
 trap 'rm -f "$INPUT_FILE" "$STDOUT_CAP" "$STDERR_CAP" "$TIMEOUT_MARKER"' EXIT
 
 printf '%s\n' "$INIT_REQ" "$INITIALIZED_NOTE" "$TOOLS_LIST_REQ" >"$INPUT_FILE"
@@ -102,19 +111,28 @@ BOOT_TIMED_OUT=0
 ) <"$INPUT_FILE" >"$STDOUT_CAP" 2>"$STDERR_CAP" &
 BOOT_PID=$!
 
-# Killer watchdog: if the bundle is still alive after the timeout, mark it and
-# SIGKILL. Killed before it fires on the normal (fast) path.
+# Killer watchdog: if the bundle is STILL alive at the deadline, record the
+# timeout (write the marker) and only THEN SIGKILL it. The `kill -0` guard means
+# we never SIGKILL a PID that already exited — closing the race where an
+# unconditional `kill -9` could land on a reaped (and possibly reused) PID. On
+# the normal (~1s) path the boot exits first and this subshell is killed before
+# the sleep returns, so the marker is never written and no kill is attempted.
 (
   sleep "$BOOT_TIMEOUT_S"
-  : >"$TIMEOUT_MARKER"
-  kill -9 "$BOOT_PID" 2>/dev/null
+  if kill -0 "$BOOT_PID" 2>/dev/null; then
+    : >"$TIMEOUT_MARKER"
+    kill -9 "$BOOT_PID" 2>/dev/null
+  fi
 ) &
 KILLER_PID=$!
 
 if wait "$BOOT_PID"; then BOOT_RC=0; else BOOT_RC=$?; fi
 kill "$KILLER_PID" 2>/dev/null || true
 wait "$KILLER_PID" 2>/dev/null || true
-if [ -f "$TIMEOUT_MARKER" ]; then BOOT_TIMED_OUT=1; fi
+
+# The marker is the SOLE timeout signal: it exists iff the killer found the boot
+# still alive at the deadline and SIGKILLed it.
+[ -f "$TIMEOUT_MARKER" ] && BOOT_TIMED_OUT=1
 
 # --- derive assertions from the captured output ----------------------------
 # A module-resolution failure is the signal that forces the M1-3 fallback.
@@ -159,9 +177,14 @@ if [ "$MODULE_ERR" -eq 1 ] || [ "$BOOT_RC" -ne 0 ] || [ "$BOOT_TIMED_OUT" -eq 1 
   } >"$FAILURE_EVIDENCE"
 fi
 
-# Surface captured stderr (only on failure) for debugging — never asserted on
-# in the happy path.
-_surface_stderr() {
+# Surface captured stdout + stderr (only on failure) for debugging — neither is
+# asserted on in the happy path. stdout is included so a non-JSON preamble on it
+# (e.g. the cause of a jq parse failure on the initialize response) is visible
+# rather than swallowed; the parse itself is silenced (a safe false-negative),
+# so this is the only place that detail surfaces.
+_surface_captures() {
+  echo "  --- captured stdout (offline-boot) ---" >&2
+  sed 's/^/  | /' "$STDOUT_CAP" >&2 || true
   echo "  --- captured stderr (offline-boot) ---" >&2
   sed 's/^/  | /' "$STDERR_CAP" >&2 || true
   echo "  evidence: $FAILURE_EVIDENCE" >&2
@@ -177,30 +200,37 @@ test_no_node_modules_on_resolution_path() {
 
 test_initialize_completes_with_jsonrpc_result() {
   if [ "$INIT_RESULT_OK" -ne 1 ]; then
-    _surface_stderr
+    _surface_captures
     fail "initialize did not return a JSON-RPC result (boot_rc=$BOOT_RC, timed_out=$BOOT_TIMED_OUT) — the MCP never completed the handshake"
   fi
 }
 
 test_tools_list_includes_required_native_tools() {
   # Native bundle names (ynab_*); the mcp__plugin_* namespace is applied by
-  # Claude Code and is NOT visible in the raw handshake.
-  if [ "$INIT_RESULT_OK" -ne 1 ]; then _surface_stderr; fi
-  assert_contains "$TOOL_NAMES" "ynab_list_budgets" "tools/list must expose ynab_list_budgets"
-  assert_contains "$TOOL_NAMES" "ynab_update_transaction" "tools/list must expose ynab_update_transaction"
+  # Claude Code and is NOT visible in the raw handshake. Without a completed
+  # initialize there is no tools/list to validate, so this is a hard failure,
+  # not just a diagnostic dump.
+  if [ "$INIT_RESULT_OK" -ne 1 ]; then
+    _surface_captures
+    fail "initialize did not complete, so tools/list could not be validated (boot_rc=$BOOT_RC, timed_out=$BOOT_TIMED_OUT)"
+  fi
+  # Exact, newline-bounded membership: a tool merely *containing* the name (e.g.
+  # ynab_list_budgets_v2) must NOT satisfy the check.
+  assert_exact_line "$TOOL_NAMES" "ynab_list_budgets" "tools/list must expose ynab_list_budgets"
+  assert_exact_line "$TOOL_NAMES" "ynab_update_transaction" "tools/list must expose ynab_update_transaction"
 }
 
 test_no_module_resolution_failure() {
   if [ "$MODULE_ERR" -eq 1 ]; then
-    _surface_stderr
+    _surface_captures
     fail "module-resolution failure on stderr (Cannot find module / MODULE_NOT_FOUND) — the bundle is NOT self-contained"
   fi
   if [ "$BOOT_TIMED_OUT" -eq 1 ]; then
-    _surface_stderr
+    _surface_captures
     fail "bundle did not boot within ${BOOT_TIMEOUT_S}s — it hung instead of completing the handshake"
   fi
   if [ "$BOOT_RC" -ne 0 ]; then
-    _surface_stderr
+    _surface_captures
     fail "bundle exited non-zero (boot_rc=$BOOT_RC) during the offline handshake"
   fi
 }
