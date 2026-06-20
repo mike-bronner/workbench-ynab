@@ -127,21 +127,33 @@ JQ
 
 # _audit_jsonl_parse_program
 #   Echo the jq `parse_jsonl` definition: split slurped raw input (`jq -R -s`) into
-#   lines and parse each as one JSON record, emitting a stream of record objects.
+#   lines and parse each as one JSON record OBJECT, emitting a stream of objects.
 #   Crash tolerance: the writer always newline-terminates a complete record, so an
 #   append killed mid-write can only ever leave a partial, UNTERMINATED final line.
 #   `split("\n")` puts that fragment — or the empty string after a clean trailing
-#   newline — in the LAST element, which is parsed leniently (`fromjson?` → skipped
-#   on failure). Every BODY line is parsed strictly: a malformed line there is
-#   corruption an audit trail must surface, not silently swallow, so it errors the
-#   read. Requires `jq -R -s` (raw input, slurped).
+#   newline — in the LAST element, which is parsed leniently: kept only if it is a
+#   JSON object (`fromjson?` swallows a parse error; `select(type=="object")` drops
+#   a stray non-object such as a bare `null`/`true`/number). Every BODY line must be
+#   a JSON OBJECT: a line that fails to parse — OR parses to valid-but-non-object
+#   JSON like the literal `null` — is corruption an audit trail must surface, not
+#   silently swallow. (A `null` body line is the subtle case: `fromjson` accepts it
+#   without error, so without the object guard it would fabricate a phantom
+#   {"before":null,"after":null} on read_last, or be dropped by read_run — exactly
+#   the kind of invented/lost record this trail exists to prevent.) Such a line
+#   `error`s the read. Requires `jq -R -s` (raw input, slurped).
 _audit_jsonl_parse_program() {
   cat <<'JQ'
 def parse_jsonl:
   split("\n") as $lines
   | ($lines | length) as $n
   | range(0; $n) as $i
-  | if $i == $n - 1 then ($lines[$i] | fromjson?) else ($lines[$i] | fromjson) end;
+  | if $i == $n - 1
+    then ($lines[$i] | fromjson? | select(type == "object"))
+    else ($lines[$i] | fromjson
+          | if type == "object" then .
+            else error("malformed audit record (line is valid JSON but not an object)")
+            end)
+    end;
 JQ
 }
 

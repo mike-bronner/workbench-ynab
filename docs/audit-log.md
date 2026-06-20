@@ -107,10 +107,13 @@ bash bin/audit-log.sh run run-A
 Both helpers print **JSONL** (one JSON object per line), not a JSON array — a
 caller wanting an array can pipe through `jq -s`. They tolerate a crash:
 a partial, unterminated **trailing** line (all a kill mid-append can leave) is
-**skipped**, and every complete record before it is still emitted. A malformed
-line in the **body** — interior corruption, not a crash artifact — is instead
-reported on `STDERR` with the `audit-log:` prefix (alongside jq's own detail)
-and fails the read, so the corruption is never silently swallowed.
+**skipped**, and every complete record before it is still emitted. Every **body**
+line must be a JSON **object**: a line that fails to parse — or that parses to
+valid-but-non-object JSON such as the literal `null` (which would otherwise
+fabricate a phantom `{"before":null,"after":null}` record or be silently dropped)
+— is interior corruption, not a crash artifact, so it is reported on `STDERR` with
+the `audit-log:` prefix (alongside jq's own detail) and **fails the read**, never
+silently swallowed.
 
 The raw log keeps milliunit integers; only the read path divides by 1000, so the
 on-disk record stays the exact value that was applied.
