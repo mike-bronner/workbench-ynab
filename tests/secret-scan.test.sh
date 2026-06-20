@@ -63,10 +63,11 @@ run_case() {
 }
 
 echo "Self-test: guard catches committed-secret shapes (exit 1)"
-run_case "64-char-hex YNAB PAT shape is caught"        1 "src/leak.txt"   "token: $SYNTH_HEX"
-run_case "bare cleartext token assignment is caught"   1 "src/run.sh"     "${ENV_NAME}=${SYNTH_HEX}"
-run_case "quoted cleartext token assignment is caught" 1 "src/run.sh"     "${ENV_NAME}=\"${SYNTH_HEX}\""
-run_case "PEM private-key header is caught"            1 "src/id_rsa"     "${BEGIN_FRAG} RSA ${KEY_FRAG}"
+run_case "64-char-hex YNAB PAT shape is caught"         1 "src/leak.txt"  "token: $SYNTH_HEX"
+run_case "bare cleartext token assignment is caught"    1 "src/run.sh"    "${ENV_NAME}=${SYNTH_HEX}"
+run_case "double-quoted cleartext token is caught"      1 "src/run.sh"    "${ENV_NAME}=\"${SYNTH_HEX}\""
+run_case "single-quoted cleartext token is caught"      1 "src/run.sh"    "${ENV_NAME}='${SYNTH_HEX}'"
+run_case "PEM private-key header is caught"             1 "src/id_rsa"    "${BEGIN_FRAG} RSA ${KEY_FRAG}"
 
 echo "Self-test: legitimate, non-secret content passes (exit 0)"
 run_case "clean tree passes"                           0 ""              ""
@@ -74,9 +75,15 @@ run_case "clean tree passes"                           0 ""              ""
 run_case "variable-reference export is not a leak"     0 "src/run.sh"    "export ${ENV_NAME}=\"\$TOKEN\""
 run_case "bare env-var name mention is not a leak"     0 "docs/note.md"  "the launcher exports ${ENV_NAME}"
 run_case "short hex string (< 64) is not a leak"       0 "src/hash.txt"  "abc123 ${HEX16}"
-# vendor/ carries legitimate SHA-256 digests and has its own integrity gate
-# (verify-bundle.sh), so it is excluded from this scan by design.
-run_case "64-hex digest under vendor/ is ignored"      0 "vendor/x.json" "\"sha256\": \"$SYNTH_HEX\""
+
+# vendor/ is relaxed for the HEX rule ONLY (vendored.json carries legitimate
+# 64-char-hex SHA-256 digests). The cleartext-token and PEM rules still reach
+# into vendor/ — the bundle is the repo's highest-risk supply-chain surface, so
+# a token or key smuggled there must NOT escape the scan.
+echo "Self-test: vendor/ exclusion is scoped to the hex rule only"
+run_case "64-hex digest under vendor/ is ignored"      0 "vendor/x.json"  "\"sha256\": \"$SYNTH_HEX\""
+run_case "cleartext token under vendor/ IS caught"     1 "vendor/run.sh"  "${ENV_NAME}=${SYNTH_HEX}"
+run_case "PEM header under vendor/ IS caught"          1 "vendor/id_ec"   "${BEGIN_FRAG} EC ${KEY_FRAG}"
 
 echo
 echo "Passed: $pass   Failed: $fail"

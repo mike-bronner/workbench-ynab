@@ -76,8 +76,15 @@ Two layers keep credentials out of version control:
      flagged);
    - a **PEM / private-key header** — any `BEGIN … PRIVATE KEY` block.
 
-   The scan excludes `vendor/`, which legitimately carries 64-char-hex SHA-256
-   digests and has its own, stronger integrity gate (see
+   The `vendor/` exclusion is **scoped to the hex rule only**: the bundle marker
+   `vendor/ynab-mcp/vendored.json` legitimately carries 64-char-hex SHA-256
+   digests that are indistinguishable from a YNAB PAT, so the hex rule skips
+   `vendor/` to avoid false positives. The **cleartext-token and PEM rules still
+   scan `vendor/`** — those shapes never legitimately appear in the bundle, so
+   the ~1.46 MB vendored artifact (the repo's highest-risk supply-chain surface)
+   is scanned for the unambiguous secret shapes. Bundle *integrity* verification
+   is a **complementary** control, not a substitute for this scan:
+   `verify-bundle.sh` detects drift, not secret content (see
    [Bundle integrity](#bundle-integrity)). The scanner is itself covered by a
    negative test, [`tests/secret-scan.test.sh`](tests/secret-scan.test.sh), which
    proves a synthetic, token-shaped string makes the scan exit non-zero — without
@@ -123,7 +130,11 @@ bash vendor/ynab-mcp/verify-bundle.sh
 ```
 
 It prints each check and exits **0** when the bundle matches its recorded
-provenance; it exits **1** on any drift. The bundle is updated **only** via the
+provenance; it exits **1** on any drift. **CI runs this verifier on every `push`
+and `pull_request`** (a step in
+[`.github/workflows/secret-scan.yml`](.github/workflows/secret-scan.yml)), so a
+drifted or hand-edited bundle fails the build automatically — the integrity gate
+is enforced, not merely available. The bundle is updated **only** via the
 re-vendor tooling — never by hand-editing `vendor/ynab-mcp/index.cjs`.
 
 ## Reporting a vulnerability
