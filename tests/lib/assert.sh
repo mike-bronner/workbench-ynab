@@ -40,10 +40,18 @@ assert_contains() {
   esac
 }
 
-# assert_file_exists <path>
+# assert_file_exists <path> — a regular file must exist (not a directory).
 assert_file_exists() {
-  if [ ! -e "$1" ]; then
-    printf '  assert_file_exists failed: %s does not exist\n' "$1" >&2
+  if [ ! -f "$1" ]; then
+    printf '  assert_file_exists failed: %s is not an existing file\n' "$1" >&2
+    return 1
+  fi
+}
+
+# assert_dir_exists <path> — a directory must exist.
+assert_dir_exists() {
+  if [ ! -d "$1" ]; then
+    printf '  assert_dir_exists failed: %s is not an existing directory\n' "$1" >&2
     return 1
   fi
 }
@@ -67,8 +75,12 @@ run_tests() {
   local fns fn failed=0 total=0
   fns=$(declare -F | awk '{print $3}' | grep '^test_' || true)
   if [ -z "$fns" ]; then
-    echo "  (no test_* functions found)" >&2
-    return 0
+    # A *.test.sh file that defines no test_* functions ran nothing. For a
+    # harness whose job is to never pass silently, that is a failure (likely a
+    # naming typo such as `mytest_foo`), not a green — return non-zero so
+    # scripts/test.sh counts it as a failing group.
+    printf '  ✗ no test_* functions found — a test file that ran nothing is a failure\n' >&2
+    return 1
   fi
   for fn in $fns; do
     total=$((total + 1))

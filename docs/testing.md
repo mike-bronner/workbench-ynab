@@ -16,8 +16,17 @@ UPDATE_SNAPSHOTS=1 scripts/test.sh    # regenerate golden snapshots
 ```
 
 `scripts/test.sh` is the **single entrypoint** and the command CI (#16) invokes.
-It exits non-zero if any test fails, and prints `no tests yet` (exit 0) on a
-clean checkout with no test files.
+It exits non-zero if any test fails. Two near-miss cases are deliberately kept
+distinct so the runner can never report a false green:
+
+- **`no tests yet` (exit 0)** — a clean checkout with the harness in place but
+  **no test files on disk** at all.
+- **selector matched nothing (exit 1)** — test files exist but `--bash` /
+  `--node` excluded every one of them. Refusing to exit 0 here is the point:
+  a CI gate must never pass having run nothing.
+- **contradictory flags (exit 2)** — `--bash` and `--node` together select
+  disjoint suites and are rejected as a usage error, not silently merged into
+  "run nothing."
 
 ## Requirements — and why there are no installs
 
@@ -97,10 +106,12 @@ run_tests          # discovers every test_* function, runs each, reports ✓/✗
 ```
 
 `tests/lib/assert.sh` provides `assert_eq`, `assert_contains`,
-`assert_file_exists`, `assert_json_valid`, `fail`, and the `run_tests` runner.
-A failed assertion (or any non-zero command under `set -e`) fails that test;
-`run_tests` exits non-zero if any test failed. All bash scripts must pass
-`shellcheck` (CI #16 lints them).
+`assert_file_exists` (a **regular file**, not a directory), `assert_dir_exists`,
+`assert_json_valid`, `fail`, and the `run_tests` runner. A failed assertion (or
+any non-zero command under `set -e`) fails that test; `run_tests` exits non-zero
+if any test failed — **and also if the file defines zero `test_*` functions**, so
+a naming typo (`mytest_foo`) is a loud failure, never a silent pass. All bash
+scripts must pass `shellcheck` (CI #16 lints them).
 
 ## Node test approach — decision: **`node:test` built-in**
 
@@ -170,6 +181,12 @@ Then **review the `.snap` diff** like any other code change and commit it. A
 missing golden is written automatically on first run (and must be committed so
 later runs are real regression guards). Without `UPDATE_SNAPSHOTS`, any
 difference fails the test.
+
+`matchSnapshot(name, value)` refuses to write a corrupt golden: a `value` of
+`undefined`/`null` or anything `JSON.stringify` drops (a function, a symbol,
+or a render with no `return`) throws instead of committing the literal text
+`"undefined"`. `name` must be a bare filename — no path separators — so a
+snapshot can never be written outside `__snapshots__/`.
 
 ## No-`node_modules` mode (offline faithfulness)
 

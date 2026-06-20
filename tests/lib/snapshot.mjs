@@ -18,23 +18,50 @@
 // that the M2-12 read-only review snapshot tests plug into.
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
 const SNAP_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'snapshot', '__snapshots__');
 
-function serialize(actual) {
-  return typeof actual === 'string' ? actual : JSON.stringify(actual, null, 2) + '\n';
+// Turn a value into the exact bytes of its golden. Refuses values that cannot
+// be faithfully captured — `undefined`/`null`, and anything `JSON.stringify`
+// drops to `undefined` (functions, symbols). Without these guards a typo'd prop
+// or a no-return render would silently commit the literal text "undefined" as
+// the golden, which later runs would then enforce as "correct".
+export function serialize(actual) {
+  if (actual === undefined || actual === null) {
+    throw new TypeError(
+      `matchSnapshot: refusing to snapshot ${String(actual)} — pass a string or a JSON-serializable value`,
+    );
+  }
+  if (typeof actual === 'string') return actual;
+  const json = JSON.stringify(actual, null, 2);
+  if (json === undefined) {
+    throw new TypeError(
+      `matchSnapshot: value of type ${typeof actual} is not JSON-serializable — refusing to write a corrupt golden`,
+    );
+  }
+  return json + '\n';
 }
 
-export function matchSnapshot(name, actual) {
+// matchSnapshot(name, actual[, { dir }])
+//   * name must be a bare filename — no path separators — so a snapshot can
+//     never be written outside the snapshots directory (e.g. a "../" name).
+//   * dir defaults to the committed __snapshots__ location; tests override it to
+//     exercise the write/compare/update paths without touching real goldens.
+export function matchSnapshot(name, actual, { dir = SNAP_DIR } = {}) {
+  if (typeof name !== 'string' || name === '' || name !== basename(name)) {
+    throw new Error(
+      `matchSnapshot: name must be a bare filename with no path separators, got ${JSON.stringify(name)}`,
+    );
+  }
   const serialized = serialize(actual);
-  const file = join(SNAP_DIR, `${name}.snap`);
+  const file = join(dir, `${name}.snap`);
   const update = process.env.UPDATE_SNAPSHOTS === '1';
 
   if (update || !existsSync(file)) {
-    mkdirSync(SNAP_DIR, { recursive: true });
+    mkdirSync(dir, { recursive: true });
     writeFileSync(file, serialized);
     return;
   }

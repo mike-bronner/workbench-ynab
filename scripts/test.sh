@@ -23,21 +23,40 @@
 #   scripts/test.sh tests/unit/x.test.mjs # run one node test file
 #   UPDATE_SNAPSHOTS=1 scripts/test.sh    # (re)write golden snapshots, then pass
 #
+# --bash and --node are mutually exclusive suite selectors. Passing BOTH is a
+# usage error (exit 2), never a silent run-nothing: a tool whose only job is to
+# gate CI must never report green having executed no tests.
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-run_bash=1
-run_node=1
+# selector: "" = run both suites (default); "bash" / "node" = only that one.
+# Tracking the explicit choice (instead of two independently-toggled flags) is
+# what makes a contradictory --bash --node combo detectable rather than ending
+# with both suites silently disabled.
+selector=""
 explicit_files=()
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --bash) run_node=0 ;;
-    --node) run_bash=0 ;;
+    --bash)
+      if [ "$selector" = "node" ]; then
+        echo "✗ contradictory flags: --bash and --node select disjoint suites; pass neither to run both" >&2
+        exit 2
+      fi
+      selector="bash"
+      ;;
+    --node)
+      if [ "$selector" = "bash" ]; then
+        echo "✗ contradictory flags: --bash and --node select disjoint suites; pass neither to run both" >&2
+        exit 2
+      fi
+      selector="node"
+      ;;
     -h | --help)
-      sed -n '2,30p' "$0"
+      sed -n '2,35p' "$0"
       exit 0
       ;;
     --*)
@@ -48,6 +67,14 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+# Resolve the selector into the two run flags. "" → run both.
+run_bash=1
+run_node=1
+case "$selector" in
+  bash) run_node=0 ;;
+  node) run_bash=0 ;;
+esac
 
 bash_tests=()
 node_tests=()
@@ -74,14 +101,23 @@ else
   fi
 fi
 
-# "No tests yet" — a clean checkout with the harness in place but no test files
-# selected should exit 0 with a clear message, never a harness error.
-discovered=0
-[ "$run_bash" = 1 ] && discovered=$((discovered + ${#bash_tests[@]}))
-[ "$run_node" = 1 ] && discovered=$((discovered + ${#node_tests[@]}))
-if [ "$discovered" -eq 0 ]; then
-  echo "no tests yet — harness is set up but no test files matched (tests/**/*.test.sh, tests/**/*.test.mjs)"
+# Two distinct "nothing to run" conditions — never conflate them:
+#   * No test files exist on disk at all  → a clean checkout, exit 0 ("no tests yet").
+#   * Files exist but the active selector excluded every one of them → exit 1.
+#     A run-nothing-then-green is a false pass for a tool whose whole job is to
+#     gate CI, so it must fail loudly instead.
+on_disk=$(( ${#bash_tests[@]} + ${#node_tests[@]} ))
+selected=0
+[ "$run_bash" = 1 ] && selected=$((selected + ${#bash_tests[@]}))
+[ "$run_node" = 1 ] && selected=$((selected + ${#node_tests[@]}))
+
+if [ "$on_disk" -eq 0 ]; then
+  echo "no tests yet — harness is set up but no test files exist (tests/**/*.test.sh, tests/**/*.test.mjs)"
   exit 0
+fi
+if [ "$selected" -eq 0 ]; then
+  echo "✗ the --${selector} selector matched no test files, but $on_disk test file(s) exist — refusing to exit 0 having run nothing" >&2
+  exit 1
 fi
 
 failed_groups=0

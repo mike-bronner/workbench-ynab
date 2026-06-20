@@ -26,6 +26,13 @@ test('node:test runner is available and assertions work', () => {
   assert.equal(1 + 1, 2);
 });
 
+test('a failing assertion actually throws (the harness detects failures)', () => {
+  // The tautology `assert.equal(1 + 1, 2)` above can never fail, so on its own
+  // it cannot vouch that the runner catches anything. Prove the negative path:
+  // a runner that silently swallowed assertion failures would trip this.
+  assert.throws(() => assert.equal(1, 2));
+});
+
 test('populated-budget fixture parses with accounts, categories, transactions', () => {
   const { data } = readFixture('populated-budget.json');
   assert.ok(data.budget.accounts.length > 0, 'expected accounts');
