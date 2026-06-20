@@ -48,9 +48,15 @@ echo "== us-tax-lines.json =="
 if jq empty "$FILE" >/dev/null 2>&1; then ok "file is present and valid JSON"; else no "file is present and valid JSON"; exit 1; fi
 
 # AC: all Schedule C lines from the prototype, each with the required fields.
+# The loop variable $ln IS the expected IRS line number, so pin lineNumber to its
+# value (not just its type) — lineNumber decides which form line a transaction
+# files on, so a corrupt/transposed value must not pass green. Matches the
+# assert_eq value-pinning used for deductions, thresholds, and schedA category.
 for ln in 1 8 10 11 13 17 18 22 25 27a; do
   assert_jq "schedC.$ln present with schedule C + required fields" \
     "any(.lines[]; .id==\"schedC.$ln\" and .schedule==\"C\" and (.lineNumber|type==\"string\") and (.lineLabel|length>0) and (.description|length>0) and (.category==\"income\" or .category==\"expense\") and .appliesToBusinessEntities==true)"
+  assert_eq "schedC.$ln carries lineNumber $ln" \
+    ".lines[] | select(.id==\"schedC.$ln\") | .lineNumber" "$ln"
 done
 # AC: line 1 is income; the rest are expenses.
 assert_jq "schedC.1 is income" 'any(.lines[]; .id=="schedC.1" and .category=="income")'
@@ -67,11 +73,12 @@ for bucket in medical salt interest charitable; do
 done
 
 # AC: Schedule 1 adjustment lines (at minimum these three), household-level.
-# Also assert lineLabel/description are present (the data carries them; pinning
-# their presence guards against silent drift even though the AC is satisfied by id).
+# Also assert lineLabel/description are present and category=="adjustment" (the
+# data carries these; pinning them guards against silent drift and mirrors the
+# schedA category symmetry, even though the AC is satisfied by id).
 for adj in seTaxHalfDeduction studentLoanInterest iraContributions; do
-  assert_jq "sched1.$adj present, schedule 1, labelled + described, household-level" \
-    "any(.lines[]; .id==\"sched1.$adj\" and .schedule==\"1\" and (.lineLabel|length>0) and (.description|length>0) and .appliesToBusinessEntities==false)"
+  assert_jq "sched1.$adj present, schedule 1, adjustment, labelled + described, household-level" \
+    "any(.lines[]; .id==\"sched1.$adj\" and .schedule==\"1\" and .category==\"adjustment\" and (.lineLabel|length>0) and (.description|length>0) and .appliesToBusinessEntities==false)"
 done
 
 # AC: a Schedule SE record covering the SE tax line at the 15.3% rate.
