@@ -2,7 +2,7 @@
 # Unit tests for assets/tax/us-tax-lines.json — the default US tax ruleset
 # line catalog (issue #21). Run directly: tests/unit/test-us-tax-lines.sh
 #
-# Style mirrors tests/unit/test-config.sh: raw bash, `set -u`, PASS/FAIL
+# Style mirrors tests/launcher.test.sh: raw bash, `set -u`, PASS/FAIL
 # counters, and a non-zero exit when anything fails. Slots into the repo-wide
 # test entrypoint (tests/unit/). Uses jq, the project's established JSON tool —
 # node/ajv are not assumed present.
@@ -28,7 +28,7 @@ assert_jq() {
 }
 
 # assert_eq <desc> <jq-filter> <expected> — passes when the filter's raw value
-# equals <expected>. Mirrors assert_eq in tests/unit/test-config.sh so exact
+# equals <expected>. Mirrors assert_eq in tests/launcher.test.sh so exact
 # values are pinned, not just types.
 assert_eq() {
   local desc="$1" filter="$2" expected="$3" actual
@@ -89,7 +89,7 @@ assert_jq "schedSE carries the 15.3% rate" \
 
 # AC: standardDeductionByYear has the current tax year for all five filing statuses.
 # Pin exact dollar amounts (not just type) so a corrupt value can't pass green —
-# matches the assert_eq convention in test-config.sh and the pinned thresholds below.
+# matches the assert_eq convention in launcher.test.sh and the pinned thresholds below.
 # 2024 / 2025 IRS standard deductions per filing status: status="2024 2025".
 for entry in "single=14600 15000" "mfj=29200 30000" "mfs=14600 15000" "hoh=21900 22500" "qw=29200 30000"; do
   fs="${entry%%=*}"; amounts="${entry#*=}"

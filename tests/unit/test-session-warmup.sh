@@ -2,13 +2,13 @@
 # Unit tests for hooks/session-warmup.sh — the SessionStart/PostCompact warmup.
 # Run directly: tests/unit/test-session-warmup.sh
 #
-# Style mirrors tests/unit/test-config.sh: raw bash, `set -u`, PASS/FAIL
+# Style mirrors tests/launcher.test.sh: raw bash, `set -u`, PASS/FAIL
 # counters, a mktemp sandbox, and a non-zero exit when anything fails. Slots into
 # the repo-wide test entrypoint from issue #4 (tests/unit/ + scripts/test.sh).
 #
 # Seams (no test-only code in the script under test):
 #   - `security` is shadowed by a stub on PATH so the Keychain branch is driven
-#     purely by the stub's exit code ($STUB_SECURITY_RC), exactly as test-config.sh
+#     purely by the stub's exit code ($STUB_SECURITY_RC), exactly as config.test.sh
 #     shadows `jq` by emptying PATH. The stub also prints a sentinel on stdout so
 #     the suite can prove the warmup never surfaces a Keychain value.
 #   - config presence is driven by YNAB_CONFIG_FILE, the same override the loader
