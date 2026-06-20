@@ -87,6 +87,10 @@ assert_fail "assets/package.json has no .version field" \
 
 # Repo-wide guard: the ONLY files with a top-level JSON `version` are the plugin
 # manifest and the frozen vendored marker. Any new one is a hidden bump target.
+# node_modules is pruned (alongside .git): assets/ declares real npm deps, so
+# `npm install` is a normal workflow and node_modules/ is gitignored untracked
+# cruft on disk — every dep's package.json carries a `version`, none of which is
+# a real bump target, so scanning them would false-fail this guard.
 unexpected=""
 while IFS= read -r f; do
   [ "$f" = "$PLUGIN_MANIFEST" ] && continue
@@ -95,7 +99,9 @@ while IFS= read -r f; do
     unexpected="${unexpected}${f} "
   fi
 done <<EOF
-$(find "$REPO_ROOT" -path "$REPO_ROOT/.git" -prune -o -name '*.json' -print)
+$(find "$REPO_ROOT" \
+  \( -path "$REPO_ROOT/.git" -o -name node_modules \) -prune -o \
+  -name '*.json' -print)
 EOF
 assert_eq "only plugin.json and vendored.json carry a top-level version field" \
   "" "$(printf '%s' "$unexpected" | sed 's/[[:space:]]*$//')"
@@ -106,6 +112,20 @@ if [ -f "$README" ]; then
   assert_contains "README has a Versioning section" "$readme" "## Versioning"
   assert_contains "Versioning names the sole bump target" "$readme" ".claude-plugin/plugin.json"
   assert_contains "Versioning references the frozen vendored marker" "$readme" "vendor/ynab-mcp/vendored.json"
+  # Positional guard: AC #3 requires the Versioning section sit BETWEEN
+  # Architecture and License — not merely exist somewhere. The grep -qF checks
+  # above would still pass if the section were moved after ## License or gutted
+  # while the strings survived elsewhere; this asserts the actual ordering by
+  # heading line number so the test proves placement, not just presence.
+  arch_line="$(grep -n '^## Architecture' "$README" | head -1 | cut -d: -f1)"
+  ver_line="$(grep -n '^## Versioning' "$README" | head -1 | cut -d: -f1)"
+  lic_line="$(grep -n '^## License' "$README" | head -1 | cut -d: -f1)"
+  if [ -n "$arch_line" ] && [ -n "$ver_line" ] && [ -n "$lic_line" ] \
+     && [ "$arch_line" -lt "$ver_line" ] && [ "$ver_line" -lt "$lic_line" ]; then
+    PASS=$((PASS + 1)); echo "  ✅ Versioning section sits between Architecture and License"
+  else
+    FAIL=$((FAIL + 1)); echo "  ❌ Versioning section not between Architecture and License — lines Architecture:[$arch_line] Versioning:[$ver_line] License:[$lic_line]"
+  fi
 else
   FAIL=$((FAIL + 1)); echo "  ❌ README.md not found at $README"
 fi
