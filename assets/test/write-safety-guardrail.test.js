@@ -17,6 +17,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('node:child_process');
 
 const {
   LEDGER_ONLY_OP_TYPES,
@@ -294,6 +295,44 @@ test('an operation budget_id mismatch surfaces through evaluateChangeset', () =>
   assert.ok(result.blocks.some((b) => b.rule === RULES.BUDGET_ID_MISMATCH));
 });
 
+// --- (#1 round 2) evaluateOperation fails closed without a resolvable budget ----
+
+test('(#1) evaluateOperation with NO context fails closed with NO_ACTIVE_BUDGET', () => {
+  // The documented M4-4 hot path is evaluateOperation(op, { activeBudgetId }). A caller
+  // that omits the budget must NOT silently skip per-op budget scoping and reach pass —
+  // a valid op with any budget_id and no context must block, not pass.
+  const op = { id: 'op-nobudget', type: 'categorize', budget_id: 'anything', after: { category_id: 'c1' } };
+  const v = evaluateOperation(op);
+  assert.equal(v.verdict, 'block');
+  assert.equal(v.rule, RULES.NO_ACTIVE_BUDGET);
+  assert.equal(v.op_id, 'op-nobudget');
+  assert.equal(v.op_type, 'categorize');
+});
+
+test('(#1) evaluateOperation with an empty {} context also fails closed', () => {
+  const op = { id: 'op-emptyctx', type: 'allocate', budget_id: 'anything', after: { budgeted: 1 } };
+  assert.equal(evaluateOperation(op, {}).rule, RULES.NO_ACTIVE_BUDGET);
+});
+
+test('(#1) evaluateOperation with an empty-string activeBudgetId fails closed', () => {
+  const op = { id: 'op-emptybudget', type: 'reconcile', budget_id: 'anything', after: {} };
+  assert.equal(evaluateOperation(op, { activeBudgetId: '' }).rule, RULES.NO_ACTIVE_BUDGET);
+});
+
+test('(#1) a missing envelope budget surfaces NO_ACTIVE_BUDGET per-op too (defense in depth)', () => {
+  // With evaluateOperation now fail-closed, a change-set with no resolvable active budget
+  // blocks at BOTH the envelope level and per operation — the per-op verdicts carry the
+  // blocked op's id so M4-5 can surface exactly which operations are affected.
+  const cs = loadFixture('categorize.example.json');
+  delete cs.budget_id;
+  const result = evaluateChangeset(cs);
+  assert.equal(result.verdict, 'block');
+  assert.ok(
+    result.blocks.some((b) => b.rule === RULES.NO_ACTIVE_BUDGET && b.op_id !== null),
+    'expected at least one per-op NO_ACTIVE_BUDGET block',
+  );
+});
+
 // --- (e) an unknown operation type is blocked (fail-closed) -----------------
 
 test('(e) an unknown operation type is blocked (fail-closed)', () => {
@@ -407,4 +446,43 @@ test('a block verdict carries the full structured shape', () => {
   assert.equal(v.verdict, 'block');
   assert.equal(typeof v.reason, 'string');
   assert.ok(v.reason.length > 0);
+});
+
+// --- CLI behaviour ----------------------------------------------------------
+
+const MODULE = path.join(__dirname, '..', 'write-safety-guardrail.js');
+const FIXTURE_CATEGORIZE = path.join(FIXTURES, 'categorize.example.json');
+const runCli = (args) => spawnSync(process.execPath, [MODULE, ...args], { encoding: 'utf8' });
+
+test('CLI: a valid change-set file passes (exit 0, pass verdict JSON on stdout)', () => {
+  const r = runCli([FIXTURE_CATEGORIZE]);
+  assert.equal(r.status, 0);
+  assert.equal(JSON.parse(r.stdout).verdict, 'pass');
+});
+
+test('CLI: a wrong --active-budget pin blocks (exit 1, block verdict)', () => {
+  const r = runCli(['--active-budget', 'a-different-budget', FIXTURE_CATEGORIZE]);
+  assert.equal(r.status, 1);
+  assert.equal(JSON.parse(r.stdout).verdict, 'block');
+});
+
+test('(#2) CLI: --active-budget as the trailing token is a usage error, not a silent no-override', () => {
+  // The flag with no following value must NOT silently fall back to the envelope
+  // budget_id — for a money-safety CLI, a malformed budget pin is a hard usage error.
+  const r = runCli([FIXTURE_CATEGORIZE, '--active-budget']);
+  assert.equal(r.status, 2);
+  assert.equal(r.stdout, '', 'no verdict JSON should be emitted on a usage error');
+  assert.match(r.stderr, /--active-budget requires a non-empty/);
+});
+
+test('(#2) CLI: an empty --active-budget value is a usage error', () => {
+  const r = runCli(['--active-budget', '', FIXTURE_CATEGORIZE]);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /--active-budget requires a non-empty/);
+});
+
+test('CLI: no file argument is a usage error (exit 2)', () => {
+  const r = runCli([]);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /usage:/);
 });

@@ -131,6 +131,23 @@ const TRANSFER_PAYEE_RE = /transfer\s*:/i;
 const PASS = Object.freeze({ verdict: 'pass' });
 
 /**
+ * Prototype-pollution-safe membership check. Every allow-list / deny-list / signal-key
+ * test in this module goes through `includesIn` rather than `arr.includes(x)`. The
+ * canonical `Array.prototype.includes` is captured HERE, at module load — before any
+ * untrusted change-set is parsed — so a host that later poisons `Array.prototype.includes`
+ * (e.g. via `__proto__` pollution) cannot make a transfer-signal or deny-list check
+ * silently return the wrong answer. For a guardrail whose `false` can mean "money may
+ * move," the membership primitive itself must be unpoisonable.
+ * @param {readonly unknown[]} arr
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+const arrayIncludes = Array.prototype.includes;
+function includesIn(arr, value) {
+  return arrayIncludes.call(arr, value);
+}
+
+/**
  * Build a structured block verdict.
  * @param {string|null} opId   the blocked operation's id (null for envelope/tool-level blocks).
  * @param {string|null} opType the operation type (null when unknown / not applicable).
@@ -167,13 +184,13 @@ function hasTransferSignal(value, seen = new Set()) {
   }
 
   for (const [key, v] of Object.entries(value)) {
-    if (TRANSFER_SIGNAL_KEYS.includes(key) && v !== null && v !== undefined && v !== '') {
+    if (includesIn(TRANSFER_SIGNAL_KEYS, key) && v !== null && v !== undefined && v !== '') {
       return true;
     }
-    if (PAYEE_REPOINT_KEYS.includes(key) && v !== null && v !== undefined && v !== '') {
+    if (includesIn(PAYEE_REPOINT_KEYS, key) && v !== null && v !== undefined && v !== '') {
       return true;
     }
-    if (PAYEE_KEYS.includes(key) && typeof v === 'string' && TRANSFER_PAYEE_RE.test(v)) {
+    if (includesIn(PAYEE_KEYS, key) && typeof v === 'string' && TRANSFER_PAYEE_RE.test(v)) {
       return true;
     }
     if (v !== null && typeof v === 'object' && hasTransferSignal(v, seen)) {
@@ -193,7 +210,7 @@ function evaluateTool(toolName) {
   if (typeof toolName !== 'string' || toolName.length === 0) {
     return block(null, null, RULES.TOOL_NOT_ALLOWED, 'No tool name supplied; fail-closed block.');
   }
-  if (DENIED_TOOLS.includes(toolName)) {
+  if (includesIn(DENIED_TOOLS, toolName)) {
     return block(
       null,
       null,
@@ -201,7 +218,7 @@ function evaluateTool(toolName) {
       `Tool "${toolName}" is on the money-movement deny-list and may never run.`,
     );
   }
-  if (ALLOWED_TOOLS.includes(toolName)) {
+  if (includesIn(ALLOWED_TOOLS, toolName)) {
     return PASS;
   }
   return block(
@@ -231,7 +248,7 @@ function evaluateOperation(op, context = {}) {
   const opType = typeof op.type === 'string' ? op.type : null;
 
   // 1. Ledger-only op-type allow-list (fail-closed).
-  if (opType === null || !LEDGER_ONLY_OP_TYPES.includes(opType)) {
+  if (opType === null || !includesIn(LEDGER_ONLY_OP_TYPES, opType)) {
     return block(
       opId,
       opType,
@@ -241,17 +258,30 @@ function evaluateOperation(op, context = {}) {
     );
   }
 
-  // 2. Scope assertion: budget_id must match the active budget.
-  if (activeBudgetId !== undefined && activeBudgetId !== null) {
-    if (op.budget_id !== activeBudgetId) {
-      return block(
-        opId,
-        opType,
-        RULES.BUDGET_ID_MISMATCH,
-        `Operation budget_id ${JSON.stringify(op.budget_id)} does not match the active budget ` +
-          `"${activeBudgetId}".`,
-      );
-    }
+  // 2. Scope assertion: budget_id must match the active budget. FAIL-CLOSED — with
+  //    no resolvable active budget there is nothing to scope the operation against,
+  //    so block; never skip. This is the documented M4-4 hot path
+  //    (evaluateOperation(op, { activeBudgetId }) before every tool call): a caller
+  //    that omits the budget must not silently disable per-op budget scoping. Mirrors
+  //    the NO_ACTIVE_BUDGET guard in evaluateChangeset — the module can never itself
+  //    be the thing that fails open.
+  if (typeof activeBudgetId !== 'string' || activeBudgetId.length === 0) {
+    return block(
+      opId,
+      opType,
+      RULES.NO_ACTIVE_BUDGET,
+      'No resolvable active budget supplied to evaluateOperation; the per-op budget scope ' +
+        'assertion cannot run, so the operation is blocked fail-closed.',
+    );
+  }
+  if (op.budget_id !== activeBudgetId) {
+    return block(
+      opId,
+      opType,
+      RULES.BUDGET_ID_MISMATCH,
+      `Operation budget_id ${JSON.stringify(op.budget_id)} does not match the active budget ` +
+        `"${activeBudgetId}".`,
+    );
   }
 
   // 3. Money-movement / transfer smuggling. Scan the proposed state and every
@@ -331,9 +361,10 @@ function evaluateChangeset(changeset, options = {}) {
   }
 
   // Fail-closed: without an explicit override, the envelope MUST carry a resolvable
-  // active budget. A missing/empty budget_id would otherwise leave activeBudgetId
-  // undefined and silently skip the per-op budget_id assertion for EVERY operation —
-  // a fail-open the guardrail must never allow (no resolvable budget = block).
+  // active budget. This is belt-and-suspenders with evaluateOperation's own
+  // NO_ACTIVE_BUDGET guard (which now blocks per-op when activeBudgetId is unresolved),
+  // surfacing the missing budget once at the envelope level in addition to per-op —
+  // no resolvable budget = block, never a silently-skipped scope assertion.
   if (!overrideBudget && (typeof changeset.budget_id !== 'string' || changeset.budget_id.length === 0)) {
     blocks.push(block(
       null,
@@ -379,12 +410,23 @@ module.exports = {
 // CLI entry point: read a change-set file, print its verdict as JSON on stdout,
 // diagnostics on stderr only, and exit non-zero on block.
 if (require.main === module) {
+  const USAGE = 'usage: node write-safety-guardrail.js [--active-budget <id>] <changeset.json>\n';
   const argv = process.argv.slice(2);
   let activeBudgetId;
   const files = [];
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--active-budget') {
-      activeBudgetId = argv[i + 1];
+      // FAIL-CLOSED CLI: a malformed budget pin (flag is the trailing token, or its
+      // value is empty) must be a usage error, never a silent no-override that falls
+      // back to the envelope budget_id — for a money-safety CLI, silently ignoring the
+      // active-budget pin is exactly the kind of quiet fail-open the module forbids.
+      const value = argv[i + 1];
+      if (value === undefined || value.length === 0) {
+        process.stderr.write(USAGE);
+        process.stderr.write('error: --active-budget requires a non-empty <id> value.\n');
+        process.exit(2);
+      }
+      activeBudgetId = value;
       i += 1;
     } else {
       files.push(argv[i]);
@@ -392,7 +434,7 @@ if (require.main === module) {
   }
 
   if (files.length !== 1) {
-    process.stderr.write('usage: node write-safety-guardrail.js [--active-budget <id>] <changeset.json>\n');
+    process.stderr.write(USAGE);
     process.exit(2);
   }
 

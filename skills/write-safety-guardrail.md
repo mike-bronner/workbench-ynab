@@ -186,7 +186,10 @@ The full set of rule constants: `op_type_not_in_allow_list`,
 - Invoke the guardrail **before each individual tool call**: run
   `evaluateOperation(op, { activeBudgetId })` for the operation about to be
   applied **and** `evaluateTool(toolName)` for the exact namespaced tool about to
-  be invoked.
+  be invoked. The `activeBudgetId` is **mandatory**: `evaluateOperation` is
+  fail-closed and returns a `no_resolvable_active_budget` block when it is
+  missing or empty, so the per-op budget scope assertion can never be silently
+  skipped by a caller that forgets to pass it.
 - **Abort the entire batch** on any `"block"` verdict — do not apply the blocked
   operation, and do not continue to later operations. The change-set is applied
   all-or-aborted, never partially around a block.
