@@ -171,7 +171,7 @@ set -u
 _log() { echo "ynab-mcp: $*" 1>&2; }
 
 # --- Auth: token from macOS Keychain, never from disk, never logged ----------
-TOKEN=$(security find-generic-password -s workbench-ynab -a YNAB_ACCESS_TOKEN -w 2>/dev/null)
+TOKEN=$(security find-generic-password -s ynab-mcp -a access-token -w 2>/dev/null)
 if [ -z "$TOKEN" ]; then
   _log "ERROR: YNAB token not in Keychain. Run /workbench-ynab:setup."
   exit 1
