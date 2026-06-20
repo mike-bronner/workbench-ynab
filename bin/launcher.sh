@@ -42,7 +42,12 @@ BUNDLE="${SCRIPT_DIR}/ynab-mcp"
 # to stderr.
 TOKEN="$(security find-generic-password -s "ynab-mcp" -a "access-token" -w 2>/dev/null || true)"
 
-if [ -z "$TOKEN" ]; then
+# Treat a whitespace-only Keychain entry as missing, mirroring bin/persona.sh's
+# _trim convention (a "   " value is not a token, the contract is "non-empty"):
+# strip every whitespace char from a throwaway copy and test THAT for emptiness.
+# $TOKEN itself is left untouched, so a legitimate token is exported exactly as
+# the Keychain stored it — only the all-whitespace case is reclassified as absent.
+if [ -z "${TOKEN//[[:space:]]/}" ]; then
   _log "No YNAB token in Keychain. Run /workbench-ynab:setup to store it."
   exit 1
 fi
