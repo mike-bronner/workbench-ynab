@@ -204,4 +204,4 @@ python3 -c 'import json,sys,jsonschema; \
 ```
 
 `assets/config.example.json` is kept valid against `assets/config.schema.json`;
-the unit tests in `tests/unit/test-config.sh` also read it through the loader.
+the unit tests in `tests/unit/config.test.sh` also read it through the loader.

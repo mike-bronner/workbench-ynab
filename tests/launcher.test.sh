@@ -5,7 +5,7 @@
 # Self-contained: no test framework required. Run directly:
 #   bash tests/launcher.test.sh
 # Exits 0 if all assertions pass, 1 otherwise. Style mirrors the sibling
-# tests/persona-loader.test.sh and tests/unit/test-config.sh: raw bash, `set -u`,
+# tests/persona-loader.test.sh: raw bash, `set -u`,
 # PASS/FAIL counters, a mktemp sandbox, non-zero exit on any failure.
 #
 # The launcher reads the macOS Keychain and `exec`s node on the vendored bundle,

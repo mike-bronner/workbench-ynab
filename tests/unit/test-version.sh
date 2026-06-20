@@ -2,7 +2,7 @@
 # Unit tests for the repo's version model — issue #75.
 # Run directly: tests/unit/test-version.sh
 #
-# Style mirrors tests/unit/test-config.sh: raw bash, `set -u`, PASS/FAIL
+# Style mirrors tests/launcher.test.sh: raw bash, `set -u`, PASS/FAIL
 # counters, and a non-zero exit when anything fails. Slots into the repo-wide
 # test entrypoint from issue #4 (tests/unit/ + scripts/test.sh).
 #
