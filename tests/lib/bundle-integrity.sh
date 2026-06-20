@@ -195,10 +195,29 @@ system node (see README Prerequisites). Cannot prove boot without it."
   # the default shim (the caller then owns the entrypoint's environment).
   local sandbox run_entry
   sandbox="$(mktemp -d "${TMPDIR:-/tmp}/ynab-offline-boot.XXXXXX")"
+  # Clean up the sandbox on EVERY exit path from here on — success, the timeout
+  # path, an early `return` on a copy failure. A RETURN trap matches the sibling
+  # suites' `trap 'rm -rf "$SANDBOX"' EXIT` house style
+  # (tests/persona-loader.test.sh:22, tests/unit/config.test.sh:31), scoped to
+  # this function rather than EXIT because the sandbox is created per-call inside
+  # a *sourced* library, not once at a test script's top level — an EXIT trap
+  # would fire only at the caller's shell exit and clobber any EXIT trap the
+  # caller (e.g. M5-5) already set.
+  #
+  # The trap self-clears (`trap - RETURN`) as it fires. Without functrace a
+  # RETURN trap is not inherited by nested calls, but it DOES persist into the
+  # still-executing caller and would fire again on bi_assert_integrity's own
+  # return — where `$sandbox` is unbound, tripping `set -u`. Clearing it on the
+  # first (and only correct) firing keeps cleanup to exactly one run, on THIS
+  # function's return. Verified on bash 3.2: removes the sandbox once, never
+  # leaks to the caller, and the trap body does not clobber the verdict below.
+  trap 'rm -rf "$sandbox"; trap - RETURN' RETURN
   if [ -z "${YNAB_MCP_ENTRYPOINT:-}" ]; then
     mkdir -p "$sandbox/bin" "$sandbox/vendor/ynab-mcp"
-    cp "$repo_root/bin/ynab-mcp"              "$sandbox/bin/ynab-mcp"
-    cp "$repo_root/vendor/ynab-mcp/index.cjs" "$sandbox/vendor/ynab-mcp/index.cjs"
+    cp "$repo_root/bin/ynab-mcp" "$sandbox/bin/ynab-mcp" \
+      || { bi_bad "offline boot: sandbox setup — failed to copy bin/ynab-mcp"; return 1; }
+    cp "$repo_root/vendor/ynab-mcp/index.cjs" "$sandbox/vendor/ynab-mcp/index.cjs" \
+      || { bi_bad "offline boot: sandbox setup — failed to copy vendor/ynab-mcp/index.cjs"; return 1; }
     chmod +x "$sandbox/bin/ynab-mcp"
     run_entry="$sandbox/bin/ynab-mcp"
   else
@@ -217,10 +236,22 @@ system node (see README Prerequisites). Cannot prove boot without it."
     bi_request 2 tools/list '{}'
   } > "$req_file"
 
-  # Run the entrypoint with a clean, network-irrelevant env: a fake token and a
-  # PATH that still finds node. Feed the requests file as stdin (EOF tells the
-  # stdio transport to shut down → the process exits on its own).
-  YNAB_ACCESS_TOKEN="$BI_FAKE_TOKEN" "$run_entry" \
+  # Run the entrypoint with the two CJS resolution inputs AC #2 names BOTH
+  # neutralized, so the offline proof holds on ANY runner regardless of pre-set
+  # env vars — not just the directory-tree node_modules walk the mktemp sandbox
+  # already controls. NODE_PATH and $HOME/.node_modules are ABSOLUTE resolution
+  # inputs, independent of where the bundle file sits, so the sandbox alone never
+  # touched them; they would pass straight through from the caller's environment.
+  #   * NODE_PATH=         empties the explicit module search path, so a bare
+  #                        require() can't be satisfied from the caller's NODE_PATH.
+  #   * HOME=$sandbox/home points $HOME at an empty dir, so $HOME/.node_modules
+  #                        and $HOME/.node_libraries resolve to nothing.
+  # A fake token still stands in for the real one; PATH is left intact so the
+  # child still finds node. The empty HOME dir lives inside the sandbox, so the
+  # RETURN trap above cleans it up too. Feed the requests file as stdin (EOF tells
+  # the stdio transport to shut down → the process exits on its own).
+  mkdir -p "$sandbox/home"
+  NODE_PATH= HOME="$sandbox/home" YNAB_ACCESS_TOKEN="$BI_FAKE_TOKEN" "$run_entry" \
     < "$req_file" > "$out_file" 2> "$err_file" &
   local pid=$!
 
@@ -234,7 +265,6 @@ system node (see README Prerequisites). Cannot prove boot without it."
       bi_bad "offline boot: process did not exit within ${timeout}s after \
 stdin EOF (handshake hung)"
       [ -s "$err_file" ] && printf '       stderr: %s\n' "$(head -3 "$err_file")"
-      rm -rf "$sandbox"
       return 1
     fi
     sleep 1
@@ -292,9 +322,8 @@ stdin EOF (handshake hung)"
     bi_bad "offline boot: tools/list missing: $missing"
   fi
 
-  rm -rf "$sandbox"
   # Return non-zero iff one of THIS call's boot assertions failed (the delta since
-  # entry), never the module-global total.
+  # entry), never the module-global total. The RETURN trap removes the sandbox.
   [ "$BI_FAIL" -eq "$fail0" ]
 }
 
