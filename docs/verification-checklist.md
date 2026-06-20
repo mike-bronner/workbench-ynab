@@ -61,11 +61,17 @@ security find-generic-password -s workbench-ynab -a YNAB_ACCESS_TOKEN -w >/dev/n
 # then feed it to grep over STDIN (-f -) so the secret never lands in argv
 # (visible to `ps auxww` / shell history). Abort if the lookup is empty — an
 # empty pattern matches every line and would cry "LEAK" on a clean tree.
+# `-r .` recurses the WHOLE tree (covering run/ and any *.log); never list extra
+# path args — an absent run/ or an unmatched *.log makes grep exit 2 (file
+# error), which an `&& … || …` idiom misreads as "no match" even when grep just
+# printed the leak (and zsh aborts on the unmatched *.log glob outright). Drive
+# the verdict off whether grep produced filenames ([ -n "$hits" ]), not its exit.
 TOKEN="$(security find-generic-password -s workbench-ynab -a YNAB_ACCESS_TOKEN -w)"
 if [ -z "$TOKEN" ]; then
   echo "empty token — Keychain lookup failed; aborting sweep"
 else
-  printf '%s\n' "$TOKEN" | grep -rIlF -f - . run/ *.log 2>/dev/null && echo "LEAK" || echo "no leak"
+  hits="$(printf '%s\n' "$TOKEN" | grep -rIlF -f - . 2>/dev/null)"
+  if [ -n "$hits" ]; then echo "LEAK FOUND in:"; printf '%s\n' "$hits"; else echo "no leak"; fi
 fi
 unset TOKEN
 ```
@@ -138,10 +144,17 @@ A final sweep across everything steps 1–7 produced.
 TOKEN="$(security find-generic-password -s workbench-ynab -a YNAB_ACCESS_TOKEN -w)"
 # Abort on an empty token (an empty pattern lists every file → false alarm), and
 # feed the secret over STDIN (-f -) so it never appears in argv / `ps` / history.
+# `-r .` recurses the WHOLE tree (run/, any *.log, and a report committed under
+# it). Do NOT list extra path args: an absent run/ or unmatched *.log makes grep
+# exit 2 (file error), which an `&& … || …` idiom misreads as clean even when
+# grep just printed the leak (and zsh aborts on the unmatched glob). Test whether
+# grep produced filenames ([ -n "$hits" ]), never its exit status. If your report
+# lives OUTSIDE the repo tree, add its directory: grep -rIlF -f - . /path/to/report-dir
 if [ -z "$TOKEN" ]; then
   echo "empty token — Keychain lookup failed; aborting sweep"
 else
-  printf '%s\n' "$TOKEN" | grep -rIlF -f - . run/ *.log path/to/report.html 2>/dev/null && echo "LEAK FOUND" || echo "clean"
+  hits="$(printf '%s\n' "$TOKEN" | grep -rIlF -f - . 2>/dev/null)"
+  if [ -n "$hits" ]; then echo "LEAK FOUND in:"; printf '%s\n' "$hits"; else echo "clean"; fi
 fi
 unset TOKEN
 ```

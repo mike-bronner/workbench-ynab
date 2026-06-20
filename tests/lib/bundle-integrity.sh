@@ -165,6 +165,11 @@ bi_response_by_id() {
 #     * tools/list lists at minimum every BI_REQUIRED_TOOLS name.
 bi_assert_boot() {
   local repo_root="$1"
+  # Snapshot the global fail counter so this assertion's return reflects ONLY its
+  # own failures, not a prior bi_assert_checksum's. The AC asks for a *reusable*
+  # library, so a standalone bi_assert_boot must not inherit an earlier call's
+  # verdict (e.g. M5-5 running checksum, then boot, separately).
+  local fail0=$BI_FAIL
 
   if ! command -v node >/dev/null 2>&1; then
     bi_bad "offline boot: 'node' not found on PATH — the bundle boots on a \
@@ -244,17 +249,24 @@ stdin EOF (handshake hung)"
     printf '       stderr: %s\n' "$(head -3 "$err_file")"
   fi
 
-  # 2. stdout purity: every non-blank line is a jsonrpc:"2.0" message.
-  local impure=0 line
+  # 2. stdout purity: every non-blank line is a jsonrpc:"2.0" message, AND at
+  #    least one such line exists. Counting real JSON-RPC lines (not just `-s`,
+  #    non-empty bytes) keeps an all-blank/all-newline stdout from passing
+  #    vacuously — the loop `continue`s on blank lines, so without this guard a
+  #    boot that emitted nothing but newlines would leave impure=0 and slip
+  #    through.
+  local impure=0 jsonrpc_lines=0 line
   while IFS= read -r line; do
     [ -z "$line" ] && continue
-    if ! printf '%s' "$line" | jq -e '.jsonrpc == "2.0"' >/dev/null 2>&1; then
+    if printf '%s' "$line" | jq -e '.jsonrpc == "2.0"' >/dev/null 2>&1; then
+      jsonrpc_lines=$((jsonrpc_lines + 1))
+    else
       impure=$((impure + 1))
       printf '       stray non-JSON-RPC stdout line: %s\n' "$line"
     fi
   done < "$out_file"
   bi_assert "offline boot: stdout carries ONLY JSON-RPC (no launcher chatter)" \
-    "$([ "$impure" -eq 0 ] && [ -s "$out_file" ] && echo 0 || echo 1)"
+    "$([ "$impure" -eq 0 ] && [ "$jsonrpc_lines" -ge 1 ] && echo 0 || echo 1)"
 
   # 3. initialize response: parseable JSON with jsonrpc, id, and result.
   local init_resp
@@ -281,7 +293,9 @@ stdin EOF (handshake hung)"
   fi
 
   rm -rf "$sandbox"
-  [ "$BI_FAIL" -eq 0 ]
+  # Return non-zero iff one of THIS call's boot assertions failed (the delta since
+  # entry), never the module-global total.
+  [ "$BI_FAIL" -eq "$fail0" ]
 }
 
 # ---------------------------------------------------------------------------
