@@ -117,7 +117,11 @@ bi_resolve_entrypoint() {
 # bi_request <id> <method> [params-json] — emit one newline-free JSON-RPC line.
 # The MCP stdio transport is newline-delimited: one JSON object per line.
 bi_request() {
-  local id="$1" method="$2" params="${3:-{\}}"
+  # NB: do NOT fold the default into the parameter expansion — bash 3.2 expands
+  # `${3:-{\}}` to the literal string `{\}` (invalid JSON, breaks --argjson), not
+  # to `{}`. Default in a separate, unambiguous step.
+  local id="$1" method="$2" params="${3:-}"
+  [ -z "$params" ] && params='{}'
   if [ "$id" = "-" ]; then
     # a notification: no id, no response expected
     jq -cn --arg m "$method" --argjson p "$params" \

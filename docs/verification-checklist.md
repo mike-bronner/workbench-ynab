@@ -57,8 +57,17 @@ launcher at MCP start — never written to disk, never echoed.
 ```bash
 # The token is present in the Keychain:
 security find-generic-password -s workbench-ynab -a YNAB_ACCESS_TOKEN -w >/dev/null && echo "token present"
-# …and the launcher reads it without leaking it. Inspect any logs/output:
-grep -rIi "$(security find-generic-password -s workbench-ynab -a YNAB_ACCESS_TOKEN -w)" run/ *.log 2>/dev/null && echo "LEAK" || echo "no leak"
+# …and the launcher reads it without leaking it. Capture the token into a var,
+# then feed it to grep over STDIN (-f -) so the secret never lands in argv
+# (visible to `ps auxww` / shell history). Abort if the lookup is empty — an
+# empty pattern matches every line and would cry "LEAK" on a clean tree.
+TOKEN="$(security find-generic-password -s workbench-ynab -a YNAB_ACCESS_TOKEN -w)"
+if [ -z "$TOKEN" ]; then
+  echo "empty token — Keychain lookup failed; aborting sweep"
+else
+  printf '%s\n' "$TOKEN" | grep -rIiF -f - run/ *.log 2>/dev/null && echo "LEAK" || echo "no leak"
+fi
+unset TOKEN
 ```
 
 - [ ] **Pass when:** the token is present in the Keychain, the launcher starts
@@ -127,7 +136,14 @@ A final sweep across everything steps 1–7 produced.
 
 ```bash
 TOKEN="$(security find-generic-password -s workbench-ynab -a YNAB_ACCESS_TOKEN -w)"
-grep -rIl "$TOKEN" . run/ *.log path/to/report.html 2>/dev/null && echo "LEAK FOUND" || echo "clean"
+# Abort on an empty token (an empty pattern lists every file → false alarm), and
+# feed the secret over STDIN (-f -) so it never appears in argv / `ps` / history.
+if [ -z "$TOKEN" ]; then
+  echo "empty token — Keychain lookup failed; aborting sweep"
+else
+  printf '%s\n' "$TOKEN" | grep -rIlF -f - . run/ *.log path/to/report.html 2>/dev/null && echo "LEAK FOUND" || echo "clean"
+fi
+unset TOKEN
 ```
 
 - [ ] **Pass when:** the token value appears in **no** log, report, config file,
