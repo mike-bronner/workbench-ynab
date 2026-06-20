@@ -20,6 +20,9 @@ __pycache__/
 run/
 *.log
 
+# Generated test diagnostics (written only on a failing offline-boot run, #14)
+tests/integration/offline-boot-failure.txt
+
 # Secrets — never commit. The YNAB token lives in macOS Keychain, never on disk.
 .env
 *.token
