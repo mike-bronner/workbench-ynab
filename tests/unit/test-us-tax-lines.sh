@@ -82,8 +82,8 @@ for adj in seTaxHalfDeduction studentLoanInterest iraContributions; do
 done
 
 # AC: a Schedule SE record covering the SE tax line at the 15.3% rate.
-assert_jq "schedSE present, schedule SE, household-level" \
-  'any(.lines[]; .id=="schedSE" and .schedule=="SE" and .appliesToBusinessEntities==false)'
+assert_jq "schedSE present, schedule SE, category==tax, household-level" \
+  'any(.lines[]; .id=="schedSE" and .schedule=="SE" and .category=="tax" and .appliesToBusinessEntities==false)'
 assert_jq "schedSE carries the 15.3% rate" \
   'any(.lines[]; .id=="schedSE" and .rate==0.153)'
 
