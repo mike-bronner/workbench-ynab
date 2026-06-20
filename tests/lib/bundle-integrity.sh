@@ -25,7 +25,7 @@
 # the BI_PASS / BI_FAIL counters; the combined entry point returns non-zero iff
 # any assertion failed, so a release workflow can gate on its exit status.
 #
-# Style mirrors tests/persona-loader.test.sh and tests/unit/test-config.sh: raw
+# Style mirrors tests/persona-loader.test.sh and tests/unit/config.test.sh: raw
 # bash, no framework, mktemp sandboxes, POSIX-friendly (macOS bash 3.2).
 
 # ---------------------------------------------------------------------------
@@ -67,12 +67,13 @@ ynab_export_transactions"
 # YNAB when a *tool* is invoked — so the initialize + tools/list handshake never
 # touches the network and never needs a real token. Never the real one.
 #
-# WARNING: YNAB_ACCESS_TOKEN_TEST is an override for the fake token ONLY — it must
-# NEVER hold a real YNAB PAT. Its name sits in the YNAB_ACCESS_TOKEN namespace, so
-# a careless copy-paste of the real var into a CI env would feed a live PAT into the
-# boot. The boot is hermetic (no network on initialize/tools-list), so the blast
-# radius is small, but keep a fake value here regardless.
-BI_FAKE_TOKEN="${YNAB_ACCESS_TOKEN_TEST:-fake-offline-boot-token-not-a-real-pat}"
+# OFFLINE_BOOT_FAKE_TOKEN optionally overrides the fake token — it must hold a
+# FAKE value, NEVER a real YNAB PAT. The name deliberately sits OUTSIDE the
+# YNAB_ACCESS_TOKEN namespace, so a careless copy-paste of the real var name can't
+# land a live PAT here (which would otherwise flow to the boot env and the stderr
+# dump). The boot is hermetic anyway (no network on initialize/tools-list), so the
+# blast radius would be small — but keep a fake value here regardless.
+BI_FAKE_TOKEN="${OFFLINE_BOOT_FAKE_TOKEN:-fake-offline-boot-token-not-a-real-pat}"
 
 # ---------------------------------------------------------------------------
 # Checksum assertion — delegates to the existing M5-3 guard.
