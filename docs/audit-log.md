@@ -40,24 +40,39 @@ or file left at a looser mode is tightened rather than silently trusted — `mkd
 | | JSONL (append one line) | One growing JSON array |
 |---|---|---|
 | Append cost | `>>` one line — no read, no parse | read-modify-**write** the whole file (O(n)) |
-| Crash safety | a kill mid-write leaves at most one partial **trailing** line, which the readers skip — every complete record before it still reads back | a truncated rewrite can lose the **entire** history |
+| Crash safety | each record is appended in one atomic, newline-terminated write — a crash leaves either the whole record or nothing, **never a partial line** | a truncated rewrite can lose the **entire** history |
 | Rewrites existing data? | **never** | every append |
 
 Append-only integrity is the entire point of an audit log, so JSONL is the
 correct shape. The writer only ever `>>`-appends — it never rewrites,
-truncates, or seeks. Because each complete record is newline-terminated, the
-only thing a crash mid-append can leave is one **unterminated trailing** line;
-the read helpers skip exactly that line (see [Reading the log](#reading-the-log))
-and emit every record before it. A malformed line in the **body** is a
-different matter — corruption an audit trail must not silently swallow — so the
-readers surface it loudly instead.
+truncates, or seeks. Each record is one compact line (`jq -c`, no interior
+newlines), so the writer emits it plus its terminating newline in a **single
+atomic `write(2)`** to an `O_APPEND` file descriptor: a regular-file write of a
+sub-page buffer is copied to the page cache uninterruptibly, so a crash leaves
+either the whole newline-terminated record or nothing — **never a partial,
+truncated line**. As belt-and-suspenders the writer also refuses to **fuse** a new
+record onto a pre-existing dangling fragment (one left by an out-of-band
+truncation, not by this writer): if the file does not already end in a newline it
+prepends one, isolating the fragment on its own line — still strictly append-only,
+adding bytes only at EOF.
+
+The read helpers stay defensively lenient regardless: a partial, unterminated
+**trailing** line (all an out-of-band truncation could leave) is **skipped** and
+every complete record before it is still emitted (see
+[Reading the log](#reading-the-log)), while a malformed line in the **body** —
+corruption an audit trail must not silently swallow — is surfaced loudly instead.
+The writer's single-write guarantee means a crash mid-append no longer produces a
+torn line for them to tolerate.
 
 ## The writer — `_audit_append <operation_json> <result_json> <dry_run>`
 
 A **pure function of its three inputs**: it reads no external state and never
 touches a YNAB API, so it is unit-testable in isolation
 (`tests/unit/test-audit-log.sh`). Its only side effect is appending one record;
-the audit dir and monthly file are created on first write if absent.
+the audit dir and monthly file are created on first write if absent. Each record
+is written as a single atomic, newline-terminated append, so a crash never leaves
+a partial line and a new record is never fused onto a pre-existing dangling
+fragment (see [Why JSONL](#why-jsonl-one-object-per-line-not-a-single-json-array)).
 
 | Argument | Shape | Notes |
 |---|---|---|
@@ -109,9 +124,10 @@ bash bin/audit-log.sh run run-A
 ```
 
 Both helpers print **JSONL** (one JSON object per line), not a JSON array — a
-caller wanting an array can pipe through `jq -s`. They tolerate a crash:
-a partial, unterminated **trailing** line (all a kill mid-append can leave) is
-**skipped**, and every complete record before it is still emitted. Every **body**
+caller wanting an array can pipe through `jq -s`. They are defensively lenient:
+a partial, unterminated **trailing** line (defense-in-depth — the writer's atomic
+append means a crash no longer produces one; only an out-of-band truncation could)
+is **skipped**, and every complete record before it is still emitted. Every **body**
 line must be a JSON **object**: a line that fails to parse — or that parses to
 valid-but-non-object JSON such as the literal `null` (which would otherwise
 fabricate a phantom `{"before":null,"after":null}` record or be silently dropped)
