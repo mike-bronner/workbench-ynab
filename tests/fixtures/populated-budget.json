@@ -1,0 +1,178 @@
+{
+  "_fixture": "A realistic, populated YNAB budget-detail response. Mirrors the shape of the YNAB API GET /budgets/{id} payload (data.budget.*). All monetary amounts are integer milliunits (1000 milliunits = 1 currency unit). Shared by unit, integration, and snapshot tests — do not hand-edit lightly; downstream snapshot goldens depend on these values.",
+  "data": {
+    "budget": {
+      "id": "budget-fixture-populated",
+      "name": "Populated Test Budget",
+      "last_modified_on": "2026-06-01T12:00:00+00:00",
+      "first_month": "2026-01-01",
+      "last_month": "2026-06-01",
+      "currency_format": {
+        "iso_code": "USD",
+        "decimal_digits": 2,
+        "decimal_separator": ".",
+        "group_separator": ",",
+        "currency_symbol": "$",
+        "symbol_first": true,
+        "display_symbol": true
+      },
+      "accounts": [
+        {
+          "id": "acct-checking",
+          "name": "Everyday Checking",
+          "type": "checking",
+          "on_budget": true,
+          "closed": false,
+          "balance": 4231500,
+          "cleared_balance": 4231500,
+          "uncleared_balance": 0,
+          "deleted": false
+        },
+        {
+          "id": "acct-savings",
+          "name": "Emergency Savings",
+          "type": "savings",
+          "on_budget": true,
+          "closed": false,
+          "balance": 12000000,
+          "cleared_balance": 12000000,
+          "uncleared_balance": 0,
+          "deleted": false
+        },
+        {
+          "id": "acct-credit",
+          "name": "Cashback Card",
+          "type": "creditCard",
+          "on_budget": true,
+          "closed": false,
+          "balance": -842300,
+          "cleared_balance": -842300,
+          "uncleared_balance": 0,
+          "deleted": false
+        }
+      ],
+      "category_groups": [
+        { "id": "grp-immediate", "name": "Immediate Obligations", "hidden": false, "deleted": false },
+        { "id": "grp-true-expenses", "name": "True Expenses", "hidden": false, "deleted": false },
+        { "id": "grp-business", "name": "Business (Schedule C)", "hidden": false, "deleted": false }
+      ],
+      "categories": [
+        {
+          "id": "cat-groceries",
+          "category_group_id": "grp-immediate",
+          "name": "Groceries",
+          "hidden": false,
+          "budgeted": 600000,
+          "activity": -423150,
+          "balance": 176850,
+          "deleted": false
+        },
+        {
+          "id": "cat-rent",
+          "category_group_id": "grp-immediate",
+          "name": "Rent",
+          "hidden": false,
+          "budgeted": 1800000,
+          "activity": -1800000,
+          "balance": 0,
+          "deleted": false
+        },
+        {
+          "id": "cat-auto-maint",
+          "category_group_id": "grp-true-expenses",
+          "name": "Auto Maintenance",
+          "hidden": false,
+          "budgeted": 150000,
+          "activity": 0,
+          "balance": 450000,
+          "deleted": false
+        },
+        {
+          "id": "cat-software",
+          "category_group_id": "grp-business",
+          "name": "Software & Subscriptions",
+          "hidden": false,
+          "budgeted": 100000,
+          "activity": -49990,
+          "balance": 50010,
+          "deleted": false
+        }
+      ],
+      "payees": [
+        { "id": "payee-employer", "name": "Acme Corp Payroll", "deleted": false },
+        { "id": "payee-grocer", "name": "Corner Market", "deleted": false },
+        { "id": "payee-landlord", "name": "Maple Property Mgmt", "deleted": false },
+        { "id": "payee-saas", "name": "DevTools SaaS", "deleted": false },
+        { "id": "payee-transfer-savings", "name": "Transfer : Emergency Savings", "transfer_account_id": "acct-savings", "deleted": false }
+      ],
+      "transactions": [
+        {
+          "id": "txn-paycheck",
+          "date": "2026-06-01",
+          "amount": 5000000,
+          "memo": "Monthly paycheck",
+          "cleared": "cleared",
+          "approved": true,
+          "account_id": "acct-checking",
+          "payee_id": "payee-employer",
+          "category_id": null,
+          "transfer_account_id": null,
+          "deleted": false
+        },
+        {
+          "id": "txn-groceries-1",
+          "date": "2026-06-03",
+          "amount": -423150,
+          "memo": "Weekly groceries",
+          "cleared": "cleared",
+          "approved": true,
+          "account_id": "acct-checking",
+          "payee_id": "payee-grocer",
+          "category_id": "cat-groceries",
+          "transfer_account_id": null,
+          "deleted": false
+        },
+        {
+          "id": "txn-rent",
+          "date": "2026-06-01",
+          "amount": -1800000,
+          "memo": "June rent",
+          "cleared": "cleared",
+          "approved": true,
+          "account_id": "acct-checking",
+          "payee_id": "payee-landlord",
+          "category_id": "cat-rent",
+          "transfer_account_id": null,
+          "deleted": false
+        },
+        {
+          "id": "txn-saas",
+          "date": "2026-06-05",
+          "amount": -49990,
+          "memo": "Annual dev tooling",
+          "cleared": "uncleared",
+          "approved": false,
+          "account_id": "acct-credit",
+          "payee_id": "payee-saas",
+          "category_id": "cat-software",
+          "transfer_account_id": null,
+          "deleted": false
+        },
+        {
+          "id": "txn-transfer-savings",
+          "date": "2026-06-02",
+          "amount": -1000000,
+          "memo": "Move to emergency fund",
+          "cleared": "cleared",
+          "approved": true,
+          "account_id": "acct-checking",
+          "payee_id": "payee-transfer-savings",
+          "category_id": null,
+          "transfer_account_id": "acct-savings",
+          "deleted": false
+        }
+      ]
+    },
+    "server_knowledge": 1042
+  }
+}
