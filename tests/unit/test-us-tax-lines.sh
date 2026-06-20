@@ -27,6 +27,19 @@ assert_jq() {
   fi
 }
 
+# assert_eq <desc> <jq-filter> <expected> — passes when the filter's raw value
+# equals <expected>. Mirrors assert_eq in tests/unit/test-config.sh so exact
+# values are pinned, not just types.
+assert_eq() {
+  local desc="$1" filter="$2" expected="$3" actual
+  actual="$(jq -r "$filter" "$FILE" 2>/dev/null)"
+  if [ "$actual" = "$expected" ]; then
+    ok "$desc"
+  else
+    no "$desc — expected: [$expected] got: [$actual]"
+  fi
+}
+
 command -v jq >/dev/null 2>&1 || { echo "jq is required to run these tests"; exit 2; }
 
 echo "== us-tax-lines.json =="
@@ -46,16 +59,19 @@ assert_jq "all Schedule C lines except line 1 are expenses" \
 assert_jq "every Schedule C line applies to business entities" \
   '[.lines[] | select(.schedule=="C") | .appliesToBusinessEntities] | all(.==true)'
 
-# AC: four Schedule A itemized buckets, household-level.
+# AC: four Schedule A itemized buckets, household-level. The category must match
+# the bucket (guards against silent drift between id and category).
 for bucket in medical salt interest charitable; do
-  assert_jq "schedA.$bucket present, schedule A, household-level" \
-    "any(.lines[]; .id==\"schedA.$bucket\" and .schedule==\"A\" and (.lineLabel|length>0) and (.description|length>0) and .appliesToBusinessEntities==false)"
+  assert_jq "schedA.$bucket present, schedule A, category==$bucket, household-level" \
+    "any(.lines[]; .id==\"schedA.$bucket\" and .schedule==\"A\" and .category==\"$bucket\" and (.lineLabel|length>0) and (.description|length>0) and .appliesToBusinessEntities==false)"
 done
 
 # AC: Schedule 1 adjustment lines (at minimum these three), household-level.
+# Also assert lineLabel/description are present (the data carries them; pinning
+# their presence guards against silent drift even though the AC is satisfied by id).
 for adj in seTaxHalfDeduction studentLoanInterest iraContributions; do
-  assert_jq "sched1.$adj present, schedule 1, household-level" \
-    "any(.lines[]; .id==\"sched1.$adj\" and .schedule==\"1\" and .appliesToBusinessEntities==false)"
+  assert_jq "sched1.$adj present, schedule 1, labelled + described, household-level" \
+    "any(.lines[]; .id==\"sched1.$adj\" and .schedule==\"1\" and (.lineLabel|length>0) and (.description|length>0) and .appliesToBusinessEntities==false)"
 done
 
 # AC: a Schedule SE record covering the SE tax line at the 15.3% rate.
@@ -65,9 +81,16 @@ assert_jq "schedSE carries the 15.3% rate" \
   'any(.lines[]; .id=="schedSE" and .rate==0.153)'
 
 # AC: standardDeductionByYear has the current tax year for all five filing statuses.
-for fs in single mfj mfs hoh qw; do
-  assert_jq "standardDeductionByYear.$fs has a 2025 dollar amount" \
-    ".standardDeductionByYear.$fs[\"2025\"] | type==\"number\""
+# Pin exact dollar amounts (not just type) so a corrupt value can't pass green —
+# matches the assert_eq convention in test-config.sh and the pinned thresholds below.
+# 2024 / 2025 IRS standard deductions per filing status: status="2024 2025".
+for entry in "single=14600 15000" "mfj=29200 30000" "mfs=14600 15000" "hoh=21900 22500" "qw=29200 30000"; do
+  fs="${entry%%=*}"; amounts="${entry#*=}"
+  d2024="${amounts%% *}"; d2025="${amounts##* }"
+  assert_eq "standardDeductionByYear.$fs 2024 amount is $d2024 dollars" \
+    ".standardDeductionByYear.$fs[\"2024\"]" "$d2024"
+  assert_eq "standardDeductionByYear.$fs 2025 amount is $d2025 dollars" \
+    ".standardDeductionByYear.$fs[\"2025\"]" "$d2025"
 done
 # AC: structure matches schema #20 (filing-status → four-digit year → number),
 # so adding a tax year is a pure data edit.
@@ -79,9 +102,11 @@ assert_jq "thresholds.medicalAgiPercent == 0.075" '.thresholds.medicalAgiPercent
 assert_jq "thresholds.seTaxRate == 0.153" '.thresholds.seTaxRate==0.153'
 assert_jq "thresholds.saltCap == 10000" '.thresholds.saltCap==10000'
 
-# AC: monetary unit is explicitly documented (dollars, not milliunits).
+# AC: monetary unit is explicitly documented (dollars, not milliunits). Match the
+# "milli" stem rather than the exact "milliunit" token so a legitimate reword
+# ("milli-units", "milliunits") doesn't false-fail this guard.
 assert_jq "top-level \$comment documents dollars (not milliunits)" \
-  '(.["$comment"] | ascii_downcase | (contains("dollar") and contains("milliunit")))'
+  '(.["$comment"] | ascii_downcase | (contains("dollar") and contains("milli")))'
 assert_jq "moneyUnit field is dollars" '.moneyUnit=="dollars"'
 
 # AC: no vendor keyword lists / payee heuristics leak in.
@@ -92,8 +117,10 @@ for v in $VENDORS; do
 done
 if [ "$vendor_hit" -eq 0 ]; then ok "no prototype vendor tokens appear in the file"; else no "no prototype vendor tokens appear in the file"; fi
 
-# AC: purely declarative — no executable logic / template expressions.
-if grep -qE 'function|=>|\$\{|`|<%' "$FILE"; then
+# AC: purely declarative — no executable logic / template expressions. The arrow
+# pattern is scoped to arrow-FUNCTION shapes (`) =>` or `=> {`/`=> (`) so a
+# legitimate prose arrow in a description ("income => expense") doesn't false-fail.
+if grep -qE 'function|\$\{|`|<%|\)[[:space:]]*=>|=>[[:space:]]*[{(]' "$FILE"; then
   no "file contains no executable logic or template expressions"
 else
   ok "file contains no executable logic or template expressions"

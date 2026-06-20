@@ -107,7 +107,7 @@
       "id": "schedA.salt",
       "schedule": "A",
       "lineLabel": "State and local taxes (SALT)",
-      "description": "Schedule A state-and-local taxes: income or sales tax plus property tax, deductible up to thresholds.saltCap dollars. Household-level, not tied to a business entity.",
+      "description": "Schedule A state-and-local taxes: income or sales tax plus property tax, deductible up to thresholds.saltCap dollars (federal cap is 10000, halved to 5000 if filing MFS — applied by filing status downstream by the engine, not in this catalog). Household-level, not tied to a business entity.",
       "category": "salt",
       "appliesToBusinessEntities": false
     },
@@ -170,7 +170,7 @@
     "qw": { "2024": 29200, "2025": 30000 }
   },
   "thresholds": {
-    "$comment": "Tunable tax thresholds and rates, mirroring the thresholds object in tax-profile.schema.json (issue #20). Rates are fractions (0.075 = 7.5%), not dollars and not percentages; saltCap is a US DOLLAR amount, not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars).",
+    "$comment": "Tunable tax thresholds and rates, mirroring the thresholds object in tax-profile.schema.json (issue #20). Rates are fractions (0.075 = 7.5%), not dollars and not percentages; saltCap is a US DOLLAR amount, not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars). The federal saltCap is 10000 (5000 if filing MFS); this single scalar is the base cap, and the MFS halving is applied by filing status downstream by the engine, not encoded here.",
     "medicalAgiPercent": 0.075,
     "seTaxRate": 0.153,
     "saltCap": 10000
