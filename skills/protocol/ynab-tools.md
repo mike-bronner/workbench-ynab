@@ -6,11 +6,12 @@
 > [`docs/mcp-capability-map.md`](../../docs/mcp-capability-map.md), and the
 > orchestrator agent's `tools:` frontmatter
 > ([`agents/ynab-orchestrator.md`](../../agents/ynab-orchestrator.md)) — which
-> Claude Code requires to hold literal names and which mirrors the read tools
-> below. Every other skill, command, hook, and the pre-approval globs reference
-> or are generated from this file. A namespace change is an edit here (plus the
-> derivation rule in the capability map, and any changed read-tool suffix
-> mirrored into the orchestrator). The guard
+> Claude Code requires to hold literal names and which wires the subset of the
+> read tools below that the planner stub currently needs. Every other skill,
+> command, hook, and the pre-approval globs reference or are generated from this
+> file. A namespace change is an edit here (plus the derivation rule in the
+> capability map, and any changed suffix the orchestrator wires mirrored into
+> it). The guard
 > [`bin/check-tool-name-sources.sh`](../../bin/check-tool-name-sources.sh)
 > enforces that nothing outside the allowlist copies a name.
 
@@ -68,15 +69,21 @@ single glob above is the like-for-like default once write-back is approved.
 
 ## Orchestrator tools list
 
-The read-only orchestrator agent's `tools:` allow-list is exactly the **read
-tools** above. The orchestrator never holds write tools — write paths run from
-the approval-gated `/ynab-apply` command (Sprint 4), not the orchestrator.
+The read-only orchestrator agent's `tools:` allow-list is a **subset** of the
+**read tools** above: the planner stub currently wires the five reads it needs
+(`list_budgets`, `list_accounts`, `list_categories`, `list_transactions`,
+`get_month`). The remaining two read tools — `list_payees` and
+`export_transactions` — are in the canonical read set above but are not yet
+wired into the stub; they widen into the orchestrator in Sprint 3 as the planner
+grows. The orchestrator never holds write tools — write paths run from the
+approval-gated `/ynab-apply` command (Sprint 4), not the orchestrator.
 
 ## Maintenance
 
 - Change a tool name (or swap the MCP): edit the lists above **and** the
-  derivation rule in the capability map, mirror any changed **read-tool** suffix
-  into the orchestrator agent's `tools:` frontmatter, then run
+  derivation rule in the capability map, mirror any changed suffix that the
+  orchestrator wires into its `tools:` frontmatter (it carries the five reads
+  above, not `list_payees` / `export_transactions` until Sprint 3), then run
   `bin/check-tool-name-sources.sh`.
 - Add a logical operation: add it to the capability map table first, then add
   its concrete name here.

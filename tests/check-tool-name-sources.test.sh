@@ -78,6 +78,11 @@ run_case "concrete name in README is caught"         1 "README.md"          "see
 run_case "concrete name in JSON config is caught"    1 "config.json"        "{\"tool\": \"$CONCRETE\"}"
 run_case "concrete name in an asset is caught"       1 "assets/contract.md" "apply via $CONCRETE"
 run_case "concrete name in a command is caught"      1 "commands/run.md"    "calls $CONCRETE"
+# Agent and doc both carry an allowlist exception (one specific file each), so a
+# name in a NON-allowlisted sibling is exactly where a real scatter would hide —
+# prove the guard still catches it.
+run_case "concrete name in a non-allowlisted agent is caught" 1 "agents/other.md"  "tools: $CONCRETE"
+run_case "concrete name in a non-allowlisted doc is caught"   1 "docs/other.md"    "see $CONCRETE"
 
 echo "Self-test: allowlist and derivation-rule exemptions pass"
 run_case "concrete name in the SSoT is permitted"        0 "skills/protocol/ynab-tools.md" "$CONCRETE"
@@ -86,6 +91,8 @@ run_case "concrete name in the orchestrator permitted"   0 "agents/ynab-orchestr
 run_case "bare prefix alone is not flagged"              0 "skills/review.md"              "prefix is $PREFIX"
 run_case "family glob alone is not flagged"              0 "skills/review.md"              "glob is $GLOB"
 run_case "concrete name inside vendor/ is ignored"       0 "vendor/index.cjs"             "$CONCRETE"
+run_case "concrete name inside .git/ is ignored"         0 ".git/probe.md"                "$CONCRETE"
+run_case "concrete name inside node_modules/ is ignored" 0 "node_modules/pkg/index.js"    "$CONCRETE"
 run_case "clean tree passes"                             0 ""                              ""
 
 echo

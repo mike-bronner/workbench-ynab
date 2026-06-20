@@ -90,8 +90,8 @@ approved in Sprint 4).
 > the rituals need the 14 above. All 14 concrete suffixes were verified to be
 > registered tool ids in that bundle. On a future re-vendor or MCP swap,
 > re-confirm each suffix against the new bundle and correct any drift **here, in
-> [`ynab-tools.md`](../skills/protocol/ynab-tools.md), and (for changed
-> read-tool suffixes) in the orchestrator's mirrored `tools:` list** — the
+> [`ynab-tools.md`](../skills/protocol/ynab-tools.md), and (for a changed suffix
+> the orchestrator actually wires) in the orchestrator's `tools:` list** — the
 > three allowlisted files. The guard script (below) proves nothing else has
 > copied a name.
 
@@ -115,7 +115,7 @@ allowlist. The allowlist is exactly these files:
 |---|---|
 | [`skills/protocol/ynab-tools.md`](../skills/protocol/ynab-tools.md) | the machine-referenced SSoT — the names themselves |
 | `docs/mcp-capability-map.md` (this file) | the human-readable contract — the *why* |
-| [`agents/ynab-orchestrator.md`](../agents/ynab-orchestrator.md) | the read-only orchestrator's `tools:` frontmatter — Claude Code requires literal names there (no file reference, no glob, and a read-only agent must not use the write-inclusive family glob), so it mirrors the SSoT read tools and is allowlisted as a deliberate, documented swap consumer |
+| [`agents/ynab-orchestrator.md`](../agents/ynab-orchestrator.md) | the read-only orchestrator's `tools:` frontmatter — Claude Code requires literal names there (no file reference, no glob, and a read-only agent must not use the write-inclusive family glob), so it wires the subset of the SSoT read tools the planner stub needs (Sprint 3 widens it to the full read set) and is allowlisted as a deliberate, documented swap consumer |
 
 Everywhere else, a hard-coded name fails the guard. The bare prefix
 (`mcp__plugin_workbench-ynab_ynab__`) and the family glob
@@ -155,9 +155,9 @@ To replace the vendored MCP (e.g. with the bundled-own MCP from M6-8):
    `mcp__plugin_workbench-ynab_ynab__` prefix.
 2. **Regenerate the tool-name list** in
    [`ynab-tools.md`](../skills/protocol/ynab-tools.md) from this map — update any
-   suffix that the new MCP names differently, mirror any changed **read-tool**
-   suffix into the orchestrator agent's `tools:` frontmatter (the one other
-   allowlisted consumer that holds literal names), then run
+   suffix that the new MCP names differently, mirror any changed suffix **the
+   orchestrator wires** into its `tools:` frontmatter (the one other allowlisted
+   consumer that holds literal names), then run
    [`bin/check-tool-name-sources.sh`](../bin/check-tool-name-sources.sh) to
    confirm nothing else has copied a stale name.
 3. **Run the offline-boot verification** (Sprint 1 linchpin) to confirm the new

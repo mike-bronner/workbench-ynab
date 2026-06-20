@@ -11,8 +11,9 @@
 #                                     Code requires literal tool names there; it
 #                                     cannot reference a file or glob, and the
 #                                     read-only orchestrator cannot use the
-#                                     write-inclusive family glob. It mirrors the
-#                                     SSoT read-tools list and is a deliberate,
+#                                     write-inclusive family glob. It wires the
+#                                     subset of the SSoT read-tools list the
+#                                     planner stub needs and is a deliberate,
 #                                     documented swap consumer, not scatter.
 #
 # Every OTHER surface — any skill, agent, command, hook, bin script, asset,
