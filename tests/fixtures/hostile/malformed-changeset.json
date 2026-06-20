@@ -1,0 +1,57 @@
+{
+  "_fixture": "Negative / reject-path fixtures for the M4 change-set schema validator (issue #52, design ref M4-1). Each entry is a change-set the validator MUST reject; `_reject_reason` states why. These pre-position the harness for the validator's reject-path regression guard surfaced by Holmes on issue #4 (PR #92 review): the positive `validate:fixtures` run alone leaves the reject path unguarded. When the validator lands in main, its negative tests iterate these cases. Money amounts are integer milliunits.",
+  "cases": [
+    {
+      "_name": "money_movement_flag_set",
+      "_reject_reason": "money_movement must never be true — the plugin is ledger-only and never initiates transfers or payments (hard write-safety block).",
+      "changeset": {
+        "money_movement": true,
+        "rationale": "Pay the credit card from checking",
+        "operations": [
+          { "op": "transfer", "from_account_id": "acct-checking", "to_account_id": "acct-credit", "amount": -842300 }
+        ]
+      }
+    },
+    {
+      "_name": "empty_operations",
+      "_reject_reason": "operations must be a non-empty array — an empty change-set has nothing to apply and should be rejected, not silently no-op'd.",
+      "changeset": {
+        "money_movement": false,
+        "rationale": "Nothing to do",
+        "operations": []
+      }
+    },
+    {
+      "_name": "delete_duplicate_non_destructive_risk",
+      "_reject_reason": "a delete_duplicate operation is destructive and must carry a destructive risk classification; declaring it non_destructive is a contradiction the validator rejects.",
+      "changeset": {
+        "money_movement": false,
+        "rationale": "Remove the duplicated grocery transaction",
+        "operations": [
+          { "op": "delete_duplicate", "transaction_id": "txn-groceries-1", "risk": "non_destructive" }
+        ]
+      }
+    },
+    {
+      "_name": "float_milliunit_amount",
+      "_reject_reason": "amounts are integer milliunits; a float like -423150.5 is invalid and must be rejected rather than rounded.",
+      "changeset": {
+        "money_movement": false,
+        "rationale": "Categorize groceries",
+        "operations": [
+          { "op": "categorize", "transaction_id": "txn-groceries-1", "category_id": "cat-groceries", "amount": -423150.5 }
+        ]
+      }
+    },
+    {
+      "_name": "missing_rationale",
+      "_reject_reason": "every change-set must carry a human-readable rationale for the audit log; a change-set without one is rejected.",
+      "changeset": {
+        "money_movement": false,
+        "operations": [
+          { "op": "categorize", "transaction_id": "txn-groceries-1", "category_id": "cat-groceries" }
+        ]
+      }
+    }
+  ]
+}

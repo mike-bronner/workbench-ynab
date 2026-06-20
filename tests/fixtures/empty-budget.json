@@ -1,0 +1,51 @@
+{
+  "_fixture": "A brand-new / empty YNAB budget (GAP-4 edge case). Default category structure exists, but there are no accounts and no transactions yet. Use this to verify the review engine and write-back paths behave on a fresh budget instead of crashing or emitting nonsense. Amounts are integer milliunits.",
+  "data": {
+    "budget": {
+      "id": "budget-fixture-empty",
+      "name": "New Empty Budget",
+      "last_modified_on": "2026-06-19T00:00:00+00:00",
+      "first_month": "2026-06-01",
+      "last_month": "2026-06-01",
+      "currency_format": {
+        "iso_code": "USD",
+        "decimal_digits": 2,
+        "decimal_separator": ".",
+        "group_separator": ",",
+        "currency_symbol": "$",
+        "symbol_first": true,
+        "display_symbol": true
+      },
+      "accounts": [],
+      "category_groups": [
+        { "id": "grp-immediate", "name": "Immediate Obligations", "hidden": false, "deleted": false },
+        { "id": "grp-true-expenses", "name": "True Expenses", "hidden": false, "deleted": false }
+      ],
+      "categories": [
+        {
+          "id": "cat-default-1",
+          "category_group_id": "grp-immediate",
+          "name": "Rent/Mortgage",
+          "hidden": false,
+          "budgeted": 0,
+          "activity": 0,
+          "balance": 0,
+          "deleted": false
+        },
+        {
+          "id": "cat-default-2",
+          "category_group_id": "grp-true-expenses",
+          "name": "Auto Maintenance",
+          "hidden": false,
+          "budgeted": 0,
+          "activity": 0,
+          "balance": 0,
+          "deleted": false
+        }
+      ],
+      "payees": [],
+      "transactions": []
+    },
+    "server_knowledge": 1
+  }
+}

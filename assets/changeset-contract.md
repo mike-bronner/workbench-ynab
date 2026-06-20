@@ -71,18 +71,23 @@ Every monetary field — `amount`, `budgeted`, `cleared_balance`,
 ## 3. Apply uses the **namespaced** MCP tools — never `mcp__ynab__*`
 
 Downstream apply code calls the YNAB MCP through its **fully namespaced** tool
-names. The MCP is vendored into this plugin and exposed under the
-`plugin_workbench-ynab_ynab` namespace, so the correct names are:
+names, of the `mcp__plugin_workbench-ynab_ynab__ynab_<op>` form (the MCP is
+vendored into this plugin and exposed under the `plugin_workbench-ynab_ynab`
+namespace).
 
-- `mcp__plugin_workbench-ynab_ynab__ynab_update_transaction`
-- `mcp__plugin_workbench-ynab_ynab__ynab_update_transactions`
-- `mcp__plugin_workbench-ynab_ynab__ynab_update_category`
-- `mcp__plugin_workbench-ynab_ynab__ynab_delete_transaction`
-- `mcp__plugin_workbench-ynab_ynab__ynab_reconcile_account`
+**The concrete names are not duplicated here.** They live in the single source
+of truth — [`skills/protocol/ynab-tools.md`](../skills/protocol/ynab-tools.md)
+(write-tools section) — alongside the namespace derivation rule and swap
+procedure in [`docs/mcp-capability-map.md`](../docs/mcp-capability-map.md). Apply
+code resolves each write-tool name from there, so an MCP swap stays a one-file
+edit; the guard
+[`bin/check-tool-name-sources.sh`](../bin/check-tool-name-sources.sh) fails the
+build if a concrete name is copied into this contract or any other consumer.
 
 > ⚠️ **Do not use the bare `mcp__ynab__*` names.** They will not resolve against
-> the vendored, namespaced MCP. Consumers must hardcode the
-> `mcp__plugin_workbench-ynab_ynab__*` namespace shown above.
+> the vendored, namespaced MCP. Consumers must use the
+> `mcp__plugin_workbench-ynab_ynab__*` namespace, resolved from the source of
+> truth above.
 
 ### Operation → apply tool mapping
 
@@ -93,8 +98,10 @@ names. The MCP is vendored into this plugin and exposed under the
 | `delete_duplicate` | `ynab_delete_transaction`                                              | M4-8        |
 | `reconcile`        | `ynab_reconcile_account` + `ynab_update_transaction(s)`                | M4-9        |
 
-(Tool names above are shown unqualified for readability; apply code must use the
-fully namespaced `mcp__plugin_workbench-ynab_ynab__*` form from the list above.)
+(Operations are shown by their unqualified `ynab_<op>` suffix for readability;
+apply code uses the fully namespaced `mcp__plugin_workbench-ynab_ynab__*` form
+resolved from [`ynab-tools.md`](../skills/protocol/ynab-tools.md) — never a name
+copied into this document.)
 
 ---
 

@@ -124,14 +124,15 @@ filters) — they are passed straight through to `jq`.
 
 ## Testing the loader
 
-`tests/unit/test-config.sh` sources `bin/config.sh` against a sandbox config (via
+`tests/unit/config.test.sh` sources `bin/config.sh` against a sandbox config (via
 the `YNAB_CONFIG_FILE` seam) and asserts: a present field reads back correctly, an
 absent field returns empty, and the missing-config guard emits the expected error
-text and a non-zero exit. Run it directly:
+text and a non-zero exit. It follows the issue #4 harness convention — sources
+`tests/lib/assert.sh`, organises the cases into `test_*` functions, and ends with
+`run_tests` — so the repo-wide entrypoint auto-discovers it. Run the whole suite,
+or just this file:
 
 ```bash
-tests/unit/test-config.sh
+scripts/test.sh                            # the whole suite
+scripts/test.sh tests/unit/config.test.sh  # just the config-loader tests
 ```
-
-It also slots into the repo-wide test entrypoint established in issue #4
-(`tests/unit/` + `scripts/test.sh`).
