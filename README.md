@@ -37,6 +37,15 @@ The assistant has a default voice and, by default, speaks as **your own Claude a
 
 Mirrors the sibling workbench plugins (`workbench-core`, `workbench-bujo`, `workbench-dev-team`): a `plugin.json`-declared MCP launched via `bin/launcher.sh`, ritual skills, a read-only orchestrator agent, session hooks, and a one-time `setup` command. The bundled YNAB MCP is [`@dizzlkheinz/ynab-mcpb`](https://www.npmjs.com/package/@dizzlkheinz/ynab-mcpb), vendored and version-frozen.
 
+## Versioning
+
+Two version numbers live in this repo. They track different things, are deliberately **independent**, and are **never co-bumped**.
+
+- **The plugin's own version** lives in [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json) (currently `0.1.0`). This is the **only** version release automation bumps — the release workflow's sole bump target is `.claude-plugin/plugin.json`, and no other manifest, JSON, or config file in the repo carries a release version. It starts at `0.1.0` and is cut to `1.0.0` at first release.
+- **The vendored YNAB MCP version** is recorded in [`vendor/ynab-mcp/vendored.json`](vendor/ynab-mcp/vendored.json) (`@dizzlkheinz/ynab-mcpb@0.26.10`). It is **frozen, provenance-only** — a record of exactly which upstream bundle is checked into git, not a number this plugin releases against. Release automation **never** touches it; it changes only when the bundle is deliberately re-vendored.
+
+The two schemes do not move together: bumping the plugin version leaves the vendored bundle version untouched, and re-vendoring the bundle leaves the plugin version untouched.
+
 ## License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
