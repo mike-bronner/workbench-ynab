@@ -202,21 +202,35 @@ _audit_append() {
   fi
 
   # The audit trail persists financial data to disk — before/after milliunits,
-  # category names, account and transaction ids — so it must NOT be world-readable
-  # by default. Restrict perms at creation: the audit dir lands 0700 and each
-  # record file 0600. `umask 077` is scoped to a subshell so sourcing this helper
-  # never mutates the caller's umask (the same no-side-effects-at-load contract the
-  # rest of this file keeps); `-m 700` pins the dir mode explicitly even where the
-  # caller's umask is already permissive. (No sibling helper sets modes because
-  # none of them write sensitive data — this one does.)
+  # category names, account and transaction ids — so it must NOT be world-readable:
+  # the audit dir must be 0700 and each record file 0600 (owner-only). `umask 077`
+  # is scoped to a subshell so sourcing this helper never mutates the caller's umask
+  # (the same no-side-effects-at-load contract the rest of this file keeps), and it
+  # makes a freshly-CREATED dir/file land owner-only. But `mkdir -m` and `umask`
+  # only bite at CREATION — a PRE-EXISTING dir/file left at a looser mode (a 0755
+  # dir from an earlier run, external tampering) would never be tightened by an
+  # append. So we also `chmod` explicitly afterward to ENFORCE the mode every time,
+  # not just on the first write. The 0700 dir is the real access boundary; the 0600
+  # file is defense-in-depth. (No sibling helper sets modes because none of them
+  # write sensitive data — this one does.)
   local dir; dir="$(_audit_dir)"
+  local file; file="$(_audit_file)"
+
   if ! ( umask 077; mkdir -p -m 700 "$dir" ) 2>/dev/null; then
     echo "audit-log: cannot create audit dir: $dir" 1>&2
     return 1
   fi
+  if ! chmod 700 "$dir" 2>/dev/null; then
+    echo "audit-log: cannot enforce owner-only perms on audit dir: $dir" 1>&2
+    return 1
+  fi
 
-  if ! ( umask 077; printf '%s\n' "$record" >> "$(_audit_file)" ); then
-    echo "audit-log: append failed: $(_audit_file)" 1>&2
+  if ! ( umask 077; printf '%s\n' "$record" >> "$file" ); then
+    echo "audit-log: append failed: $file" 1>&2
+    return 1
+  fi
+  if ! chmod 600 "$file" 2>/dev/null; then
+    echo "audit-log: cannot enforce owner-only perms on audit file: $file" 1>&2
     return 1
   fi
 }

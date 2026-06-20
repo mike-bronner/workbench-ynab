@@ -27,9 +27,13 @@ HOME-relative via the same workbench-core pattern the config loader uses (see
 never points inside the repo.
 
 Because each record persists financial data — before/after milliunits, category
-names, account and transaction ids — the writer creates the audit dir **0700**
-and every `audit-YYYY-MM.jsonl` file **0600** (owner-only), so the trail is not
-world-readable by default.
+names, account and transaction ids — the writer keeps the audit dir **0700** and
+every `audit-YYYY-MM.jsonl` file **0600** (owner-only), so the trail is not
+world-readable. It both creates them owner-only (a subshell-scoped `umask 077`
+plus `mkdir -m 700`) **and** `chmod`s them on every append, so a pre-existing dir
+or file left at a looser mode is tightened rather than silently trusted — `mkdir
+-m`/`umask` only bite at creation. The 0700 dir is the real access boundary; the
+0600 file is defense-in-depth.
 
 ## Why JSONL (one object per line), not a single JSON array
 
