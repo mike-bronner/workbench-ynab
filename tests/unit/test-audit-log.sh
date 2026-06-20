@@ -115,7 +115,8 @@ assert_jq "after stored verbatim"            "$REC" '.after == {"category_id":"c
 # ---------------------------------------------------------------------------
 echo "AC: dry-run operations are written with dry_run:true:"
 export YNAB_AUDIT_TIMESTAMP="2026-06-15T12:05:00Z"
-_audit_append "$CATEGORIZE_OP" '{"tool":"mcp__ynab__ynab_update_transaction","status":"dry_run","schema_version":"1.0.0","run_id":"run-A"}' true
+dry_stdout="$(_audit_append "$CATEGORIZE_OP" '{"tool":"mcp__ynab__ynab_update_transaction","status":"dry_run","schema_version":"1.0.0","run_id":"run-A"}' true)"
+assert_empty "dry-run writer prints nothing to STDOUT"   "$dry_stdout"
 assert_eq "two records now in the file"      "2" "$(wc -l < "$FILE" | tr -d ' ')"
 DRY_REC="$(tail -1 "$FILE")"
 assert_jq "dry-run record has dry_run:true"  "$DRY_REC" '.dry_run == true'
@@ -159,6 +160,10 @@ export YNAB_AUDIT_TIMESTAMP="2026-06-15T14:01:00Z"
 _audit_append "$ALLOCATE_OP" "$ALLOCATE_RES" false
 LAST_OUT="$(_audit_read_last 1)"
 assert_jq "last 1 returns the most recent (allocate) record" "$LAST_OUT" '.operation_id == "op-alloc-1"'
+# allocate carries only category_id (no transaction_id/account_id/transaction_ids),
+# so this exercises the category_id-only branch of the target_entity_ids derivation
+# (bin/audit-log.sh) — a regression dropping it to [] would otherwise pass the suite.
+assert_jq "allocate target_entity_ids = [category_id]"       "$LAST_OUT" '.target_entity_ids == ["cat-7"]'
 assert_jq "allocate before.budgeted shown as 250 (÷1000)"    "$LAST_OUT" '.before.budgeted == 250'
 assert_jq "allocate after.budgeted shown as 300 (÷1000)"     "$LAST_OUT" '.after.budgeted == 300'
 LAST2_COUNT="$(_audit_read_last 2 | jq -s 'length')"
@@ -256,6 +261,36 @@ _audit_read_last 10 >/dev/null 2>&1; rc=$?
 assert_eq "read_last FAILS on a malformed body line (exit 1)"        "1" "$rc"
 cb_err="$(_audit_read_last 10 2>&1 1>/dev/null)"
 assert_contains "body-corruption diagnostic names audit-log on STDERR" "$cb_err" "audit-log:"
+# Both readers share parse_jsonl, so read_run must fail just as loudly — an
+# asymmetric test (read_last only) is exactly what would miss a divergence between
+# the two. run-A brackets the corrupt body line (both good records carry run-A).
+_audit_read_run run-A >/dev/null 2>&1; rc=$?
+assert_eq "read_run FAILS on a malformed body line (exit 1)"         "1" "$rc"
+cb_run_err="$(_audit_read_run run-A 2>&1 1>/dev/null)"
+assert_contains "read_run body-corruption diagnostic names audit-log on STDERR" "$cb_run_err" "audit-log:"
+
+# A body line equal to the JSON literal `null` is VALID JSON yet NOT a record:
+# `fromjson` accepts it without error, so without the object type-guard read_last
+# would fabricate a phantom {"before":null,"after":null} (exit 0) and read_run
+# would silently drop it (exit 0) — an audit log inventing or losing a change is
+# the exact trust failure this feature exists to prevent. With the guard BOTH
+# readers must fail loudly (exit 1, audit-log: on STDERR).
+echo 'crash recovery: a `null` body line fails the read for BOTH helpers:'
+export YNAB_AUDIT_DIR="$SANDBOX/corrupt-null"
+export YNAB_AUDIT_MONTH="2026-06"
+export YNAB_AUDIT_TIMESTAMP="2026-06-15T17:10:00Z"
+_audit_append "$CATEGORIZE_OP" "$CATEGORIZE_RES" false   # good record (run-A), a BODY line
+NFILE="$YNAB_AUDIT_DIR/audit-2026-06.jsonl"
+printf '%s\n' 'null' >> "$NFILE"                          # the literal null, terminated → a BODY line
+_audit_append "$ALLOCATE_OP" "$ALLOCATE_RES" false       # another good record after it (run-A)
+_audit_read_last 10 >/dev/null 2>&1; rc=$?
+assert_eq "read_last FAILS on a \`null\` body line (exit 1)"         "1" "$rc"
+nl_err="$(_audit_read_last 10 2>&1 1>/dev/null)"
+assert_contains "null-body read_last diagnostic names audit-log on STDERR" "$nl_err" "audit-log:"
+_audit_read_run run-A >/dev/null 2>&1; rc=$?
+assert_eq "read_run FAILS on a \`null\` body line (exit 1)"          "1" "$rc"
+nlr_err="$(_audit_read_run run-A 2>&1 1>/dev/null)"
+assert_contains "null-body read_run diagnostic names audit-log on STDERR" "$nlr_err" "audit-log:"
 
 # ---------------------------------------------------------------------------
 echo "diagnostics go to STDERR, never STDOUT; invalid JSON fails cleanly:"
@@ -295,6 +330,24 @@ _audit_append "$CATEGORIZE_OP" "$CATEGORIZE_RES" false
 mode_of() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
 assert_eq "audit dir is created mode 700"  "700" "$(mode_of "$YNAB_AUDIT_DIR")"
 assert_eq "record file is created mode 600" "600" "$(mode_of "$YNAB_AUDIT_DIR/audit-2026-06.jsonl")"
+
+# Perms must be ENFORCED, not merely set at creation: `mkdir -m`/`umask` only bite
+# when the dir/file is first made, so a PRE-EXISTING loose dir (0755) or file (0644)
+# — from an older run or tampering — must be tightened on the next append, else the
+# financial trail stays world-readable. Seed a loose dir+file, then append.
+echo "owner-only perms are enforced on a PRE-EXISTING loose dir/file:"
+export YNAB_AUDIT_DIR="$SANDBOX/perms-pre/nested"
+export YNAB_AUDIT_MONTH="2026-06"
+export YNAB_AUDIT_TIMESTAMP="2026-06-15T16:05:00Z"
+mkdir -p "$YNAB_AUDIT_DIR"; chmod 755 "$YNAB_AUDIT_DIR"
+PRE_FILE="$YNAB_AUDIT_DIR/audit-2026-06.jsonl"
+: > "$PRE_FILE"; chmod 644 "$PRE_FILE"
+assert_eq "pre-existing dir starts at 755"  "755" "$(mode_of "$YNAB_AUDIT_DIR")"
+assert_eq "pre-existing file starts at 644" "644" "$(mode_of "$PRE_FILE")"
+_audit_append "$CATEGORIZE_OP" "$CATEGORIZE_RES" false; rc=$?
+assert_eq "append into a pre-existing loose dir succeeds"   "0"   "$rc"
+assert_eq "append tightens the pre-existing dir to 700"     "700" "$(mode_of "$YNAB_AUDIT_DIR")"
+assert_eq "append tightens the pre-existing file to 600"    "600" "$(mode_of "$PRE_FILE")"
 
 # ---------------------------------------------------------------------------
 echo "read helpers: diagnostics go to STDERR, STDOUT stays clean (AC #9):"
