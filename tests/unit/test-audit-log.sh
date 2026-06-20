@@ -132,6 +132,50 @@ FIRST_AFTER="$(head -1 "$FILE")"
 assert_eq "first line byte-identical after later appends" "$FIRST_BEFORE" "$FIRST_AFTER"
 
 # ---------------------------------------------------------------------------
+# Writer hardening (issue #57, Mike's call): the writer must NEVER leave a
+# truncated line. Each record is appended as a single atomic, newline-terminated
+# write, so a crash leaves either the whole record or nothing — and, as
+# belt-and-suspenders, a new record is never FUSED onto a pre-existing dangling
+# fragment (one left by an out-of-band truncation, not by this writer). This is the
+# root-cause fix for the multi-file read_run crash bug: if no file ever ends
+# mid-record, an earlier month's fragment can't fuse onto the next month's record.
+echo "writer hardening: every append leaves the file newline-terminated:"
+export YNAB_AUDIT_DIR="$SANDBOX/harden-nl"
+export YNAB_AUDIT_MONTH="2026-06"
+export YNAB_AUDIT_TIMESTAMP="2026-06-18T09:00:00Z"
+_audit_append "$CATEGORIZE_OP" "$CATEGORIZE_RES" false
+export YNAB_AUDIT_TIMESTAMP="2026-06-18T09:01:00Z"
+_audit_append "$ALLOCATE_OP" "$ALLOCATE_RES" false
+HN_FILE="$YNAB_AUDIT_DIR/audit-2026-06.jsonl"
+# `tail -c1` is empty iff the last byte is a newline (command substitution strips
+# it) — so an empty result proves the file ends cleanly, no dangling line.
+assert_empty "file ends in a newline after appends (no truncated line)" "$(tail -c1 "$HN_FILE")"
+assert_eq    "two complete records, one per line" "2" "$(wc -l < "$HN_FILE" | tr -d ' ')"
+
+echo "writer hardening: an append never FUSES onto a pre-existing dangling fragment:"
+export YNAB_AUDIT_DIR="$SANDBOX/harden-fuse"
+export YNAB_AUDIT_MONTH="2026-06"
+mkdir -p "$YNAB_AUDIT_DIR"
+HF_FILE="$YNAB_AUDIT_DIR/audit-2026-06.jsonl"
+# Simulate an out-of-band truncation: a dangling, unterminated fragment (no newline).
+printf '%s' '{"operation_id":"op-danglin' > "$HF_FILE"
+export YNAB_AUDIT_TIMESTAMP="2026-06-18T09:05:00Z"
+_audit_append "$ALLOCATE_OP" "$ALLOCATE_RES" false; rc=$?
+assert_eq "append onto a dangling fragment succeeds" "0" "$rc"
+# The new record must be its OWN last line — never fused onto the fragment.
+assert_jq "new record is a clean line, not fused with the fragment" "$(tail -1 "$HF_FILE")" '.operation_id == "op-alloc-1"'
+# The writer must leave the file newline-terminated (no new dangling line).
+assert_empty "writer leaves the file newline-terminated" "$(tail -c1 "$HF_FILE")"
+# The fragment is isolated on its own (now-terminated) line, not merged into the
+# new record. A regression that dropped the no-fuse guard would produce a single
+# fused line `{"operation_id":"op-danglin{"...alloc...}` and fail this.
+assert_eq "the fragment is isolated, not merged into the new record" "1" \
+  "$(grep -c '^{"operation_id":"op-danglin$' "$HF_FILE")"
+# The new record reads back cleanly through the helper (proving it parses on its own).
+HF_LAST="$(_audit_read_last 1 2>/dev/null)"
+assert_jq "the un-fused new record reads back through the helper" "$HF_LAST" '.operation_id == "op-alloc-1"'
+
+# ---------------------------------------------------------------------------
 echo "AC: writing to a non-existent audit dir creates it:"
 export YNAB_AUDIT_DIR="$SANDBOX/brand/new/nested"
 export YNAB_AUDIT_MONTH="2026-06"
@@ -236,10 +280,11 @@ assert_jq "delete read via run-C: before.amount shown as -54.99 (÷1000)" "$DEL_
 assert_jq "delete read via run-C: after.amount shown as 12.34 (÷1000)"   "$DEL_RUN" '.after.amount == 12.34'
 
 # ---------------------------------------------------------------------------
-# Crash recovery (the JSONL crash-safety claim): the writer always newline-
-# terminates a complete record, so an append killed mid-write can only leave one
-# partial, UNTERMINATED trailing line. The read helpers must SKIP that fragment and
-# still emit every complete record before it. A malformed line in the BODY, by
+# Crash recovery (reader leniency, defense-in-depth): the writer now appends each
+# record as a single atomic, newline-terminated write, so a crash no longer leaves a
+# torn line — but an out-of-band truncation still could, and that can only ever be
+# one partial, UNTERMINATED trailing line. The read helpers must SKIP that fragment
+# and still emit every complete record before it. A malformed line in the BODY, by
 # contrast, is corruption an audit trail must surface, so it still fails the read.
 echo "crash recovery: readers skip a partial TRAILING line, keep the good records:"
 export YNAB_AUDIT_DIR="$SANDBOX/partial"
