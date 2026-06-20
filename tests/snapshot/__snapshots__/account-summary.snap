@@ -1,0 +1,20 @@
+{
+  "budget": "Populated Test Budget",
+  "accounts": [
+    {
+      "name": "Everyday Checking",
+      "type": "checking",
+      "balance": 4231500
+    },
+    {
+      "name": "Emergency Savings",
+      "type": "savings",
+      "balance": 12000000
+    },
+    {
+      "name": "Cashback Card",
+      "type": "creditCard",
+      "balance": -842300
+    }
+  ]
+}
