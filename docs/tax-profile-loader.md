@@ -1,0 +1,129 @@
+# `lib/tax/loadProfile.mjs` — the tax-profile loader contract
+
+The tax-profile loader is the single, trustworthy way to obtain the **effective**
+tax profile: the bundled default US ruleset deep-merged with the user's profile
+instance and any explicit `overrides`. The tax engine and the review skill consume
+its frozen output instead of reading config files themselves.
+
+It is **pure local config resolution** — no network, no YNAB calls — and is read by
+the plugin **skills**, never by the vendored third-party YNAB MCP.
+
+> Design ref: M3-3 (issue #22). Depends on the schema (#20) and the default US
+> ruleset (#21).
+
+## What it reads
+
+| Layer | Source | Precedence |
+| --- | --- | --- |
+| **defaults** | `assets/tax/us-tax-lines.json` (#21) — bundled in the repo, relative to repo root, so it survives plugin updates. | lowest |
+| **user profile** | `tax-profile.json` in the plugin data dir (#25). | middle |
+| **overrides** | the user profile's own `overrides` object. | **highest** |
+
+The bundled defaults and the JSON Schema (`assets/tax/tax-profile.schema.json`,
+#20) are resolved relative to the module's own location, never from the data dir.
+
+### User-profile path resolution
+
+The user profile path resolves in this order (first hit wins):
+
+1. `options.profilePath` — explicit, used by the test harness.
+2. `YNAB_TAX_PROFILE_FILE` — environment seam.
+3. `<dataDir>/tax-profile.json`, where `dataDir` is `options.dataDir` →
+   `YNAB_DATA_DIR` → `$HOME/.claude/plugins/data/workbench-ynab-claude-workbench`.
+
+This mirrors how `bin/config.sh` honours `YNAB_CONFIG_FILE`.
+
+An **absent** user profile is a normal result, not an error: the loader returns a
+**defaults-only** profile with every provenance entry stamped `defaults`.
+
+## Validation — before any merge
+
+The user profile is validated against the canonical JSON Schema (#20, draft
+2020-12) **before** it is merged. On a schema violation the loader returns a
+structured failure that names the offending JSON path (`error.errors[].path`) — it
+**never** silently proceeds with a half-valid profile, because a wrong standard
+deduction used downstream would corrupt every tax number.
+
+Validation is **dependency-free**: a compact, purpose-built JSON-Schema-subset
+validator built on `node:` built-ins only — no `ajv`, no `node_modules`. This keeps
+the loader faithful to the plugin's "nothing to install" premise and the recorded
+"no `node_modules`, ever" test-harness decision (`docs/testing.md`). The supported
+keyword subset (`type`, `required`, `properties`, `additionalProperties`,
+`propertyNames`, `enum`, `oneOf`, `items`, `minimum`, `maximum`, `minLength`,
+`minItems`, `pattern`) is exactly what `tax-profile.schema.json` uses.
+
+## Merge semantics (deterministic)
+
+Applied in precedence order **defaults → user profile → overrides**:
+
+- **Objects** merge recursively.
+- **Arrays of entities** (every element is an object with a string `id`) merge by
+  `id`: a matching entity is merged recursively, a new `id` is appended, and an
+  entity present only in a lower layer is kept.
+- **Everything else** — scalars and non-entity arrays (e.g. `categoryGroups`,
+  `quarterlyEstimatedDueDates`) — **overrides** wholesale.
+
+A layer that restates a value identical to the already-resolved one does **not**
+claim provenance; the lower tier's stamp stands. (This is what keeps an entity's
+`id`, used only as the merge key, from being mislabelled.)
+
+## Provenance
+
+The result includes a `provenance` map keyed by leaf path → source tier
+(`defaults` | `user` | `overrides`), so the report can show transparently where
+each effective value came from. Paths use dot notation for objects, `[id]` for
+entity arrays, and `[i]` for other arrays — e.g.
+`thresholds.saltCap`, `standardDeductionByYear.single.2025`,
+`businessEntities[biz-a].scheduleLineMap.office`.
+
+## Result shape
+
+```js
+import { loadProfile } from '../../lib/tax/loadProfile.mjs';
+
+const r = loadProfile();
+if (!r.ok) {
+  // r.error = { kind: 'schema' | 'parse' | 'io', message, errors: [{ path, keyword, message, params }] }
+  // r.profile === null  (no silent fallback)
+} else {
+  // r.defaultsOnly  — true when no user profile was found
+  // r.sources       — { defaults, profile, schema } resolved paths
+  // r.profile       — the frozen, merged profile object
+  // r.provenance    — the frozen leaf-path → tier map
+  // accessors (bound to the resolved profile):
+  r.getStandardDeduction(year, filingStatus); // dollars, or undefined
+  r.getThreshold(name);                        // e.g. 'seTaxRate'
+  r.getBusinessEntities();                     // always an array
+  r.getScheduleLineMap(entityId);              // an entity's map, or undefined
+  r.getQuarterlyDueDates(year);                // [{ quarter, month, day, year, date }]
+}
+```
+
+The returned `profile` and `provenance` are **frozen** (`Object.freeze`,
+recursively) to prevent shared-state mutation.
+
+`getQuarterlyDueDates(year)` resolves each due date to a calendar date: Q1–Q3 fall
+in the tax year; **Q4 falls in January of the following year** (see the schema's
+format note). Weekend/holiday shifting is the engine's responsibility, not this
+loader's.
+
+## stdout / stderr discipline
+
+The module emits **nothing to stdout**. It is pure library code that returns a
+structured result; errors are returned as data (packaging invariants like a
+missing bundled ruleset are thrown — Node prints those to stderr). Keeping stdout
+clean means the loader is safe even if it is ever invoked from a JSON-RPC / MCP
+path, where a single stray stdout byte corrupts the handshake (see
+`workbench-core/hooks/mcp-memory.sh`). Any future diagnostic output must go to
+stderr only.
+
+## Testing
+
+`tests/unit/load-profile.test.mjs` runs under the built-in `node:test` runner with
+**no `node_modules`** and covers: defaults-only fallback, user-over-defaults,
+overrides-over-user, schema-invalid failure (with the offending path), provenance
+across all three tiers, array-merge-by-id + object deep-merge, the accessors, and
+the no-stdout guarantee (asserted by spawning a child process).
+
+> **Not tax advice.** This tool organizes financial data and surfaces tax-relevant
+> signals. It is not a substitute for professional tax advice.

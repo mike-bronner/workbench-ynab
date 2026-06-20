@@ -75,7 +75,9 @@ thresholds, schedule-line data, and estimated-tax due dates. Its line catalog,
 filing-status keys, and `thresholds` keys there are kept consistent with this
 schema. A live profile only needs to specify what differs: the `overrides`
 object is deep-merged **on top of** the defaults by the profile loader, so
-users change individual values without restating the whole ruleset.
+users change individual values without restating the whole ruleset. See
+[`docs/tax-profile-loader.md`](../../docs/tax-profile-loader.md) for the loader's
+precedence, path resolution, provenance, and accessor contract.
 
 Adding a new tax year to the default standard deductions is a pure **data
 edit** of `us-tax-lines.json` — add a new four-digit year key with its dollar
