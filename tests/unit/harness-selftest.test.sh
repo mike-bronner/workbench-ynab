@@ -73,6 +73,44 @@ test_entrypoint_rejects_contradictory_flags() {
   fi
 }
 
+# A selector that filters out EVERY on-disk test file must fail loudly (exit 1),
+# never exit 0 having run nothing — the precise false-green this whole harness
+# exists to prevent (scripts/test.sh:118-120). Build an isolated tree (a copy of
+# the entrypoint + a tests/ dir holding ONLY a *.test.mjs) so discovery sees
+# exactly one file, then run with --bash so the selector excludes it.
+test_entrypoint_rejects_selector_that_excludes_all() {
+  local tmp
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/scripts" "$tmp/tests/unit"
+  cp "$ROOT/scripts/test.sh" "$tmp/scripts/test.sh"
+  cat >"$tmp/tests/unit/only-node.test.mjs" <<'EOF'
+import test from 'node:test';
+test('noop', () => {});
+EOF
+  if "$tmp/scripts/test.sh" --bash >/dev/null 2>&1; then
+    rm -rf "$tmp"
+    fail "scripts/test.sh --bash exited 0 when only *.test.mjs files exist (false green)"
+  fi
+  rm -rf "$tmp"
+}
+
+# The other side of that contract (AC #8): a clean checkout with NO test files on
+# disk must exit 0 with the "no tests yet" message (scripts/test.sh:114-116) —
+# distinct from the selector-excluded-everything failure above. Isolated tree
+# again: copy the entrypoint, give it an empty tests/ dir.
+test_entrypoint_clean_checkout_reports_no_tests() {
+  local tmp out
+  tmp="$(mktemp -d)"
+  mkdir -p "$tmp/scripts" "$tmp/tests"
+  cp "$ROOT/scripts/test.sh" "$tmp/scripts/test.sh"
+  if ! out="$("$tmp/scripts/test.sh" 2>&1)"; then
+    rm -rf "$tmp"
+    fail "scripts/test.sh exited non-zero on a clean checkout with no test files (AC #8)"
+  fi
+  rm -rf "$tmp"
+  assert_contains "$out" "no tests yet"
+}
+
 test_directory_layout_is_canonical() {
   assert_dir_exists "$ROOT/tests/unit"
   assert_dir_exists "$ROOT/tests/integration"
