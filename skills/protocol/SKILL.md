@@ -22,6 +22,11 @@ tool names live in exactly one place.
 
 ## The one rule
 
-Never hard-code a raw `mcp__plugin_workbench-ynab_ynab__ynab_*` tool name in any
-skill or config. Centralize every reference in `ynab-tools.md` so swapping the
-MCP is a one-file edit. `bin/check-tool-name-sources.sh` enforces this.
+Never hard-code a raw `mcp__plugin_workbench-ynab_ynab__ynab_*` tool name in a
+skill, command, hook, asset, or config. Centralize every reference in
+`ynab-tools.md` so swapping the MCP stays a one-file edit.
+`bin/check-tool-name-sources.sh` enforces this across the whole tree, with a
+narrow allowlist for the two docs and the orchestrator agent's `tools:`
+frontmatter (which Claude Code requires to hold literal names). See
+[`docs/mcp-capability-map.md`](../../docs/mcp-capability-map.md) for the full
+allowlist and rationale.

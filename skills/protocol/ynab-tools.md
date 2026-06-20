@@ -1,13 +1,18 @@
 # YNAB tool names — single source of truth
 
-> **This is the only file (besides
-> [`docs/mcp-capability-map.md`](../../docs/mcp-capability-map.md)) allowed to
-> enumerate concrete YNAB tool names.** Every other skill, the orchestrator's
-> tools list, and the pre-approval globs reference or are generated from this
-> file. A namespace change is a one-file edit here (plus the derivation rule in
-> the capability map). The guard
+> **This file is the single source of truth for concrete YNAB tool names.**
+> Concrete names may appear in only three allowlisted files: this one, the
+> human-readable contract
+> [`docs/mcp-capability-map.md`](../../docs/mcp-capability-map.md), and the
+> orchestrator agent's `tools:` frontmatter
+> ([`agents/ynab-orchestrator.md`](../../agents/ynab-orchestrator.md)) — which
+> Claude Code requires to hold literal names and which mirrors the read tools
+> below. Every other skill, command, hook, and the pre-approval globs reference
+> or are generated from this file. A namespace change is an edit here (plus the
+> derivation rule in the capability map, and any changed read-tool suffix
+> mirrored into the orchestrator). The guard
 > [`bin/check-tool-name-sources.sh`](../../bin/check-tool-name-sources.sh)
-> enforces that no other skill or config copies a name.
+> enforces that nothing outside the allowlist copies a name.
 
 Read [`docs/mcp-capability-map.md`](../../docs/mcp-capability-map.md) for the
 *why*, the namespace derivation rule, the swap procedure, and the runtime
@@ -70,7 +75,8 @@ the approval-gated `/ynab-apply` command (Sprint 4), not the orchestrator.
 ## Maintenance
 
 - Change a tool name (or swap the MCP): edit the lists above **and** the
-  derivation rule in the capability map, then run
+  derivation rule in the capability map, mirror any changed **read-tool** suffix
+  into the orchestrator agent's `tools:` frontmatter, then run
   `bin/check-tool-name-sources.sh`.
 - Add a logical operation: add it to the capability map table first, then add
   its concrete name here.

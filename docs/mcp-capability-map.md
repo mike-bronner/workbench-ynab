@@ -85,28 +85,46 @@ approved in Sprint 4).
 > (categorize / allocate / dedup / reconcile). The plugin never initiates
 > transfers or payments — see the write-safety guardrail (Sprint 4).
 
-> **Reconcile the suffixes when the bundle lands.** The vendored MCP exposes
-> ~30 tools; `vendor/ynab-mcp/` is not yet populated (it is a Sprint 1
-> deliverable). The suffixes above follow the bundle's `ynab_<op>` convention.
-> When the bundle is vendored, confirm each concrete name against the bundle's
-> actual tool list and correct any drift **here and in
-> [`ynab-tools.md`](../skills/protocol/ynab-tools.md) only** — the guard script
-> (below) proves nothing else has copied a name.
+> **Suffixes confirmed against the vendored bundle.** The vendored MCP
+> (`@dizzlkheinz/ynab-mcpb` v0.26.10, in `vendor/ynab-mcp/`) exposes ~30 tools;
+> the rituals need the 14 above. All 14 concrete suffixes were verified to be
+> registered tool ids in that bundle. On a future re-vendor or MCP swap,
+> re-confirm each suffix against the new bundle and correct any drift **here, in
+> [`ynab-tools.md`](../skills/protocol/ynab-tools.md), and (for changed
+> read-tool suffixes) in the orchestrator's mirrored `tools:` list** — the
+> three allowlisted files. The guard script (below) proves nothing else has
+> copied a name.
 
 ## Single source of truth
 
 [`skills/protocol/ynab-tools.md`](../skills/protocol/ynab-tools.md) holds the
 **complete, canonical tool-name list** plus the derived pre-approval glob and
-orchestrator tools list. **No skill or config prose hard-codes a raw
-`mcp__plugin_workbench-ynab_ynab__ynab_*` tool name anywhere else.** When a
-skill must reference a tool by name, it points to that file (or copies from it
-at generation time) rather than embedding the name inline.
+orchestrator tools list. When a skill must reference a tool by name, it points
+to that file (or copies from it at generation time) rather than embedding the
+name inline.
 
 The invariant is enforced by
 [`bin/check-tool-name-sources.sh`](../bin/check-tool-name-sources.sh), which
-fails if a concrete tool name appears in any skill or config file other than
-`ynab-tools.md`. This document and `ynab-tools.md` are the only places concrete
-names are allowed to live.
+scans the **entire tree** — every skill, agent, command, hook, `bin/` script,
+asset, doc, README, and JSON config (the vendored `vendor/` bundle and VCS /
+dependency dirs excepted) — and fails the build if a concrete
+`mcp__plugin_workbench-ynab_ynab__ynab_*` tool name appears outside an explicit
+allowlist. The allowlist is exactly these files:
+
+| Permitted file | Role |
+|---|---|
+| [`skills/protocol/ynab-tools.md`](../skills/protocol/ynab-tools.md) | the machine-referenced SSoT — the names themselves |
+| `docs/mcp-capability-map.md` (this file) | the human-readable contract — the *why* |
+| [`agents/ynab-orchestrator.md`](../agents/ynab-orchestrator.md) | the read-only orchestrator's `tools:` frontmatter — Claude Code requires literal names there (no file reference, no glob, and a read-only agent must not use the write-inclusive family glob), so it mirrors the SSoT read tools and is allowlisted as a deliberate, documented swap consumer |
+
+Everywhere else, a hard-coded name fails the guard. The bare prefix
+(`mcp__plugin_workbench-ynab_ynab__`) and the family glob
+(`mcp__plugin_workbench-ynab_ynab__ynab_*`) are the documented derivation rule
+and are safe to mention anywhere — the guard never flags them. The guard ships
+with a self-test,
+[`tests/check-tool-name-sources.test.sh`](../tests/check-tool-name-sources.test.sh),
+which proves it catches a planted name on every scanned surface, honours the
+allowlist, and passes on a clean tree.
 
 ## Consumers — everything points back here
 
@@ -130,18 +148,23 @@ inherit it.
 To replace the vendored MCP (e.g. with the bundled-own MCP from M6-8):
 
 1. **Change the launcher target.** Repoint `mcpServers.ynab` in
-   [`.claude-plugin/plugin.json`](../.claude-plugin/plugin.json) /
-   [`bin/launcher.sh`](../bin/launcher.sh) at the new MCP. **Keep the
-   `mcpServers` key `ynab`** to preserve the `mcp__plugin_workbench-ynab_ynab__`
-   prefix.
+   [`.claude-plugin/plugin.json`](../.claude-plugin/plugin.json) — and the
+   launcher it invokes, `bin/launcher.sh` (a Sprint 1 deliverable not yet
+   landed; `plugin.json` already points `mcpServers.ynab` at it) — at the new
+   MCP. **Keep the `mcpServers` key `ynab`** to preserve the
+   `mcp__plugin_workbench-ynab_ynab__` prefix.
 2. **Regenerate the tool-name list** in
    [`ynab-tools.md`](../skills/protocol/ynab-tools.md) from this map — update any
-   suffix that the new MCP names differently, then run
+   suffix that the new MCP names differently, mirror any changed **read-tool**
+   suffix into the orchestrator agent's `tools:` frontmatter (the one other
+   allowlisted consumer that holds literal names), then run
    [`bin/check-tool-name-sources.sh`](../bin/check-tool-name-sources.sh) to
-   confirm no skill or config has copied a stale name.
+   confirm nothing else has copied a stale name.
 3. **Run the offline-boot verification** (Sprint 1 linchpin) to confirm the new
    MCP launches and handshakes over stdio.
-4. **Run the test suite** — the golden-snapshot review test and the guard script
+4. **Run the test suite** — the golden-snapshot review test, the guard script,
+   and the guard's self-test
+   ([`tests/check-tool-name-sources.test.sh`](../tests/check-tool-name-sources.test.sh))
    must pass.
 
 **If the new MCP keeps the same `ynab` key *and* the same operation suffixes,

@@ -12,6 +12,8 @@ You are a short-lived, headless agent. Your job is to look at the current state 
 
 > **Stub scope.** This file is the agent's *identity and contract* only — a planner stub. The actual financial-review content (the 12-section methodology, tax logic such as Schedule C / A / SE awareness, medical-threshold and quarterly-estimated-tax analysis, the HTML report template) lives in later-milestone **skills**, NOT here. Keep this agent a thin planner: it decides *what* to analyse and *what* to pull, never *how* to analyse or what the numbers mean.
 
+> **Tool-name source of truth.** The concrete names in this agent's `tools:` allow-list are the **read tools** from [`skills/protocol/ynab-tools.md`](../skills/protocol/ynab-tools.md) — the single source of truth for YNAB tool names. Claude Code requires literal names in the `tools:` field (it cannot reference a file or glob, and a read-only agent must not use the write-inclusive family glob), so this is the one consumer outside the source of truth that mirrors them. On an MCP swap, update the read-tools list there and mirror any changed suffix here. The guard `bin/check-tool-name-sources.sh` allowlists this file for exactly that reason — see [`docs/mcp-capability-map.md`](../docs/mcp-capability-map.md) for the swap-ready contract.
+
 ## ⚠️ First thing — load the YNAB tool schemas (with boot patience)
 
 The `mcp__plugin_workbench-ynab_ynab__*` tools are almost always delivered as **deferred tools**: they're in your allow-list, but their JSONSchemas haven't been loaded into context yet. Calling one before loading its schema returns `InputValidationError` — **this is NOT the MCP server being offline**, it's just an unloaded schema.
