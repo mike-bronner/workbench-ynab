@@ -297,15 +297,16 @@ _audit_read_run() {
     return 0
   fi
 
-  # Slurp every monthly file as raw text (`-R -s`) and parse via parse_jsonl so a
-  # malformed TRAILING line — only ever the current month's, the one file still
-  # being appended to — is skipped while every complete record still reads back. A
-  # malformed BODY line makes jq exit non-zero; the pipeline's exit status is jq's,
-  # so `if !` keys on it and adds the `audit-log:` prefix (jq's detail still reaches
-  # STDERR).
-  if ! cat "${files[@]}" | jq -R -s --arg rid "$rid" "$(_audit_fixmu_program)
+  # Hand every monthly file straight to jq (`-R -s` slurps them all as one raw
+  # stream — equivalent to cat'ing them, but with no UUOC pipe) and parse via
+  # parse_jsonl so a malformed TRAILING line — only ever the current month's, the
+  # one file still being appended to — is skipped while every complete record still
+  # reads back. A malformed BODY line makes jq exit non-zero; jq is the sole command
+  # (no `cat` pipe to mask its status), so `if !` keys directly on jq's exit and
+  # adds the `audit-log:` prefix (jq's detail still reaches STDERR).
+  if ! jq -R -s --arg rid "$rid" "$(_audit_fixmu_program)
 $(_audit_jsonl_parse_program)
-parse_jsonl | select(.run_id == \$rid) | .before |= fixmu | .after |= fixmu"; then
+parse_jsonl | select(.run_id == \$rid) | .before |= fixmu | .after |= fixmu" "${files[@]}"; then
     echo "audit-log: failed to format records from $dir" 1>&2
     return 1
   fi
