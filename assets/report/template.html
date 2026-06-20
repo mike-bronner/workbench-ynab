@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<!--
+  template.html — the FROZEN, canonical YNAB review report template (M2-5, issue #42).
+
+  This file is a constant. The universal review skill (M2-3) NEVER regenerates the
+  report chrome — it only fills the named slots below with HTML fragments and the
+  scalar `{{…}}` placeholders with strings. Freezing the template makes report
+  generation deterministic and cheap (the skill produces fragments, not the whole
+  document) and fixes the prototype's KNOWN BUG: the SKILL.md spec promised a
+  print-friendly `@media print` block that the generated output never carried. It
+  is carried here.
+
+  Two kinds of injection point (full contract in assets/report/SLOTS.md):
+  1. Block slots  — HTML comments named "SLOT:<name>" (written as ordinary HTML
+     comments in the body below). The skill REPLACES each one with a chunk of
+     HTML (a dashboard, a section, the persona name). There are 14 of them.
+  2. Scalar slots — `{{name}}` mustache placeholders, matching the existing
+     convention in assets/templates/report-footer.html (rendered by bin/persona.sh).
+     The skill substitutes a single string per placeholder:
+       {{tier}}        — the review tier, e.g. "Monthly" / "Quarterly Tax"
+       {{report_date}} — the report date (the template carries the date in a slot,
+                         never a hardcoded value)
+       {{output_path}} — the save path/filename, decided by the report writer (M2-9);
+                         it is a slot value, NEVER hardcoded in this file
+
+  Self-contained on purpose: all CSS is inline, no external stylesheets, scripts,
+  or image references — the report stays portable and emailable.
+  Persona name is ALWAYS a slot value (SLOT:footer-persona); the literal default
+  name never appears in this file.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Machine-readable scalar slots (consumed by the report writer, M2-9). -->
+  <meta name="report-tier" content="{{tier}}">
+  <meta name="report-date" content="{{report_date}}">
+  <meta name="report-output-path" content="{{output_path}}">
+  <title>{{tier}} YNAB Review — {{report_date}}</title>
+  <style>
+    /* ── Design tokens ──────────────────────────────────────────────────────
+       Dark theme from the prototype's visual spec (SKILL.md 147-148):
+       navy headers, teal positive, coral warnings, amber attention. */
+    :root {
+      --navy: #1a1a2e;      /* headers / chrome           */
+      --navy-soft: #232342; /* cards / raised surfaces     */
+      --teal: #16a085;      /* positive values            */
+      --coral: #e74c3c;     /* warnings                   */
+      --amber: #f39c12;     /* attention                  */
+      --ink: #e8e8f0;       /* primary text on dark        */
+      --ink-muted: #a4a4bf; /* secondary text             */
+      --line: #34345a;      /* borders / table rules       */
+      --row-alt: #1f1f3a;   /* alternating table row       */
+      --radius: 10px;
+      --gap: 16px;
+    }
+
+    /* ── Base ───────────────────────────────────────────────────────────────── */
+    * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0;
+      background: var(--navy);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-size: 16px;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+    .wrap {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: var(--gap);
+      width: 100%;
+    }
+    h1, h2, h3 { line-height: 1.25; margin: 0 0 0.4em; }
+    a { color: var(--teal); }
+
+    /* ── Header / chrome ──────────────────────────────────────────────────────
+       A sticky title bar on screen; print resets its position (see @media print). */
+    .report-header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: var(--navy);
+      border-bottom: 2px solid var(--teal);
+      padding: var(--gap);
+    }
+    .report-header h1 { font-size: 1.5rem; }
+    .report-header .meta { color: var(--ink-muted); font-size: 0.95rem; }
+
+    /* ── KPI dashboard ────────────────────────────────────────────────────────
+       Responsive grid: collapses to a single column on narrow viewports so there
+       is no horizontal overflow at >=320px. */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: var(--gap);
+      margin: var(--gap) 0;
+    }
+    .kpi {
+      background: var(--navy-soft);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: var(--gap);
+    }
+    .kpi__label { color: var(--ink-muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .kpi__value { font-size: 1.6rem; font-weight: 700; margin-top: 4px; }
+    .kpi__value.is-positive { color: var(--teal); }
+    .kpi__value.is-warning  { color: var(--coral); }
+    .kpi__value.is-attention{ color: var(--amber); }
+
+    /* ── Cards ────────────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--navy-soft);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: var(--gap);
+      margin: var(--gap) 0;
+    }
+    .card > h2 { font-size: 1.2rem; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+
+    /* ── Tables (alternating rows, no horizontal overflow) ───────────────────── */
+    .table-scroll { width: 100%; overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+    th { color: var(--ink-muted); font-weight: 600; }
+    tbody tr:nth-child(even) { background: var(--row-alt); }
+    td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+    /* ── Health-score progress bars / gauges ─────────────────────────────────── */
+    .progress {
+      background: var(--navy);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      height: 14px;
+      overflow: hidden;
+    }
+    .progress__bar { height: 100%; background: var(--teal); border-radius: inherit; }
+    .progress__bar.is-warning  { background: var(--coral); }
+    .progress__bar.is-attention{ background: var(--amber); }
+
+    /* ── Status badges (🟢 / 🟡 / 🔴) ────────────────────────────────────────── */
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 10px;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      border: 1px solid currentColor;
+    }
+    .badge.is-good      { color: var(--teal); }
+    .badge.is-attention { color: var(--amber); }
+    .badge.is-warning   { color: var(--coral); }
+
+    /* ── Collapsible transaction lists ───────────────────────────────────────── */
+    details { border: 1px solid var(--line); border-radius: var(--radius); margin: 8px 0; }
+    summary { cursor: pointer; padding: 10px var(--gap); font-weight: 600; }
+    details[open] summary { border-bottom: 1px solid var(--line); }
+    details .details__body { padding: var(--gap); }
+
+    /* ── Per-page print footer ───────────────────────────────────────────────────
+       Hidden on screen; the @media print block makes it a fixed running footer so
+       it repeats on every printed page. */
+    .print-footer { display: none; }
+
+    /* ── Responsive (>=320px, no horizontal overflow) ────────────────────────── */
+    @media (max-width: 600px) {
+      body { font-size: 15px; }
+      .report-header h1 { font-size: 1.25rem; }
+      .kpi__value { font-size: 1.35rem; }
+      th, td { padding: 6px 8px; }
+    }
+
+    /* ── Print ───────────────────────────────────────────────────────────────────
+       Fixes the prototype's missing @media print block (SKILL.md 154-162). */
+    @media print {
+      /* Force backgrounds/colors to print (dark theme must survive). */
+      * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+      @page { margin: 0.75in; }
+      body { font-size: 11pt; background: #fff; color: #000; }
+      table { font-size: 10pt; }
+
+      /* Keep cohesive blocks together; break before each major section. */
+      .card, table, tr, .kpi { page-break-inside: avoid; }
+      .section { page-break-before: always; }
+      .section:first-of-type { page-break-before: avoid; }
+
+      /* Force every collapsible open so nothing is hidden on paper. The native
+         <details> collapse is an attribute, not CSS, so we cannot toggle it from
+         here — instead we override the UA rule that hides a closed details' body
+         and force every non-summary child visible. */
+      details > *:not(summary) { display: block !important; }
+      details > .details__body { display: block !important; }
+
+      /* Strip on-screen sticky/fixed chrome so it does not float over the flow … */
+      .report-header { position: static !important; }
+
+      /* … but the running footer MUST stay fixed to repeat on every page. */
+      .print-footer {
+        display: block;
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        text-align: center;
+        font-size: 9pt;
+        color: #444;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="report-header">
+    <h1>{{tier}} YNAB Review</h1>
+    <p class="meta">{{report_date}}</p>
+  </header>
+
+  <main class="wrap">
+    <!-- Top KPI dashboard: income, spending, net cash flow, health score. -->
+    <section class="section" aria-label="Key indicators">
+      <!-- SLOT:kpi-dashboard -->
+    </section>
+
+    <!-- The 12 methodology sections. The skill injects each section's HTML. -->
+    <section class="section"><!-- SLOT:section-1-classification --></section>
+    <section class="section"><!-- SLOT:section-2-income --></section>
+    <section class="section"><!-- SLOT:section-3-spending --></section>
+    <section class="section"><!-- SLOT:section-4-budget-adherence --></section>
+    <section class="section"><!-- SLOT:section-5-cash-flow --></section>
+    <section class="section"><!-- SLOT:section-6-categories --></section>
+    <section class="section"><!-- SLOT:section-7-accounts --></section>
+    <section class="section"><!-- SLOT:section-8-goals --></section>
+    <section class="section"><!-- SLOT:section-9-net-worth --></section>
+    <section class="section"><!-- SLOT:section-10-anomalies --></section>
+    <section class="section"><!-- SLOT:section-11-recommendations --></section>
+    <section class="section"><!-- SLOT:section-12-tax-summary --></section>
+  </main>
+
+  <!-- Per-page print footer. Persona via the slot, tier via the scalar placeholder. -->
+  <footer class="print-footer" role="contentinfo">
+    Generated by <!-- SLOT:footer-persona --> — {{tier}} YNAB Review
+  </footer>
+</body>
+</html>
