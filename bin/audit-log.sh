@@ -297,19 +297,28 @@ _audit_read_run() {
     return 0
   fi
 
-  # Hand every monthly file straight to jq (`-R -s` slurps them all as one raw
-  # stream — equivalent to cat'ing them, but with no UUOC pipe) and parse via
-  # parse_jsonl so a malformed TRAILING line — only ever the current month's, the
-  # one file still being appended to — is skipped while every complete record still
-  # reads back. A malformed BODY line makes jq exit non-zero; jq is the sole command
-  # (no `cat` pipe to mask its status), so `if !` keys directly on jq's exit and
-  # adds the `audit-log:` prefix (jq's detail still reaches STDERR).
-  if ! jq -R -s --arg rid "$rid" "$(_audit_fixmu_program)
+  # Parse each monthly file INDEPENDENTLY (one `jq -R -s` per file) and emit the
+  # record streams in chronological (lexical) file order. parse_jsonl's "tolerate
+  # one partial trailing line" guarantee is per-FILE: `split("\n")` only puts a
+  # fragment in the LAST element of THAT file's own lines. A single
+  # `jq -R -s "${files[@]}"` would slurp every file into ONE string, so the
+  # tolerance would cover only the last file lexically — an EARLIER month left with
+  # an unterminated trailing line (exactly the crash artifact the writer can leave)
+  # would fuse onto the next month's first line and destroy an otherwise-valid
+  # record on read. Looping keeps each file's own last line in its lenient slot, so
+  # every complete record reads back regardless of which month was torn. A malformed
+  # BODY line in any file makes that file's jq exit non-zero; jq is the sole command
+  # in the pipeline, so `if !` keys directly on its exit and adds the `audit-log:`
+  # prefix (jq's own detail still reaches STDERR).
+  local f
+  for f in "${files[@]}"; do
+    if ! jq -R -s --arg rid "$rid" "$(_audit_fixmu_program)
 $(_audit_jsonl_parse_program)
-parse_jsonl | select(.run_id == \$rid) | .before |= fixmu | .after |= fixmu" "${files[@]}"; then
-    echo "audit-log: failed to format records from $dir" 1>&2
-    return 1
-  fi
+parse_jsonl | select(.run_id == \$rid) | .before |= fixmu | .after |= fixmu" "$f"; then
+      echo "audit-log: failed to format records from $f" 1>&2
+      return 1
+    fi
+  done
 }
 
 # --- CLI dispatch (only when executed directly, never when sourced) ----------

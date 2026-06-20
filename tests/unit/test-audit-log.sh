@@ -154,10 +154,16 @@ assert_jq "target_entity_ids = [account_id, txn ids…]" "$RECREC" '.target_enti
 echo "read helper: last N returns the last N, milliunits ÷ 1000 for display:"
 export YNAB_AUDIT_DIR="$SANDBOX/p4"
 export YNAB_AUDIT_MONTH="2026-06"
+# Seed THREE records (oldest → newest) so `last N`'s truncation is genuinely
+# proven: an oldest reconcile record that `last 2` MUST drop, then categorize,
+# then allocate. With only two records a regression where `last N` ignored N and
+# returned the whole file would still pass — three records make `tail -n N` bite.
+export YNAB_AUDIT_TIMESTAMP="2026-06-15T13:59:00Z"
+_audit_append "$RECONCILE_OP" "$RECONCILE_RES" false   # oldest — must be truncated by `last 2`
 export YNAB_AUDIT_TIMESTAMP="2026-06-15T14:00:00Z"
 _audit_append "$CATEGORIZE_OP" "$CATEGORIZE_RES" false
 export YNAB_AUDIT_TIMESTAMP="2026-06-15T14:01:00Z"
-_audit_append "$ALLOCATE_OP" "$ALLOCATE_RES" false
+_audit_append "$ALLOCATE_OP" "$ALLOCATE_RES" false     # newest
 LAST_OUT="$(_audit_read_last 1)"
 assert_jq "last 1 returns the most recent (allocate) record" "$LAST_OUT" '.operation_id == "op-alloc-1"'
 # allocate carries only category_id (no transaction_id/account_id/transaction_ids),
@@ -166,8 +172,16 @@ assert_jq "last 1 returns the most recent (allocate) record" "$LAST_OUT" '.opera
 assert_jq "allocate target_entity_ids = [category_id]"       "$LAST_OUT" '.target_entity_ids == ["cat-7"]'
 assert_jq "allocate before.budgeted shown as 250 (÷1000)"    "$LAST_OUT" '.before.budgeted == 250'
 assert_jq "allocate after.budgeted shown as 300 (÷1000)"     "$LAST_OUT" '.after.budgeted == 300'
-LAST2_COUNT="$(_audit_read_last 2 | jq -s 'length')"
-assert_eq "last 2 returns two records" "2" "$LAST2_COUNT"
+# `last 2` against a 3-record file must return EXACTLY the last two, in order (the
+# categorize then allocate records) and MUST NOT include the older reconcile
+# record — genuinely proving the `tail -n N` windowing for AC #7(a). A regression
+# that ignored N and returned the whole file would surface op-rec-1 and fail here.
+LAST2_OUT="$(_audit_read_last 2)"
+assert_eq "last 2 returns exactly two records" "2" \
+  "$(printf '%s' "$LAST2_OUT" | jq -s 'length')"
+assert_eq "last 2 are the two newest in order, oldest reconcile dropped" \
+  '["op-cat-1","op-alloc-1"]' \
+  "$(printf '%s' "$LAST2_OUT" | jq -sc 'map(.operation_id)')"
 
 # ---------------------------------------------------------------------------
 echo "read helper: by run_id filters across ALL monthly files:"
@@ -246,6 +260,32 @@ assert_eq "read_last drops the partial line (no op-truncat record)"  "0" \
 PR_OUT="$(_audit_read_run run-A 2>/dev/null)"; rc=$?
 assert_eq "read_run exits 0 despite a partial trailing line"         "0" "$rc"
 assert_jq "read_run still emits the good record"                     "$PR_OUT" '.operation_id == "op-cat-1"'
+
+# A torn PAST-month file must not corrupt reads of OTHER months. parse_jsonl's
+# trailing-partial-line tolerance is per-FILE, so _audit_read_run parses each
+# monthly file independently: an earlier month's unterminated fragment can never
+# fuse onto the next month's first record. A single `jq -R -s` over every file at
+# once would concatenate them — the May fragment would swallow June's first record
+# and fail the whole read (exit 1), losing a valid record permanently. This block
+# is the regression guard for that exact crash scenario (a non-final torn file).
+echo "crash recovery: a torn PAST-month file doesn't break read_run of other months:"
+export YNAB_AUDIT_DIR="$SANDBOX/partial-multi"
+# May: one good run-A record, then a partial, unterminated trailing line (crash).
+export YNAB_AUDIT_MONTH="2026-05"; export YNAB_AUDIT_TIMESTAMP="2026-05-20T10:00:00Z"
+_audit_append "$CATEGORIZE_OP" "$CATEGORIZE_RES" false   # good run-A record in May
+MMFILE="$YNAB_AUDIT_DIR/audit-2026-05.jsonl"
+printf '%s' '{"operation_id":"op-may-truncat' >> "$MMFILE"   # crash: partial, unterminated
+# June: a clean good run-A record in the current month (a LATER file lexically).
+export YNAB_AUDIT_MONTH="2026-06"; export YNAB_AUDIT_TIMESTAMP="2026-06-20T10:00:00Z"
+_audit_append "$ALLOCATE_OP" "$ALLOCATE_RES" false       # good run-A record in June
+PM_OUT="$(_audit_read_run run-A 2>/dev/null)"; rc=$?
+assert_eq "read_run exits 0 despite a torn PAST-month file"          "0" "$rc"
+assert_eq "read_run returns BOTH good records (May + June), partial dropped" "2" \
+  "$(printf '%s' "$PM_OUT" | jq -s 'length')"
+assert_eq "read_run keeps the clean June record (not fused with May's fragment)" "1" \
+  "$(printf '%s' "$PM_OUT" | jq -s 'map(select(.operation_id == "op-alloc-1")) | length')"
+assert_eq "read_run drops the May partial line (no op-may-truncat record)" "0" \
+  "$(printf '%s' "$PM_OUT" | jq -s 'map(select(.operation_id == "op-may-truncat")) | length')"
 
 # A malformed line in the BODY (terminated → not the trailing fragment) is
 # corruption: the read must FAIL loudly with the audit-log: prefix, not skip it.
