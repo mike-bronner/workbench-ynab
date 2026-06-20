@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-06-19T14:30:00Z",
+  "budget_id": "b1f2c3d4-1111-4a2b-9c3d-000000000001",
+  "budget_name": "Family Budget",
+  "source": "review-2026-06-19T14-00-00Z",
+  "money_movement": false,
+  "operations": [
+    {
+      "id": "op-reconcile-0001",
+      "type": "reconcile",
+      "budget_id": "b1f2c3d4-1111-4a2b-9c3d-000000000001",
+      "account_id": "a0000000-0000-4000-8000-00000000ac01",
+      "transaction_ids": [
+        "t0000000-0000-4000-8000-00000000r001",
+        "t0000000-0000-4000-8000-00000000r002"
+      ],
+      "before": {
+        "cleared_balance": 1200000,
+        "reconciled_balance": 1145010,
+        "cleared": "cleared"
+      },
+      "after": {
+        "reconciled_balance": 1200000,
+        "cleared": "reconciled"
+      },
+      "rationale": "Bank statement balance matches the cleared balance of $1,200.00; reconcile the checking account.",
+      "risk": "medium"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "budget": {
+    "name": "<YOUR_BUDGET_NAME>",
+    "id": null
+  },
+  "business": {
+    "name": "<YOUR_BUSINESS_NAME>",
+    "accounts": ["<YOUR_BUSINESS_CHECKING_ACCOUNT>"],
+    "category_group": "Business Expenses",
+    "expense_categories": ["Software", "Contractors", "Office", "Hosting"]
+  },
+  "tax_profile": {
+    "filing_status": "single",
+    "standard_deduction": 0.0,
+    "medical_agi_threshold_pct": 0.075,
+    "se_tax_rate": 0.153,
+    "quarterly_due_dates": ["04-15", "06-15", "09-15", "01-15"],
+    "schedules": ["C", "A", "SE", "1"]
+  },
+  "mapping_rules": [
+    {
+      "match": { "category_group": "Business Expenses" },
+      "schedule": "C",
+      "tax_line": "Schedule C — business expenses"
+    },
+    {
+      "match": { "payee_contains": "pharmacy" },
+      "schedule": "A",
+      "tax_line": "Schedule A — medical & dental"
+    },
+    {
+      "match": { "category": "Self-Employment Tax" },
+      "schedule": "SE",
+      "tax_line": "Schedule SE — self-employment tax"
+    }
+  ],
+  "persona": {
+    "name": "<PERSONA_NAME>",
+    "voice_overrides": null
+  },
+  "report": {
+    "output_dir": "~/Documents/YNAB Reports",
+    "template_path": null
+  }
+}

@@ -1,0 +1,13 @@
+#!/usr/bin/env node
+// bin/ynab-mcp — stable entrypoint for the vendored YNAB MCP server.
+//
+// Thin shim that loads the frozen, self-contained bundle. The launcher
+// (M1-5) execs this path so it never has to know the bundle's internal
+// main; the bundle starts its stdio MCP server on require (it has no
+// `require.main === module` guard). The require is relative to this file's
+// directory (__dirname), so it resolves regardless of the current working
+// directory and contains no hard-coded absolute paths.
+//
+// The bundle is the frozen copy of record. Update it only via the
+// re-vendor script (M1-4) — never edit vendor/ynab-mcp/index.cjs by hand.
+require('../vendor/ynab-mcp/index.cjs');

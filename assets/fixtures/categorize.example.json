@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-06-19T14:30:00Z",
+  "budget_id": "b1f2c3d4-1111-4a2b-9c3d-000000000001",
+  "budget_name": "Family Budget",
+  "source": "review-2026-06-19T14-00-00Z",
+  "money_movement": false,
+  "operations": [
+    {
+      "id": "op-categorize-0001",
+      "type": "categorize",
+      "budget_id": "b1f2c3d4-1111-4a2b-9c3d-000000000001",
+      "transaction_id": "t0000000-0000-4000-8000-00000000a001",
+      "before": {
+        "category_id": null,
+        "category_name": null
+      },
+      "after": {
+        "category_id": "c0000000-0000-4000-8000-0000000000c1",
+        "category_name": "Groceries"
+      },
+      "rationale": "Whole Foods purchase matches the Groceries category by payee history.",
+      "risk": "low"
+    }
+  ]
+}

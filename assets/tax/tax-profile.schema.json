@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mike-bronner.github.io/workbench-ynab/schemas/tax-profile.schema.json",
+  "title": "TaxProfile",
+  "type": "object",
+  "description": "Generic, shareable tax profile for the workbench-ynab plugin. This schema is intentionally GENERIC: nothing in it is specific to one taxpayer. A real taxpayer's numbers become one INSTANCE of this schema (see M3-5), never part of the schema or any prompt. The live instance is read by the SKILLS (never by the vendored YNAB MCP) from ~/.claude/plugins/data/workbench-ynab-claude-workbench/tax-profile.json. All money amounts in this profile are in DOLLARS, not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars).",
+  "$comment": "Data-dir convention: the owner's live tax profile lives OUTSIDE this repo at ~/.claude/plugins/data/workbench-ynab-claude-workbench/tax-profile.json, following the same pattern workbench-core uses for ~/.claude/plugins/data/workbench-core-claude-workbench/config.json (read via jq from hooks). See assets/tax/README.md. This file is config-as-data only — no executable logic.",
+  "required": ["schemaVersion", "filingStatus", "taxYear"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "description": "Version of this tax-profile schema the instance targets, so future migrations can detect and upgrade older instances. Accepts a string (e.g. \"1\" or \"1.0.0\") or an integer.",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "integer", "minimum": 1 }
+      ]
+    },
+    "filingStatus": {
+      "description": "Federal filing status. single = Single; mfj = Married Filing Jointly; mfs = Married Filing Separately; hoh = Head of Household; qw = Qualifying Surviving Spouse (formerly Qualifying Widow(er)).",
+      "type": "string",
+      "enum": ["single", "mfj", "mfs", "hoh", "qw"]
+    },
+    "taxYear": {
+      "description": "The tax year this profile applies to. The profile is year-aware; lookups such as standardDeductionByYear are keyed by this year.",
+      "type": "integer",
+      "minimum": 1900,
+      "maximum": 9999
+    },
+    "standardDeductionByYear": {
+      "description": "Standard deduction lookup keyed by filing-status string, then by four-digit tax-year string. Values are dollar amounts — not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars).",
+      "type": "object",
+      "propertyNames": { "enum": ["single", "mfj", "mfs", "hoh", "qw"] },
+      "additionalProperties": {
+        "type": "object",
+        "description": "Year-keyed map of standard-deduction amounts for one filing status.",
+        "propertyNames": { "pattern": "^[0-9]{4}$" },
+        "additionalProperties": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Standard deduction in dollars, not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars)."
+        }
+      }
+    },
+    "businessEntities": {
+      "description": "Sole-prop / pass-through business entities the taxpayer files for. Each entity maps its YNAB expense category-groups onto schedule lines. Use placeholder display names only (e.g. \"Business A\") — never a real business name.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "displayName", "schedule", "scheduleLineMap"],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "Stable, opaque identifier for this entity, referenced by mappings and reports. Placeholder example: \"biz-a\".",
+            "type": "string",
+            "minLength": 1
+          },
+          "displayName": {
+            "description": "Free-text label for the entity. MUST be a placeholder in the schema/defaults/examples (e.g. \"Business A\") — never a real business name.",
+            "type": "string",
+            "minLength": 1
+          },
+          "schedule": {
+            "description": "IRS schedule this entity files on, e.g. \"C\" for sole proprietorship.",
+            "type": "string",
+            "minLength": 1,
+            "examples": ["C"]
+          },
+          "scheduleLineMap": {
+            "description": "Mapping from this entity's YNAB expense category-groups onto schedule line items. The DETAILED shape of this object is owned by issue M3-2 (mapping engine); this schema only requires it to be present as an object. Kept open (additionalProperties: true) so M3-2 can define its internal structure without bumping this schema.",
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "itemized": {
+      "description": "Schedule A (itemized deductions) configuration. Money amounts here are dollars, not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "medical": {
+          "description": "Schedule A medical & dental expenses. Only the portion above thresholds.medicalAgiPercent of AGI is deductible (that percentage lives under thresholds, not here).",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "categoryGroups": {
+              "description": "YNAB category-group names whose transactions count as medical expenses.",
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "salt": {
+          "description": "Schedule A state-and-local taxes (SALT): income/sales tax plus property tax, capped at saltCap.",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "saltCap": {
+              "description": "Maximum deductible SALT in dollars, not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars). Federal cap is 10000 (5000 if filing MFS).",
+              "type": "number",
+              "minimum": 0,
+              "default": 10000
+            },
+            "categoryGroups": {
+              "description": "YNAB category-group names whose transactions count as state/local taxes.",
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "interest": {
+          "description": "Schedule A deductible interest: home mortgage interest and HELOC interest.",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "categoryGroups": {
+              "description": "YNAB category-group names whose transactions count as deductible mortgage/HELOC interest.",
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "charitable": {
+          "description": "Schedule A charitable contributions (cash and non-cash gifts to qualified organizations).",
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "categoryGroups": {
+              "description": "YNAB category-group names whose transactions count as charitable contributions.",
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "adjustments": {
+      "description": "Schedule 1 adjustments to income (above-the-line deductions). Money amounts here are dollars, not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars).",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "seTaxHalfDeduction": {
+          "description": "Deduction for one-half of self-employment tax. This amount is DERIVED from computed SE tax (thresholds.seTaxRate), so it carries no dollar figure here — only an enabled toggle.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Whether to apply the one-half-of-SE-tax adjustment.",
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
+        "studentLoanInterest": {
+          "description": "Student loan interest deduction.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "amount": {
+              "description": "Student loan interest paid, in dollars, not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars). Subject to the IRS annual cap and phase-out.",
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        },
+        "iraContributions": {
+          "description": "Deductible traditional-IRA contributions.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "amount": {
+              "description": "Deductible traditional-IRA contribution, in dollars, not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars).",
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
+    "thresholds": {
+      "description": "Tunable tax thresholds and rates used by the engine. Rates are fractions (0.075 = 7.5%); saltCap is a dollar amount.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "medicalAgiPercent": {
+          "description": "Medical-expense AGI floor as a fraction (0.075 = 7.5%). Only medical expenses above this fraction of AGI are deductible on Schedule A. Not a dollar amount.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.075
+        },
+        "seTaxRate": {
+          "description": "Combined self-employment tax rate as a fraction (0.153 = 15.3% = 12.4% Social Security + 2.9% Medicare). Not a dollar amount.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0.153
+        },
+        "saltCap": {
+          "description": "Default SALT deduction cap in dollars, not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars). Federal cap is 10000 (5000 if filing MFS). itemized.salt.saltCap, when present, overrides this.",
+          "type": "number",
+          "minimum": 0,
+          "default": 10000
+        }
+      }
+    },
+    "quarterlyEstimatedDueDates": {
+      "description": "Federal quarterly estimated-tax due dates for the tax year, as explicit {quarter, month, day} parts. FORMAT CHOICE: parts (not ISO strings) are used so the engine can resolve the calendar year per quarter — Q1-Q3 fall in the tax year (Apr 15 / Jun 15 / Sep 15) while Q4 falls in January of the FOLLOWING year (Jan 15). The consumer combines each part-set with the correct calendar year; weekend/holiday shifting is the engine's responsibility, not this data's.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["quarter", "month", "day"],
+        "additionalProperties": false,
+        "properties": {
+          "quarter": {
+            "description": "Estimated-tax quarter, 1 through 4.",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4
+          },
+          "month": {
+            "description": "Calendar month of the due date, 1 (January) through 12 (December).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 12
+          },
+          "day": {
+            "description": "Calendar day of month of the due date, 1 through 31.",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 31
+          }
+        }
+      }
+    },
+    "overrides": {
+      "description": "User-override layer. The profile loader (issue M3-3) deep-merges these values ON TOP OF the bundled default US ruleset, so a user can change individual thresholds, deductions, or mappings without restating the whole ruleset. Shape mirrors a partial of this profile; kept open (additionalProperties: true) because any subset of the ruleset may be overridden. Money amounts here are dollars, not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars).",
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}
