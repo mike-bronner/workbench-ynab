@@ -51,12 +51,12 @@ Start from a clean checkout with **no** prior plugin config or Keychain entry.
 ## 2. Keychain token read — no plaintext token anywhere
 
 During setup you paste your YNAB Personal Access Token; it is stored in the macOS
-Keychain (service `workbench-ynab`, account `YNAB_ACCESS_TOKEN`) and read by the
+Keychain (service `ynab-mcp`, account `access-token`) and read by the
 launcher at MCP start — never written to disk, never echoed.
 
 ```bash
 # The token is present in the Keychain:
-security find-generic-password -s workbench-ynab -a YNAB_ACCESS_TOKEN -w >/dev/null && echo "token present"
+security find-generic-password -s ynab-mcp -a access-token -w >/dev/null && echo "token present"
 # …and the launcher reads it without leaking it. Capture the token into a var,
 # then feed it to grep over STDIN (-f -) so the secret never lands in argv
 # (visible to `ps auxww` / shell history). Abort if the lookup is empty — an
@@ -66,7 +66,7 @@ security find-generic-password -s workbench-ynab -a YNAB_ACCESS_TOKEN -w >/dev/n
 # error), which an `&& … || …` idiom misreads as "no match" even when grep just
 # printed the leak (and zsh aborts on the unmatched *.log glob outright). Drive
 # the verdict off whether grep produced filenames ([ -n "$hits" ]), not its exit.
-TOKEN="$(security find-generic-password -s workbench-ynab -a YNAB_ACCESS_TOKEN -w)"
+TOKEN="$(security find-generic-password -s ynab-mcp -a access-token -w)"
 if [ -z "$TOKEN" ]; then
   echo "empty token — Keychain lookup failed; aborting sweep"
 else
@@ -141,7 +141,7 @@ namespace, not some other server.
 A final sweep across everything steps 1–7 produced.
 
 ```bash
-TOKEN="$(security find-generic-password -s workbench-ynab -a YNAB_ACCESS_TOKEN -w)"
+TOKEN="$(security find-generic-password -s ynab-mcp -a access-token -w)"
 # Abort on an empty token (an empty pattern lists every file → false alarm), and
 # feed the secret over STDIN (-f -) so it never appears in argv / `ps` / history.
 # `-r .` recurses the WHOLE tree (run/, any *.log, and a report committed under
