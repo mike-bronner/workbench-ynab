@@ -171,7 +171,11 @@ _audit_append "$RECONCILE_OP" "$RECONCILE_RES" false
 assert_eq "two separate monthly files exist" "2" "$(ls "$SANDBOX/p5"/audit-*.jsonl | wc -l | tr -d ' ')"
 RUNA_OUT="$(_audit_read_run run-A)"
 assert_eq "run-A matches two records across both months" "2" "$(printf '%s' "$RUNA_OUT" | jq -s 'length')"
-assert_jq "run-A results are all run-A" "$RUNA_OUT" '.run_id == "run-A"'
+# Slurp the whole multi-record stream and quantify: a foreign run_id leaking
+# through as a non-final element must fail. (`jq -e` per-document only reflects
+# the LAST record, so it would miss a leak in any earlier element.)
+assert_eq "run-A results are all run-A (no foreign run_id leaks through)" "0" \
+  "$(printf '%s' "$RUNA_OUT" | jq -s 'map(select(.run_id != "run-A")) | length')"
 assert_jq "run_id read also divides milliunits (allocate)" "$(printf '%s' "$RUNA_OUT" | jq -s '.[] | select(.operation_id=="op-alloc-1")')" '.after.budgeted == 300'
 RUNB_COUNT="$(_audit_read_run run-B | jq -s 'length')"
 assert_eq "run-B matches exactly one record" "1" "$RUNB_COUNT"
@@ -199,6 +203,41 @@ bash "$HELPER" bogus >/dev/null 2>&1; rc=$?
 assert_eq "CLI unknown command exits 2" "2" "$rc"
 bash "$HELPER" >/dev/null 2>&1; rc=$?
 assert_eq "CLI with no args prints usage and exits 2" "2" "$rc"
+
+# ---------------------------------------------------------------------------
+echo "the audit trail is owner-only — dir 0700, record files 0600:"
+export YNAB_AUDIT_DIR="$SANDBOX/perms/nested"
+export YNAB_AUDIT_MONTH="2026-06"
+export YNAB_AUDIT_TIMESTAMP="2026-06-15T16:00:00Z"
+_audit_append "$CATEGORIZE_OP" "$CATEGORIZE_RES" false
+# Portable octal-perms read: BSD/macOS `stat -f '%Lp'`, GNU/Linux `stat -c '%a'`.
+mode_of() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
+assert_eq "audit dir is created mode 700"  "700" "$(mode_of "$YNAB_AUDIT_DIR")"
+assert_eq "record file is created mode 600" "600" "$(mode_of "$YNAB_AUDIT_DIR/audit-2026-06.jsonl")"
+
+# ---------------------------------------------------------------------------
+echo "read helpers: diagnostics go to STDERR, STDOUT stays clean (AC #9):"
+export YNAB_AUDIT_DIR="$SANDBOX/read-empty"
+export YNAB_AUDIT_MONTH="2026-06"
+# _audit_read_last against a missing month file: nothing on STDOUT, note on STDERR.
+RL_OUT="$(_audit_read_last 1 2>/dev/null)"
+assert_empty   "read_last on a missing file prints nothing to STDOUT" "$RL_OUT"
+RL_ERR="$(_audit_read_last 1 2>&1 1>/dev/null)"
+assert_contains "read_last diagnostic names audit-log on STDERR" "$RL_ERR" "audit-log:"
+# _audit_read_run against a missing audit dir: nothing on STDOUT, note on STDERR.
+RR_OUT="$(_audit_read_run run-A 2>/dev/null)"
+assert_empty   "read_run on a missing dir prints nothing to STDOUT" "$RR_OUT"
+RR_ERR="$(_audit_read_run run-A 2>&1 1>/dev/null)"
+assert_contains "read_run diagnostic names audit-log on STDERR" "$RR_ERR" "audit-log:"
+
+# ---------------------------------------------------------------------------
+echo "AC #6: with no override, _audit_dir resolves the canonical plugin-data path:"
+# Unset the test seam inside a command-substitution subshell so the parent's
+# YNAB_AUDIT_DIR (and the running PASS/FAIL counters) are untouched.
+DEFAULT_DIR="$(unset YNAB_AUDIT_DIR; _audit_dir)"
+assert_eq "default _audit_dir is the canonical plugin-data audit path" \
+  "$HOME/.claude/plugins/data/workbench-ynab-claude-workbench/audit" \
+  "$DEFAULT_DIR"
 
 echo ""
 echo "audit log: $PASS passed, $FAIL failed"

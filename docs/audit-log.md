@@ -26,6 +26,11 @@ HOME-relative via the same workbench-core pattern the config loader uses (see
 `workbench-core/hooks/mcp-memory.sh` lines 66–76); it is never hard-coded and
 never points inside the repo.
 
+Because each record persists financial data — before/after milliunits, category
+names, account and transaction ids — the writer creates the audit dir **0700**
+and every `audit-YYYY-MM.jsonl` file **0600** (owner-only), so the trail is not
+world-readable by default.
+
 ## Why JSONL (one object per line), not a single JSON array
 
 | | JSONL (append one line) | One growing JSON array |

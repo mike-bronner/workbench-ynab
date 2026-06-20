@@ -165,13 +165,21 @@ _audit_append() {
     return 1
   fi
 
+  # The audit trail persists financial data to disk — before/after milliunits,
+  # category names, account and transaction ids — so it must NOT be world-readable
+  # by default. Restrict perms at creation: the audit dir lands 0700 and each
+  # record file 0600. `umask 077` is scoped to a subshell so sourcing this helper
+  # never mutates the caller's umask (the same no-side-effects-at-load contract the
+  # rest of this file keeps); `-m 700` pins the dir mode explicitly even where the
+  # caller's umask is already permissive. (No sibling helper sets modes because
+  # none of them write sensitive data — this one does.)
   local dir; dir="$(_audit_dir)"
-  if ! mkdir -p "$dir" 2>/dev/null; then
+  if ! ( umask 077; mkdir -p -m 700 "$dir" ) 2>/dev/null; then
     echo "audit-log: cannot create audit dir: $dir" 1>&2
     return 1
   fi
 
-  if ! printf '%s\n' "$record" >> "$(_audit_file)"; then
+  if ! ( umask 077; printf '%s\n' "$record" >> "$(_audit_file)" ); then
     echo "audit-log: append failed: $(_audit_file)" 1>&2
     return 1
   fi
