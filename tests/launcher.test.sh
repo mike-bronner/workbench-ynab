@@ -91,9 +91,13 @@ make_stub() {
 # ── Case 1: Keychain miss — friendly error, exit 1, nothing on stdout ─────────
 echo "Keychain miss — friendly error naming /workbench-ynab:setup, exit 1, clean stdout:"
 STUB1="$SANDBOX/case1-bin"
+# Fully isolated PATH (bash + dirname via seed_coreutils, plus the security stub
+# below) — matches cases 2/3 so the empty-token guard can never fall through to a
+# host `node` if the guard order is ever changed.
+seed_coreutils "$STUB1"
 # security exits non-zero with no stdout (item not found in Keychain).
 make_stub "$STUB1" security 'exit 1'
-out="$(PATH="$STUB1:$PATH" bash "$LAUNCHER" 2>"$SANDBOX/case1.err")"; rc=$?
+out="$(PATH="$STUB1" "$BASH_BIN" "$LAUNCHER" 2>"$SANDBOX/case1.err")"; rc=$?
 err="$(cat "$SANDBOX/case1.err")"
 assert_eq        "exit code is 1"                       "1" "$rc"
 assert_empty     "stdout is empty"                      "$out"
@@ -130,10 +134,14 @@ make_stub "$STUB3" node \
   'exit 0'
 out="$(NODE_CAPTURE="$CAPTURE" PATH="$STUB3" "$BASH_BIN" "$LAUNCHER" 2>"$SANDBOX/case3.err")"; rc=$?
 cap="$(cat "$CAPTURE" 2>/dev/null)"
+err="$(cat "$SANDBOX/case3.err")"
 assert_eq       "exit code is 0"                          "0" "$rc"
 assert_empty    "stdout is empty before the handshake"    "$out"
 assert_contains "node was exec'd on the bin/ynab-mcp shim" "$cap" "/ynab-mcp"
 assert_contains "YNAB_ACCESS_TOKEN exported to node"       "$cap" "TOKEN_ENV: happy-token-12345"
+# AC #8 — the happy path is where the token is actually exported and handed to
+# node, so it's the most leak-relevant path: prove it never reaches stderr.
+assert_not_contains "token never appears on stderr (happy path)" "$err" "happy-token-12345"
 
 # ── Static guarantees on the script source ────────────────────────────────────
 echo "source guarantees — executable bit, strict mode, exec hand-off:"
@@ -145,6 +153,9 @@ assert_contains "first non-comment line is 'set -euo pipefail'" \
   "set -euo pipefail"
 assert_contains "final statement is 'exec node \"\$BUNDLE\"'" "$src" 'exec node "$BUNDLE"'
 assert_contains "exports YNAB_ACCESS_TOKEN"                   "$src" 'export YNAB_ACCESS_TOKEN="$TOKEN"'
+# Lock the portable SCRIPT_DIR derivation — an AC item, and a refactor to $0 or a
+# hardcoded path would otherwise leave the whole suite green.
+assert_contains "SCRIPT_DIR resolved via BASH_SOURCE"        "$src" 'BASH_SOURCE[0]'
 
 echo ""
 echo "launcher: $PASS passed, $FAIL failed"
