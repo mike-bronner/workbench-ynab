@@ -66,7 +66,11 @@ loud with its JSON path under `/overrides/…`, instead of silently corrupting t
 merged profile. A `businessEntities` override item must carry an `id` (the merge
 keys on it); the other entity fields stay optional so an id-only patch is legal, but
 an **id-less** entity override is rejected rather than silently dropping every
-lower-tier entity.
+lower-tier entity. For the same reason an **empty** `businessEntities` override
+(`[]`) is rejected (`minItems: 1`): it has no element to carry an `id`, so it would
+skip the by-id merge and wholesale-replace the array, silently dropping every
+lower-tier entity. (A legitimate "clear all entities" is implausible — the user
+would simply not declare them — and silently zeroing tax entities is catastrophic.)
 
 ## Merge semantics (deterministic)
 
@@ -88,8 +92,25 @@ The merge **skips the prototype-pollution keys** `__proto__`, `constructor`, and
 `__proto__` survives `JSON.parse` as an *own* property, so a naive deep-merge would
 read it via bracket access and mutate the global `Object.prototype` of the whole
 process; these keys are never legitimate tax-profile keys, so they are dropped
-outright. The exported `resolveProfile` and `deepMerge` carry the same guard, since
-the engine consumes them with raw `JSON.parse` output.
+outright. The merge likewise **skips `$`-prefixed annotation keys** (`$comment`,
+`$schema`, …) across all three tiers — both at the top of each merge step and
+inside the deep clone of any wholesale-replaced or newly-appended subtree — so a
+`$` key under a schema-open `overrides` (or `scheduleLineMap`) key can never leak
+into the frozen profile, which the profile's own schema forbids
+(`additionalProperties: false`). The exported `resolveProfile` and `deepMerge` carry
+the same guards, since the engine consumes them with raw `JSON.parse` output.
+
+### Bounded nesting depth
+
+`overrides` and `scheduleLineMap` are schema-open (`additionalProperties: true`), so
+the validator does not recurse into them — a pathologically deep value there would
+otherwise overflow the recursive merge and escape as an uncaught `RangeError`. The
+merge/stamp/strip routines enforce a generous **maximum nesting depth** (well above
+any real profile, well below the engine's stack limit); crossing it produces a
+structured `depth` failure (`error.kind === 'depth'`) instead of crashing the
+consuming skill — or, on an MCP path, the JSON-RPC handshake. Direct callers of
+`resolveProfile` / `deepMerge` get a clear `RangeError` rather than a cryptic stack
+overflow.
 
 ## Provenance
 
@@ -107,7 +128,7 @@ import { loadProfile } from '../../lib/tax/loadProfile.mjs';
 
 const r = loadProfile();
 if (!r.ok) {
-  // r.error = { kind: 'schema' | 'parse' | 'io', message, errors: [{ path, keyword, message, params }] }
+  // r.error = { kind: 'schema' | 'parse' | 'io' | 'depth', message, errors: [{ path, keyword, message, params }] }
   // r.profile === null  (no silent fallback)
 } else {
   // r.defaultsOnly  — true when no user profile was found
@@ -148,11 +169,13 @@ stderr only.
 overrides-over-user, schema-invalid failure (with the offending path), provenance
 across all three tiers, array-merge-by-id + object deep-merge, the accessors, and
 the no-stdout guarantee (asserted by spawning a child process). It also covers the
-security and robustness edges: prototype-pollution via a `__proto__` override (and
-through the exported `resolveProfile`/`deepMerge`), type-incompatible and id-less
-overrides failing loud, the `propertyNames` container-path convention, the
-`schemaVersion` `oneOf` arms, the `io`/missing-ruleset/missing-schema failure
-paths, and a beyond-two-levels deep-freeze assertion.
+security and robustness edges: prototype-pollution via a `__proto__` override and
+`constructor.prototype` (and through the exported `resolveProfile`/`deepMerge`),
+type-incompatible / id-less / empty-array overrides failing loud, `$`-prefixed
+annotation keys never leaking into the frozen profile, a too-deep override yielding
+a structured `depth` failure instead of a crash, the `propertyNames` container-path
+convention, the `schemaVersion` `oneOf` arms, the `io`/missing-ruleset/missing-schema
+failure paths, and a beyond-two-levels deep-freeze assertion.
 
 > **Not tax advice.** This tool organizes financial data and surfaces tax-relevant
 > signals. It is not a substitute for professional tax advice.

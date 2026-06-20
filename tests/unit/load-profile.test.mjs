@@ -295,9 +295,21 @@ test('(blocker) exported resolveProfile / deepMerge are not pollution vectors', 
   resolveProfile(JSON.parse('{"a":1}'), JSON.parse('{"overrides":{"__proto__":{"pwnedA":true}}}'));
   assert.equal(({}).pwnedA, undefined);
 
-  deepMerge(JSON.parse('{"a":1}'), JSON.parse('{"__proto__":{"pwnedB":true},"constructor":{"pwnedC":true}}'));
-  assert.equal(({}).pwnedB, undefined);
-  assert.equal(({}).pwnedC, undefined);
+  // __proto__ is the live prototype-pollution vector; `constructor.prototype` is
+  // the textbook second vector. The guard drops BOTH dangerous keys outright.
+  const merged = deepMerge(
+    JSON.parse('{"a":1}'),
+    JSON.parse('{"__proto__":{"pwnedB":true},"constructor":{"prototype":{"pwnedC":true}}}'),
+  );
+  assert.equal(({}).pwnedB, undefined, 'Object.prototype must not be polluted via __proto__');
+  assert.equal(({}).pwnedC, undefined, 'Object.prototype must not be polluted via constructor.prototype');
+  // Non-tautological proof the guard actually fired: the skipped keys leave NO
+  // own property behind. Without the guard the `constructor` key would be copied
+  // in as an own property here (its bracket-read is the Object function, so the
+  // merge wholesale-assigns it), making this assertion fail.
+  assert.equal(Object.prototype.hasOwnProperty.call(merged, '__proto__'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(merged, 'constructor'), false);
+  assert.deepEqual(merged, { a: 1 });
 });
 
 // --- BLOCKER 2: overrides must not silently corrupt the resolved profile -----
@@ -351,8 +363,70 @@ test('buildOverridesSchema opens the root and requires only id on entities', () 
   assert.equal(ov.additionalProperties, true);
   assert.equal(ov.properties.overrides, undefined); // overrides cannot nest itself
   assert.deepEqual(ov.properties.businessEntities.items.required, ['id']);
+  assert.equal(ov.properties.businessEntities.minItems, 1); // empty-array override is rejected
   // A ruleset-only key (not a named profile property) is allowed through.
   assert.equal(validateAgainstSchema({ lines: [{ id: 'L1' }] }, ov).valid, true);
+});
+
+test('(blocker) an empty businessEntities override fails loud instead of wiping entities', () => {
+  const p = writeProfile({
+    ...validBase(),
+    businessEntities: [
+      { id: 'biz-a', displayName: 'Business A', schedule: 'C', scheduleLineMap: { advertising: 'G1' } },
+    ],
+    // `[]` has no element to carry an id, so the by-id merge is skipped and a
+    // wholesale replace would silently drop biz-a. minItems:1 must reject it.
+    overrides: { businessEntities: [] },
+  });
+  const r = loadProfile({ profilePath: p });
+  assert.equal(r.ok, false, 'an empty entity-array override must not silently wipe entities');
+  assert.equal(r.error.kind, 'schema');
+  assert.equal(r.profile, null);
+  const e = r.error.errors.find((x) => x.path === '/overrides/businessEntities' && x.keyword === 'minItems');
+  assert.ok(e, 'expected a minItems failure at /overrides/businessEntities');
+});
+
+// --- BLOCKER 2 (round 2): $-prefixed override keys must never leak ------------
+// `overrides` (and any unknown override key) is schema-open, so a $-annotation
+// key passes validation. It must still be stripped pre-merge across all three
+// tiers — otherwise the resolved profile would carry a key its own schema forbids
+// (additionalProperties:false). Raw JSON keeps the $ keys as real own properties.
+
+test('(blocker) $-prefixed keys in overrides never leak into the frozen profile', () => {
+  const p = join(TMP, 'dollar-keys.json');
+  writeFileSync(
+    p,
+    '{"schemaVersion":"1","filingStatus":"single","taxYear":2025,' +
+      '"overrides":{"$pwn":"leak","customBucket":{"$note":"x","real":1}}}',
+  );
+  const r = loadProfile({ profilePath: p });
+  assert.equal(r.ok, true);
+  // A top-level $ key (caught in the merge key loop) does not land.
+  assert.equal(Object.prototype.hasOwnProperty.call(r.profile, '$pwn'), false, 'top-level $ key leaked');
+  // A $ key nested under a schema-open, wholesale-replaced override key (caught by
+  // the stripComments clone) does not land either.
+  assert.deepEqual(r.profile.customBucket, { real: 1 }, 'nested $ key leaked into a replaced subtree');
+  // ...and no provenance leaf is keyed on a $ annotation.
+  assert.ok(Object.keys(r.provenance).every((k) => !k.includes('$')), 'no $-keyed provenance leaf');
+});
+
+// --- BLOCKER 3 (round 2): a pathologically deep override must fail loud -------
+
+test('(blocker) a too-deep override returns a structured failure, never crashes', () => {
+  // overrides is schema-open, so deep nesting is not caught by validation; the
+  // recursive merge/strip guards must convert it to a structured `depth` failure
+  // instead of overflowing the stack and escaping as an uncaught RangeError.
+  let nested = 'true';
+  for (let i = 0; i < 5000; i++) nested = `{"x":${nested}}`;
+  const p = join(TMP, 'deep-override.json');
+  writeFileSync(
+    p,
+    `{"schemaVersion":"1","filingStatus":"single","taxYear":2025,"overrides":{"deep":${nested}}}`,
+  );
+  const r = loadProfile({ profilePath: p });
+  assert.equal(r.ok, false, 'a too-deep override must fail loud, not crash the loader');
+  assert.equal(r.error.kind, 'depth');
+  assert.equal(r.profile, null);
 });
 
 // --- follow-up: propertyNames failure reports the container path -------------
