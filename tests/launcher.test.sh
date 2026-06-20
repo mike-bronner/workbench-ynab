@@ -104,6 +104,23 @@ assert_empty     "stdout is empty"                      "$out"
 assert_contains  "stderr names the setup command"       "$err" "/workbench-ynab:setup"
 assert_contains  "stderr is routed through _log prefix" "$err" "ynab-mcp:"
 
+# ── Case 1b: whitespace-only token — reclassified as missing (issue #103) ─────
+# A Keychain entry holding only whitespace must surface the SAME friendly setup
+# guidance as an absent one, not pass the guard and exec node with a garbage
+# token. Mirrors Case 1's assertions: exit 1, the setup message on stderr, and a
+# pristine stdout (a stray byte would corrupt the MCP JSON-RPC handshake).
+echo "whitespace-only token — treated as missing, friendly error, exit 1, clean stdout:"
+STUB1B="$SANDBOX/case1b-bin"
+seed_coreutils "$STUB1B"
+# security succeeds (exit 0) but emits a whitespace-only value (spaces + a tab).
+make_stub "$STUB1B" security 'printf "   \t\n"'
+out="$(PATH="$STUB1B" "$BASH_BIN" "$LAUNCHER" 2>"$SANDBOX/case1b.err")"; rc=$?
+err="$(cat "$SANDBOX/case1b.err")"
+assert_eq        "exit code is 1"                       "1" "$rc"
+assert_empty     "stdout is empty"                      "$out"
+assert_contains  "stderr names the setup command"       "$err" "/workbench-ynab:setup"
+assert_contains  "stderr is routed through _log prefix" "$err" "ynab-mcp:"
+
 # ── Case 2: node missing — install guidance, exit 1, token never leaks ────────
 echo "node missing (token present) — install guidance, exit 1, token never leaks:"
 STUB2="$SANDBOX/case2-bin"
