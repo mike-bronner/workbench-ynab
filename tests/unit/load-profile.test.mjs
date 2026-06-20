@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -26,6 +26,7 @@ import {
   resolveProfile,
   deepMerge,
   validateAgainstSchema,
+  buildOverridesSchema,
   SOURCES,
 } from '../../lib/tax/loadProfile.mjs';
 
@@ -266,6 +267,184 @@ test('the loader writes nothing to stdout (safe on an MCP/JSON-RPC path)', () =>
   assert.equal(res.status, 0, res.stderr);
   assert.equal(res.stdout, '', `expected empty stdout, got: ${JSON.stringify(res.stdout)}`);
   assert.equal(res.stderr, 'ok');
+});
+
+// --- BLOCKER 1: prototype pollution via a __proto__ key in overrides --------
+// A JSON `__proto__` survives JSON.parse as an OWN property; a naive deep-merge
+// reads it via bracket access (the inherited accessor) and walks the chain,
+// mutating the global Object.prototype of the whole process. The merge must skip
+// the dangerous keys. (Object-literal `{ __proto__: ... }` SETS the prototype, so
+// these instances are built from raw JSON text to keep __proto__ an own key.)
+
+test('(blocker) a __proto__ key in overrides does not pollute Object.prototype', () => {
+  const p = join(TMP, 'proto-pollution.json');
+  writeFileSync(
+    p,
+    '{"schemaVersion":"1","filingStatus":"single","taxYear":2025,' +
+      '"overrides":{"__proto__":{"pwned":true}}}',
+  );
+  const r = loadProfile({ profilePath: p });
+  assert.equal(r.ok, true); // top-level overrides keys are open; __proto__ is simply skipped
+  // The smoking gun: nothing leaked onto every object in the process.
+  assert.equal(({}).pwned, undefined, 'Object.prototype must not be polluted');
+  assert.equal(Object.prototype.pwned, undefined);
+});
+
+test('(blocker) exported resolveProfile / deepMerge are not pollution vectors', () => {
+  // The issue intends the engine to consume these with raw JSON.parse output.
+  resolveProfile(JSON.parse('{"a":1}'), JSON.parse('{"overrides":{"__proto__":{"pwnedA":true}}}'));
+  assert.equal(({}).pwnedA, undefined);
+
+  deepMerge(JSON.parse('{"a":1}'), JSON.parse('{"__proto__":{"pwnedB":true},"constructor":{"pwnedC":true}}'));
+  assert.equal(({}).pwnedB, undefined);
+  assert.equal(({}).pwnedC, undefined);
+});
+
+// --- BLOCKER 2: overrides must not silently corrupt the resolved profile -----
+
+test('(blocker) a type-incompatible override fails loud, never corrupts the profile', () => {
+  const p = writeProfile({
+    ...validBase(),
+    overrides: { thresholds: { seTaxRate: 'not-a-number' } },
+  });
+  const r = loadProfile({ profilePath: p });
+  assert.equal(r.ok, false, 'a string where a rate belongs must not silently pass through');
+  assert.equal(r.error.kind, 'schema');
+  assert.equal(r.profile, null, 'must NOT produce a corrupted profile');
+  const e = r.error.errors.find((x) => x.path === '/overrides/thresholds/seTaxRate');
+  assert.ok(e, 'expected a typed error naming the override path');
+  assert.equal(e.keyword, 'type');
+});
+
+test('(blocker) an id-less entity override fails loud instead of dropping entities', () => {
+  const p = writeProfile({
+    ...validBase(),
+    businessEntities: [
+      { id: 'biz-a', displayName: 'Business A', schedule: 'C', scheduleLineMap: { advertising: 'G1' } },
+    ],
+    // No `id` → a wholesale replace would silently drop biz-a. Must be rejected.
+    overrides: { businessEntities: [{ displayName: 'Business B', schedule: 'C', scheduleLineMap: {} }] },
+  });
+  const r = loadProfile({ profilePath: p });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.kind, 'schema');
+  assert.equal(r.profile, null);
+  const e = r.error.errors.find((x) => x.path === '/overrides/businessEntities/0/id' && x.keyword === 'required');
+  assert.ok(e, 'expected a required-id error on the override entity');
+});
+
+test('(blocker) a well-formed id-only entity override still deep-merges (regression guard)', () => {
+  const p = writeProfile({
+    ...validBase(),
+    businessEntities: [
+      { id: 'biz-a', displayName: 'Business A', schedule: 'C', scheduleLineMap: { advertising: 'G1' } },
+    ],
+    overrides: { businessEntities: [{ id: 'biz-a', scheduleLineMap: { office: 'G2' } }] },
+  });
+  const r = loadProfile({ profilePath: p });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.getScheduleLineMap('biz-a'), { advertising: 'G1', office: 'G2' });
+});
+
+test('buildOverridesSchema opens the root and requires only id on entities', () => {
+  const ov = buildOverridesSchema(SCHEMA);
+  assert.equal(ov.additionalProperties, true);
+  assert.equal(ov.properties.overrides, undefined); // overrides cannot nest itself
+  assert.deepEqual(ov.properties.businessEntities.items.required, ['id']);
+  // A ruleset-only key (not a named profile property) is allowed through.
+  assert.equal(validateAgainstSchema({ lines: [{ id: 'L1' }] }, ov).valid, true);
+});
+
+// --- follow-up: propertyNames failure reports the container path -------------
+
+test('(follow-up) propertyNames failure is reported at the container path', () => {
+  // Bad filing-status key under standardDeductionByYear.
+  const bad = validateAgainstSchema(
+    { ...validBase(), standardDeductionByYear: { bogus: { 2025: 1 } } },
+    SCHEMA,
+  );
+  assert.equal(bad.valid, false);
+  const e = bad.errors.find((x) => x.keyword === 'propertyNames');
+  assert.ok(e, 'expected a propertyNames error');
+  assert.equal(e.path, '/standardDeductionByYear', 'path names the container, not a value position');
+  assert.equal(e.params.propertyName, 'bogus');
+
+  // Bad four-digit-year key reports at the inner container.
+  const badYear = validateAgainstSchema(
+    { ...validBase(), standardDeductionByYear: { single: { '20x5': 1 } } },
+    SCHEMA,
+  );
+  const ey = badYear.errors.find((x) => x.keyword === 'propertyNames');
+  assert.ok(ey);
+  assert.equal(ey.path, '/standardDeductionByYear/single');
+});
+
+// --- follow-up: getStandardDeduction omitted-arg fallback -------------------
+
+test('(follow-up) getStandardDeduction with no args falls back to the profile year + status', () => {
+  // validBase → filingStatus single, taxYear 2025; default single/2025 = 15000.
+  const p = writeProfile({ ...validBase() });
+  const r = loadProfile({ profilePath: p });
+  assert.equal(r.ok, true);
+  assert.equal(r.getStandardDeduction(), 15000, 'no-arg call uses profile.taxYear + profile.filingStatus');
+});
+
+// --- follow-up: schemaVersion oneOf arms + reject branches ------------------
+
+test('(follow-up) schemaVersion accepts the integer oneOf arm', () => {
+  const r = validateAgainstSchema({ schemaVersion: 1, filingStatus: 'single', taxYear: 2025 }, SCHEMA);
+  assert.equal(r.valid, true, JSON.stringify(r.errors));
+});
+
+test('(follow-up) schemaVersion matching neither oneOf arm is rejected', () => {
+  // 0 is an integer but < minimum 1 (integer arm fails) and is not a string (string arm fails).
+  const r = validateAgainstSchema({ schemaVersion: 0, filingStatus: 'single', taxYear: 2025 }, SCHEMA);
+  assert.equal(r.valid, false);
+  const e = r.errors.find((x) => x.path === '/schemaVersion' && x.keyword === 'oneOf');
+  assert.ok(e, 'expected a oneOf failure');
+  assert.equal(e.params.passes, 0);
+});
+
+// --- follow-up: io / packaging-invariant / deep-freeze branches -------------
+
+const canChmod = process.platform !== 'win32' && (typeof process.getuid !== 'function' || process.getuid() !== 0);
+
+test('(follow-up) an unreadable profile returns a structured io failure', { skip: !canChmod }, () => {
+  const p = join(TMP, 'unreadable.json');
+  writeFileSync(p, JSON.stringify(validBase()));
+  chmodSync(p, 0o000);
+  try {
+    const r = loadProfile({ profilePath: p });
+    assert.equal(r.ok, false);
+    assert.equal(r.error.kind, 'io');
+    assert.equal(r.profile, null);
+  } finally {
+    chmodSync(p, 0o600); // restore so the TMP cleanup can remove it
+  }
+});
+
+test('(follow-up) a missing bundled ruleset throws (packaging invariant, not a user error)', () => {
+  assert.throws(
+    () => loadProfile({ profilePath: ABSENT, defaultsPath: join(TMP, 'no-such-ruleset.json') }),
+    /cannot read bundled default ruleset/,
+  );
+});
+
+test('(follow-up) a missing bundled schema throws once a user profile is present', () => {
+  const p = writeProfile({ ...validBase() });
+  assert.throws(
+    () => loadProfile({ profilePath: p, schemaPath: join(TMP, 'no-such-schema.json') }),
+    /cannot read tax-profile schema/,
+  );
+});
+
+test('(follow-up) the freeze is deep — nested-beyond-two-levels values are frozen', () => {
+  const r = loadProfile({ profilePath: ABSENT });
+  // standardDeductionByYear → single → '2025' is three levels deep.
+  assert.ok(Object.isFrozen(r.profile.standardDeductionByYear.single));
+  assert.throws(() => {
+    r.profile.standardDeductionByYear.single['2025'] = 1;
+  }, TypeError);
 });
 
 // --- cleanup ----------------------------------------------------------------

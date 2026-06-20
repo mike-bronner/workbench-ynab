@@ -52,6 +52,22 @@ keyword subset (`type`, `required`, `properties`, `additionalProperties`,
 `propertyNames`, `enum`, `oneOf`, `items`, `minimum`, `maximum`, `minLength`,
 `minItems`, `pattern`) is exactly what `tax-profile.schema.json` uses.
 
+### The `overrides` layer is type-checked too
+
+The schema deliberately leaves `overrides` **open** (`additionalProperties: true`)
+so any subset of the ruleset may be patched — but the overrides layer can change
+**any** computed value, so the loader gives its leaves the same typed validation as
+the profile body. It derives a "partial profile" schema from the main schema
+(`buildOverridesSchema`): the root `required` is dropped and the root is opened (an
+override is a partial that may also target ruleset-only keys like `lines`), but
+every typed constraint (`type`/`enum`/`minimum`/`pattern`/…) is inherited. A
+**type-incompatible** override (e.g. a string where a rate belongs) therefore fails
+loud with its JSON path under `/overrides/…`, instead of silently corrupting the
+merged profile. A `businessEntities` override item must carry an `id` (the merge
+keys on it); the other entity fields stay optional so an id-only patch is legal, but
+an **id-less** entity override is rejected rather than silently dropping every
+lower-tier entity.
+
 ## Merge semantics (deterministic)
 
 Applied in precedence order **defaults → user profile → overrides**:
@@ -66,6 +82,14 @@ Applied in precedence order **defaults → user profile → overrides**:
 A layer that restates a value identical to the already-resolved one does **not**
 claim provenance; the lower tier's stamp stands. (This is what keeps an entity's
 `id`, used only as the merge key, from being mislabelled.)
+
+The merge **skips the prototype-pollution keys** `__proto__`, `constructor`, and
+`prototype` wherever it copies keys out of externally-sourced JSON. A JSON
+`__proto__` survives `JSON.parse` as an *own* property, so a naive deep-merge would
+read it via bracket access and mutate the global `Object.prototype` of the whole
+process; these keys are never legitimate tax-profile keys, so they are dropped
+outright. The exported `resolveProfile` and `deepMerge` carry the same guard, since
+the engine consumes them with raw `JSON.parse` output.
 
 ## Provenance
 
@@ -123,7 +147,12 @@ stderr only.
 **no `node_modules`** and covers: defaults-only fallback, user-over-defaults,
 overrides-over-user, schema-invalid failure (with the offending path), provenance
 across all three tiers, array-merge-by-id + object deep-merge, the accessors, and
-the no-stdout guarantee (asserted by spawning a child process).
+the no-stdout guarantee (asserted by spawning a child process). It also covers the
+security and robustness edges: prototype-pollution via a `__proto__` override (and
+through the exported `resolveProfile`/`deepMerge`), type-incompatible and id-less
+overrides failing loud, the `propertyNames` container-path convention, the
+`schemaVersion` `oneOf` arms, the `io`/missing-ruleset/missing-schema failure
+paths, and a beyond-two-levels deep-freeze assertion.
 
 > **Not tax advice.** This tool organizes financial data and surfaces tax-relevant
 > signals. It is not a substitute for professional tax advice.
