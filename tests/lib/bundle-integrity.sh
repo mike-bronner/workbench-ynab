@@ -66,6 +66,12 @@ ynab_export_transactions"
 # YNAB_ACCESS_TOKEN to be a non-empty string at startup, but only sends it to
 # YNAB when a *tool* is invoked — so the initialize + tools/list handshake never
 # touches the network and never needs a real token. Never the real one.
+#
+# WARNING: YNAB_ACCESS_TOKEN_TEST is an override for the fake token ONLY — it must
+# NEVER hold a real YNAB PAT. Its name sits in the YNAB_ACCESS_TOKEN namespace, so
+# a careless copy-paste of the real var into a CI env would feed a live PAT into the
+# boot. The boot is hermetic (no network on initialize/tools-list), so the blast
+# radius is small, but keep a fake value here regardless.
 BI_FAKE_TOKEN="${YNAB_ACCESS_TOKEN_TEST:-fake-offline-boot-token-not-a-real-pat}"
 
 # ---------------------------------------------------------------------------

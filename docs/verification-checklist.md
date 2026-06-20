@@ -65,7 +65,7 @@ TOKEN="$(security find-generic-password -s workbench-ynab -a YNAB_ACCESS_TOKEN -
 if [ -z "$TOKEN" ]; then
   echo "empty token — Keychain lookup failed; aborting sweep"
 else
-  printf '%s\n' "$TOKEN" | grep -rIiF -f - run/ *.log 2>/dev/null && echo "LEAK" || echo "no leak"
+  printf '%s\n' "$TOKEN" | grep -rIlF -f - . run/ *.log 2>/dev/null && echo "LEAK" || echo "no leak"
 fi
 unset TOKEN
 ```
