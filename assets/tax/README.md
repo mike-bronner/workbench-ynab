@@ -15,6 +15,7 @@ become one *instance* of this schema, stored outside the repo (see
 | [`tax-profile.schema.json`](./tax-profile.schema.json) | Canonical JSON Schema (draft 2020-12). Source of truth for the shape. |
 | [`tax-profile.d.ts`](./tax-profile.d.ts) | TypeScript declaration (`TaxProfile` + supporting types) for the engine to import. Zero runtime overhead. |
 | [`tax-profile.example.json`](./tax-profile.example.json) | A valid instance built entirely from placeholder values. |
+| [`us-tax-lines.json`](./us-tax-lines.json) | The **default US ruleset**: the Schedule C / A / 1 / SE line catalog the mapping engine maps onto, plus the default `standardDeductionByYear` table and `thresholds`. Purely declarative data; no per-taxpayer numbers. |
 
 ## Generic and shareable — a locked decision
 
@@ -65,11 +66,20 @@ cp assets/tax/tax-profile.example.json \
 
 ## Defaults and overrides
 
-The bundled **default US ruleset** (issue M3-3) supplies the standard
-deductions, thresholds, schedule-line data, and estimated-tax due dates. A live
-profile only needs to specify what differs: the `overrides` object is
-deep-merged **on top of** the defaults by the profile loader (M3-3), so users
-change individual values without restating the whole ruleset.
+The bundled **default US ruleset** supplies the standard deductions,
+thresholds, schedule-line data, and estimated-tax due dates. Its line catalog,
+`standardDeductionByYear` table, and `thresholds` are checked in as
+[`us-tax-lines.json`](./us-tax-lines.json) (issue #21); the profile loader
+(issue M3-3) merges that data with any user `overrides`. The line `id` scheme
+(`schedC.27a`, `schedA.medical`, `sched1.studentLoanInterest`, `schedSE`),
+filing-status keys, and `thresholds` keys there are kept consistent with this
+schema. A live profile only needs to specify what differs: the `overrides`
+object is deep-merged **on top of** the defaults by the profile loader, so
+users change individual values without restating the whole ruleset.
+
+Adding a new tax year to the default standard deductions is a pure **data
+edit** of `us-tax-lines.json` — add a new four-digit year key with its dollar
+amount under each filing status; no code change.
 
 ## Shape overview
 

@@ -1,0 +1,178 @@
+{
+  "$comment": "Default US tax ruleset — the generic, shareable line catalog the mapping engine (issue #23) maps YNAB payees/categories ONTO, and the default standardDeductionByYear + thresholds a tax profile (assets/tax/tax-profile.schema.json, issue #20) falls back to when the user supplies no override. PURELY DECLARATIVE: this file is data only — no JavaScript, no template expressions, no computed fields, no executable logic. NOTHING here is specific to one taxpayer; per-user numbers (which businesses exist, override amounts) live in the profile INSTANCE (issue #25), never here. MONEY UNITS: every monetary amount in this file is in US DOLLARS, not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars); each dollar field's description restates this. RATES are fractions (0.075 = 7.5%), not dollars and not percentages. NO vendor keyword lists or payee/category heuristics appear here — those are the mapping engine's concern (issue #23). The id scheme and field names are kept consistent with the tax-profile schema (issue #20): Schedule A line ids match its itemized.<bucket> keys, Schedule 1 line ids match its adjustments.<key> keys, filing-status keys match its FilingStatus enum, and the thresholds keys mirror its thresholds object. IRS line numbers are cited as they appear in the workbench-ynab prototype SKILL.md (Schedule C lines 29-41, Schedule A 42-63, Schedule 1 64-67, Schedule SE 69-70).",
+  "rulesetVersion": "1",
+  "country": "US",
+  "currency": "USD",
+  "moneyUnit": "dollars",
+  "lines": [
+    {
+      "id": "schedC.1",
+      "schedule": "C",
+      "lineNumber": "1",
+      "lineLabel": "Gross receipts or sales",
+      "description": "Total business income received before expenses — the top-line revenue for a sole-proprietorship / pass-through business. Gross receipts, sales, and fees collected belong here.",
+      "category": "income",
+      "appliesToBusinessEntities": true
+    },
+    {
+      "id": "schedC.8",
+      "schedule": "C",
+      "lineNumber": "8",
+      "lineLabel": "Advertising",
+      "description": "Advertising and marketing costs to promote the business.",
+      "category": "expense",
+      "appliesToBusinessEntities": true
+    },
+    {
+      "id": "schedC.10",
+      "schedule": "C",
+      "lineNumber": "10",
+      "lineLabel": "Commissions and fees",
+      "description": "Commissions and fees paid to non-employees for business services (excludes contract labor reported on line 11).",
+      "category": "expense",
+      "appliesToBusinessEntities": true
+    },
+    {
+      "id": "schedC.11",
+      "schedule": "C",
+      "lineNumber": "11",
+      "lineLabel": "Contract labor",
+      "description": "Payments to independent contractors for services performed for the business (amounts that would be reported on a Form 1099-NEC).",
+      "category": "expense",
+      "appliesToBusinessEntities": true
+    },
+    {
+      "id": "schedC.13",
+      "schedule": "C",
+      "lineNumber": "13",
+      "lineLabel": "Depreciation and section 179 expense deduction",
+      "description": "Depreciation of business property and any section 179 expensing election for the year.",
+      "category": "expense",
+      "appliesToBusinessEntities": true
+    },
+    {
+      "id": "schedC.17",
+      "schedule": "C",
+      "lineNumber": "17",
+      "lineLabel": "Legal and professional services",
+      "description": "Fees for legal, accounting, bookkeeping, and other professional services used by the business.",
+      "category": "expense",
+      "appliesToBusinessEntities": true
+    },
+    {
+      "id": "schedC.18",
+      "schedule": "C",
+      "lineNumber": "18",
+      "lineLabel": "Office expense",
+      "description": "Ordinary office operating costs such as office supplies and postage (distinct from supplies on line 22 and utilities on line 25).",
+      "category": "expense",
+      "appliesToBusinessEntities": true
+    },
+    {
+      "id": "schedC.22",
+      "schedule": "C",
+      "lineNumber": "22",
+      "lineLabel": "Supplies",
+      "description": "Cost of supplies and materials consumed in the business that are not part of cost of goods sold.",
+      "category": "expense",
+      "appliesToBusinessEntities": true
+    },
+    {
+      "id": "schedC.25",
+      "schedule": "C",
+      "lineNumber": "25",
+      "lineLabel": "Utilities",
+      "description": "Utilities used for the business such as electricity, gas, water, and business phone/internet service.",
+      "category": "expense",
+      "appliesToBusinessEntities": true
+    },
+    {
+      "id": "schedC.27a",
+      "schedule": "C",
+      "lineNumber": "27a",
+      "lineLabel": "Other expenses",
+      "description": "Catch-all for ordinary and necessary business expenses that do not fit a named Schedule C line (for example software and subscription costs). The specific payee/category rules that route transactions here live in the mapping engine (issue #23), not in this catalog.",
+      "category": "expense",
+      "appliesToBusinessEntities": true
+    },
+    {
+      "id": "schedA.medical",
+      "schedule": "A",
+      "lineLabel": "Medical and dental expenses",
+      "description": "Schedule A itemized medical and dental expenses. Only the portion above thresholds.medicalAgiPercent of AGI is deductible; the threshold itself lives under thresholds, not on this record. Household-level, not tied to a business entity.",
+      "category": "medical",
+      "appliesToBusinessEntities": false
+    },
+    {
+      "id": "schedA.salt",
+      "schedule": "A",
+      "lineLabel": "State and local taxes (SALT)",
+      "description": "Schedule A state-and-local taxes: income or sales tax plus property tax, deductible up to thresholds.saltCap dollars. Household-level, not tied to a business entity.",
+      "category": "salt",
+      "appliesToBusinessEntities": false
+    },
+    {
+      "id": "schedA.interest",
+      "schedule": "A",
+      "lineLabel": "Home mortgage interest",
+      "description": "Schedule A deductible interest: qualified home mortgage interest and HELOC interest. Household-level, not tied to a business entity.",
+      "category": "interest",
+      "appliesToBusinessEntities": false
+    },
+    {
+      "id": "schedA.charitable",
+      "schedule": "A",
+      "lineLabel": "Gifts to charity",
+      "description": "Schedule A charitable contributions: cash and non-cash gifts to qualified organizations. Household-level, not tied to a business entity.",
+      "category": "charitable",
+      "appliesToBusinessEntities": false
+    },
+    {
+      "id": "sched1.seTaxHalfDeduction",
+      "schedule": "1",
+      "lineLabel": "Deductible part of self-employment tax",
+      "description": "Schedule 1 adjustment for one-half of self-employment tax. This amount is derived from the computed SE tax (thresholds.seTaxRate) by the engine; the catalog only declares that the line exists. Household-level adjustment to income.",
+      "category": "adjustment",
+      "appliesToBusinessEntities": false
+    },
+    {
+      "id": "sched1.studentLoanInterest",
+      "schedule": "1",
+      "lineLabel": "Student loan interest deduction",
+      "description": "Schedule 1 above-the-line deduction for student loan interest paid, subject to the IRS annual cap and income phase-out applied by the engine. Household-level adjustment to income.",
+      "category": "adjustment",
+      "appliesToBusinessEntities": false
+    },
+    {
+      "id": "sched1.iraContributions",
+      "schedule": "1",
+      "lineLabel": "IRA deduction",
+      "description": "Schedule 1 above-the-line deduction for deductible traditional-IRA contributions. Household-level adjustment to income.",
+      "category": "adjustment",
+      "appliesToBusinessEntities": false
+    },
+    {
+      "id": "schedSE",
+      "schedule": "SE",
+      "lineLabel": "Self-employment tax",
+      "description": "Schedule SE self-employment tax on net earnings from self-employment, combining 12.4% Social Security and 2.9% Medicare for a 15.3% combined rate (see rate, which mirrors thresholds.seTaxRate — the tunable source of truth). Household-level; one-half of the computed tax is deductible via sched1.seTaxHalfDeduction.",
+      "category": "tax",
+      "rate": 0.153,
+      "appliesToBusinessEntities": false
+    }
+  ],
+  "standardDeductionByYear": {
+    "$comment": "Standard deduction lookup keyed by filing status, then by four-digit tax-year string, mirroring standardDeductionByYear in tax-profile.schema.json (issue #20). Every value is the standard deduction in US DOLLARS, not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars). Filing-status keys: single = Single; mfj = Married Filing Jointly; mfs = Married Filing Separately; hoh = Head of Household; qw = Qualifying Surviving Spouse. Adding a new tax year is a pure data edit: add a new four-digit year key with its dollar amount under each filing status — no code change.",
+    "single": { "2024": 14600, "2025": 15000 },
+    "mfj": { "2024": 29200, "2025": 30000 },
+    "mfs": { "2024": 14600, "2025": 15000 },
+    "hoh": { "2024": 21900, "2025": 22500 },
+    "qw": { "2024": 29200, "2025": 30000 }
+  },
+  "thresholds": {
+    "$comment": "Tunable tax thresholds and rates, mirroring the thresholds object in tax-profile.schema.json (issue #20). Rates are fractions (0.075 = 7.5%), not dollars and not percentages; saltCap is a US DOLLAR amount, not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars).",
+    "medicalAgiPercent": 0.075,
+    "seTaxRate": 0.153,
+    "saltCap": 10000
+  }
+}
