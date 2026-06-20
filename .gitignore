@@ -21,9 +21,18 @@ run/
 *.log
 
 # Secrets — never commit. The YNAB token lives in macOS Keychain, never on disk.
-.env
+# .env* (not just .env) so every dotenv variant — .env.local, .env.production,
+# .env.test, etc. — is blocked, not only the exact filename.
+.env*
 *.token
 config.local.json
+# Secret-adjacent shapes a YNAB-handling repo must never accept (see SECURITY.md):
+# private keys, Keychain dumps, and any token-named file.
+*.pem
+*.key
+keychain-dump*
+*_token
+*access_token*
 
 # NOTE: vendor/ is intentionally TRACKED. The YNAB MCP bundle is vendored into
 # this repo on purpose (frozen, offline, reproducible). Do not add vendor/ here.
