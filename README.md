@@ -26,7 +26,7 @@ First-time configuration is a one-time token paste. Run the `/workbench-ynab:set
 
 ## Persona & configuration
 
-The assistant has a default voice named **Hobbes** that you can rename. Optional settings live in `config.json` in the plugin data directory — **outside this repo, so they survive plugin updates** — never in the repo and never holding your token. See [`docs/persona.md`](docs/persona.md) for the persona asset, the `persona` config object (`name`, `voice_overrides`), and the loader contract.
+The assistant has a default voice and, by default, speaks as **your own Claude agent** (its `workbench-core` `agent_name`) — falling back to **Hobbes** when you have no `workbench-core` agent configured. You can also give it a dedicated name via `persona.name`. Optional settings live in `config.json` in the plugin data directory — **outside this repo, so they survive plugin updates** — never in the repo and never holding your token. See [`docs/persona.md`](docs/persona.md) for the persona asset, the `persona` config object (`name`, `voice_overrides`), the name-resolution precedence, and the loader contract.
 
 ## Privacy & safety
 

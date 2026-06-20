@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# persona-loader.test.sh — verifies the persona-name loader contract (issue #36).
+# persona-loader.test.sh — verifies the persona loader + renderers (issue #36).
 #
 # Self-contained: no test framework required. Run directly:
 #   bash tests/persona-loader.test.sh
@@ -8,8 +8,9 @@
 # Sprint-1 test harness lands; until then it is the documented automated check
 # behind docs/persona.md "Verification".
 #
-# Drives bin/persona.sh against a temp config via the YNAB_CONFIG_FILE override
-# so the real plugin data dir is never touched.
+# Drives bin/persona.sh against temp configs via the YNAB_CONFIG_FILE and
+# WORKBENCH_CORE_CONFIG_FILE overrides so the real plugin data dirs are never
+# touched — the tests are hermetic and do not depend on host config state.
 
 set -u
 
@@ -20,13 +21,23 @@ PERSONA_SH="${REPO_ROOT}/bin/persona.sh"
 TMPDIR_TEST="$(mktemp -d)"
 trap 'rm -rf "${TMPDIR_TEST}"' EXIT
 
+# A guaranteed-absent path, used to pin "no config here" deterministically.
+NO_FILE="${TMPDIR_TEST}/does-not-exist.json"
+
 pass=0
 fail=0
 
-# assert_name <description> <expected> <config-file-path-or-empty>
+# run <ynab-cfg> <core-cfg> [args...] — invoke persona.sh with both config paths
+# pinned, so neither tier leaks in from the host environment.
+run() {
+  local ynab="$1" core="$2"; shift 2
+  YNAB_CONFIG_FILE="$ynab" WORKBENCH_CORE_CONFIG_FILE="$core" bash "$PERSONA_SH" "$@"
+}
+
+# assert_name <desc> <expected> <ynab-cfg> [core-cfg]
 assert_name() {
-  local desc="$1" expected="$2" cfg="$3" got
-  got="$(YNAB_CONFIG_FILE="$cfg" bash "$PERSONA_SH" name)"
+  local desc="$1" expected="$2" ynab="$3" core="${4:-$NO_FILE}" got
+  got="$(run "$ynab" "$core" name)"
   if [ "$got" = "$expected" ]; then
     printf 'ok   — %s (got %q)\n' "$desc" "$got"
     pass=$((pass + 1))
@@ -36,23 +47,77 @@ assert_name() {
   fi
 }
 
-# (a) custom persona.name is picked up
-custom_cfg="${TMPDIR_TEST}/custom.json"
-printf '{"persona":{"name":"Calvin"}}' > "$custom_cfg"
-assert_name "custom persona.name is picked up" "Calvin" "$custom_cfg"
+# assert_contains <desc> <needle> <haystack>
+assert_contains() {
+  local desc="$1" needle="$2" haystack="$3"
+  case "$haystack" in
+    *"$needle"*)
+      printf 'ok   — %s\n' "$desc"; pass=$((pass + 1)) ;;
+    *)
+      printf 'FAIL — %s: %q not found in %q\n' "$desc" "$needle" "$haystack"
+      fail=$((fail + 1)) ;;
+  esac
+}
 
-# (b) absent config file falls back to Hobbes (no error)
-assert_name "absent config falls back to Hobbes" "Hobbes" "${TMPDIR_TEST}/does-not-exist.json"
+# assert_absent <desc> <needle> <haystack>
+assert_absent() {
+  local desc="$1" needle="$2" haystack="$3"
+  case "$haystack" in
+    *"$needle"*)
+      printf 'FAIL — %s: %q unexpectedly present in %q\n' "$desc" "$needle" "$haystack"
+      fail=$((fail + 1)) ;;
+    *)
+      printf 'ok   — %s\n' "$desc"; pass=$((pass + 1)) ;;
+  esac
+}
 
-# missing .persona.name field falls back to Hobbes
-empty_cfg="${TMPDIR_TEST}/empty.json"
-printf '{"persona":{}}' > "$empty_cfg"
-assert_name "missing persona.name falls back to Hobbes" "Hobbes" "$empty_cfg"
+# ---- name resolution ----------------------------------------------------------
 
-# malformed JSON falls back to Hobbes (no error)
-bad_cfg="${TMPDIR_TEST}/bad.json"
-printf 'this is not json {' > "$bad_cfg"
-assert_name "malformed config falls back to Hobbes" "Hobbes" "$bad_cfg"
+# (1) tier 1: explicit ynab persona.name is picked up
+ynab_calvin="${TMPDIR_TEST}/ynab-calvin.json"
+printf '{"persona":{"name":"Calvin"}}' > "$ynab_calvin"
+assert_name "tier 1: ynab persona.name is picked up" "Calvin" "$ynab_calvin"
+
+# (2) absent ynab config + absent core config falls back to Hobbes (no error)
+assert_name "absent both configs falls back to Hobbes" "Hobbes" "$NO_FILE"
+
+# (3) missing .persona.name field + no core falls back to Hobbes
+ynab_empty="${TMPDIR_TEST}/ynab-empty.json"
+printf '{"persona":{}}' > "$ynab_empty"
+assert_name "missing persona.name falls back to Hobbes" "Hobbes" "$ynab_empty"
+
+# (4) null .persona.name + no core falls back to Hobbes (documented guarantee)
+ynab_null="${TMPDIR_TEST}/ynab-null.json"
+printf '{"persona":{"name":null}}' > "$ynab_null"
+assert_name "null persona.name falls back to Hobbes" "Hobbes" "$ynab_null"
+
+# (5) malformed ynab JSON + no core falls back to Hobbes (no error)
+ynab_bad="${TMPDIR_TEST}/ynab-bad.json"
+printf 'this is not json {' > "$ynab_bad"
+assert_name "malformed config falls back to Hobbes" "Hobbes" "$ynab_bad"
+
+# (6) tier 2: no ynab persona.name, core agent_name present -> agent's name
+core_holmes="${TMPDIR_TEST}/core-holmes.json"
+printf '{"agent_name":"Holmes"}' > "$core_holmes"
+assert_name "tier 2: core agent_name used as default" "Holmes" "$NO_FILE" "$core_holmes"
+assert_name "tier 2: applies when ynab persona.name missing" "Holmes" "$ynab_empty" "$core_holmes"
+
+# (7) precedence: ynab persona.name wins over core agent_name
+assert_name "tier 1 beats tier 2 (ynab persona.name wins)" "Calvin" "$ynab_calvin" "$core_holmes"
+
+# ---- footer rendering (AC 7) --------------------------------------------------
+
+footer="$(run "$ynab_calvin" "$NO_FILE" footer 2026-06-19)"
+assert_contains "footer substitutes the resolved name"      "Generated by Calvin" "$footer"
+assert_contains "footer substitutes the timestamp"          "2026-06-19"          "$footer"
+assert_absent   "footer leaves no {{persona}} placeholder"  "{{persona}}"         "$footer"
+assert_absent   "footer carries no hardcoded Hobbes literal" "Hobbes"             "$footer"
+
+# ---- dispatch sign-off (AC 8) -------------------------------------------------
+
+signoff="$(run "$ynab_calvin" "$NO_FILE" signoff)"
+assert_contains "sign-off uses the resolved name"            "Calvin"             "$signoff"
+assert_absent   "sign-off carries no hardcoded Hobbes literal" "Hobbes"           "$signoff"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

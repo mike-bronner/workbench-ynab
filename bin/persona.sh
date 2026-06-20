@@ -1,50 +1,120 @@
 #!/usr/bin/env bash
 #
-# persona.sh — resolve the configured financial-assistant persona name.
+# persona.sh — resolve the configured financial-assistant persona name and
+# render the persona-stamped surfaces (report footer, dispatch sign-off).
 #
 # Single source of truth for the persona-name substitution described in
 # docs/persona.md. Skills, wrappers, and the report writer call this instead of
-# re-implementing the config read, so the "Hobbes" default lives in exactly one
-# place and the name is substituted consistently everywhere it appears.
+# re-implementing the config read or hardcoding a name, so the resolution order
+# lives in exactly one place and the name is substituted consistently everywhere
+# it appears.
 #
 # The resolved name is consumed by the SKILL only. It is NEVER forwarded to the
 # vendored YNAB MCP — that server receives only the token + package-native env
 # (see docs/persona.md, "Boundary").
 #
 # Usage:
-#   bash bin/persona.sh name     # print the resolved persona name (default arg)
-#   bash bin/persona.sh          # same as `name`
+#   bash bin/persona.sh name           # print the resolved persona name (default)
+#   bash bin/persona.sh footer [when]  # render the report footer  (AC 7)
+#   bash bin/persona.sh signoff        # render the dispatch sign-off (AC 8)
 #
-# Config path resolution (override for tests via YNAB_CONFIG_FILE):
-#   ~/.claude/plugins/data/workbench-ynab-claude-workbench/config.json
+# Name resolution precedence (first non-empty wins):
+#   1. .persona.name in the workbench-ynab plugin config — explicit override.
+#   2. .agent_name   in the workbench-core plugin config — the requesting
+#      agent's own persona, so the assistant speaks as the Claude agent that
+#      runs the review rather than an invented name.
+#   3. "Hobbes"      — the shipped standalone default for a user who has neither
+#      config (the public, no-workbench-core case).
 #
-# Fallback is total: an absent config file, missing jq, malformed JSON, or an
-# absent/null .persona.name all resolve to "Hobbes" with no error and exit 0.
+# Config paths (overridable for tests):
+#   ynab:  YNAB_CONFIG_FILE          ~/.claude/plugins/data/workbench-ynab-claude-workbench/config.json
+#   core:  WORKBENCH_CORE_CONFIG_FILE ~/.claude/plugins/data/workbench-core-claude-workbench/config.json
+#          (when unset, the legacy ~/.claude/plugins/data/workbench-claude-workbench/config.json
+#           is probed too, for parity with workbench-core's hooks/mcp-memory.sh)
+#
+# Footer template (overridable for tests):
+#   YNAB_FOOTER_TEMPLATE            <repo>/assets/templates/report-footer.html
+#
+# Every read is total: an absent config file, missing jq, malformed JSON, or an
+# absent/null field is swallowed and the next tier takes over, ending at
+# "Hobbes" — no error, exit 0.
 
 set -u
 
 DEFAULT_PERSONA_NAME="Hobbes"
-CONFIG_FILE="${YNAB_CONFIG_FILE:-$HOME/.claude/plugins/data/workbench-ynab-claude-workbench/config.json}"
 
-# Read a jq path from the config, echoing empty on any failure. Mirrors the
-# workbench-core hooks/mcp-memory.sh `_cfg` convention: guard the file, guard
-# jq, swallow parse errors, let `// empty` collapse a missing field to empty so
-# the shell `${VAR:-default}` fallback below takes over.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+: "${YNAB_CONFIG_FILE:=$HOME/.claude/plugins/data/workbench-ynab-claude-workbench/config.json}"
+FOOTER_TEMPLATE="${YNAB_FOOTER_TEMPLATE:-$REPO_ROOT/assets/templates/report-footer.html}"
+
+# workbench-core config: honor an explicit override; otherwise probe the current
+# location and the legacy pre-rename location (parity with mcp-memory.sh).
+if [ -n "${WORKBENCH_CORE_CONFIG_FILE:-}" ]; then
+  CORE_CONFIG_CANDIDATES=("$WORKBENCH_CORE_CONFIG_FILE")
+else
+  CORE_CONFIG_CANDIDATES=(
+    "$HOME/.claude/plugins/data/workbench-core-claude-workbench/config.json"
+    "$HOME/.claude/plugins/data/workbench-claude-workbench/config.json"
+  )
+fi
+
+# Read a jq path from a config file, echoing empty on any failure. Mirrors the
+# workbench-core hooks/mcp-memory.sh `_cfg` idiom: guard the file, guard jq,
+# swallow parse errors, let `// empty` collapse a missing/null field to empty so
+# the caller's fallback takes over.
 _cfg() {
-  [ -f "$CONFIG_FILE" ] && command -v jq >/dev/null 2>&1 \
-    && jq -r "$1 // empty" "$CONFIG_FILE" 2>/dev/null
+  local file="$1" path="$2"
+  [ -f "$file" ] && command -v jq >/dev/null 2>&1 \
+    && jq -r "$path // empty" "$file" 2>/dev/null
+}
+
+# Echo the first existing workbench-core config candidate, or nothing.
+_core_config() {
+  local f
+  for f in "${CORE_CONFIG_CANDIDATES[@]}"; do
+    [ -f "$f" ] && { printf '%s\n' "$f"; return 0; }
+  done
 }
 
 persona_name() {
-  local name
-  name="$(_cfg '.persona.name')"
+  local name core
+  # 1. ynab plugin's explicit persona.name
+  name="$(_cfg "$YNAB_CONFIG_FILE" '.persona.name')"
+  # 2. the requesting agent's own name from workbench-core
+  if [ -z "$name" ]; then
+    core="$(_core_config)"
+    [ -n "$core" ] && name="$(_cfg "$core" '.agent_name')"
+  fi
+  # 3. shipped standalone default
   printf '%s\n' "${name:-$DEFAULT_PERSONA_NAME}"
 }
 
+render_footer() {
+  local when="${1:-$(date '+%Y-%m-%d')}" name template
+  name="$(persona_name)"
+  if [ -f "$FOOTER_TEMPLATE" ]; then
+    template="$(cat "$FOOTER_TEMPLATE")"
+  else
+    # Inline fallback keeps the renderer total even if the asset is missing.
+    template='Generated by {{persona}} — {{generated_at}}'
+  fi
+  template="${template//\{\{persona\}\}/$name}"
+  template="${template//\{\{generated_at\}\}/$when}"
+  printf '%s\n' "$template"
+}
+
+render_signoff() {
+  printf '— %s, your financial assistant\n' "$(persona_name)"
+}
+
 case "${1:-name}" in
-  name) persona_name ;;
+  name)    persona_name ;;
+  footer)  shift; render_footer "$@" ;;
+  signoff) render_signoff ;;
   *)
-    printf 'persona.sh: unknown subcommand %q (expected: name)\n' "$1" >&2
+    printf 'persona.sh: unknown subcommand %q (expected: name|footer|signoff)\n' "$1" >&2
     exit 2
     ;;
 esac
