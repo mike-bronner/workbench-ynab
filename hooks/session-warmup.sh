@@ -24,9 +24,16 @@
 
 set -u
 
-# Config path. Mirrors bin/config.sh exactly, including the YNAB_CONFIG_FILE test
-# seam, so the warmup and the loader agree on where configuration lives.
-YNAB_CONFIG_FILE="${YNAB_CONFIG_FILE:-$HOME/.claude/plugins/data/workbench-ynab-claude-workbench/config.json}"
+# Config path. Tracks bin/config.sh's YNAB_CONFIG_FILE test seam and default
+# location, so the warmup and the loader agree on where configuration lives. One
+# deliberate divergence: HOME is expanded as ${HOME:-} here. The loader may error
+# loudly when its environment is broken, but this hook must NEVER abort a session
+# — under `set -u` a bare $HOME with HOME unset would raise "HOME: unbound
+# variable" and exit non-zero on this very first statement, before either exit 0.
+# With HOME unset the path degrades to a guaranteed-absent location, so the config
+# simply reads as missing and the setup block is emitted — the safe, actionable
+# outcome rather than a silent non-zero abort.
+YNAB_CONFIG_FILE="${YNAB_CONFIG_FILE:-${HOME:-}/.claude/plugins/data/workbench-ynab-claude-workbench/config.json}"
 
 # TODO(version-drift, future milestone): mirror the workbench-bujo warmup's
 # version-drift check — warn when the running plugin bundle is STRICTLY behind

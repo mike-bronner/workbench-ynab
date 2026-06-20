@@ -67,7 +67,7 @@ assert_contains() {
   if printf '%s' "$haystack" | grep -qF "$needle"; then
     PASS=$((PASS + 1)); echo "  ✅ $desc"
   else
-    FAIL=$((FAIL + 1)); echo "  ❌ $desc — expected to find: [$needle]"
+    FAIL=$((FAIL + 1)); echo "  ❌ $desc — expected to find: [$needle] in: [$haystack]"
   fi
 }
 
@@ -121,6 +121,17 @@ echo "every exit path returns 0 (failure branch must not abort a session):"
 # security stub failing AND a non-writable config dir — script still exits 0.
 run 1 "$SANDBOX/nested/missing/config.json"
 assert_eq "exit code is 0 even when both checks fail" "0" "$RC"
+
+echo "HOME unset + config path unset — set -u must not abort on the first line, exit 0:"
+# Regression for the set -u trap: with neither HOME nor YNAB_CONFIG_FILE set, the
+# config-path default expands ${HOME:-} to empty rather than raising
+# "HOME: unbound variable". The path then degrades to a guaranteed-absent
+# location → config reads as missing → the setup block is emitted, exit 0. A bare
+# $HOME here would abort non-zero before any exit 0, breaking the AC #2 contract.
+OUT="$(env -u HOME -u YNAB_CONFIG_FILE STUB_SECURITY_RC=1 PATH="$STUB_BIN:$PATH" bash "$WARMUP")"
+RC=$?
+assert_eq       "exit code is 0 with HOME unset"        "0" "$RC"
+assert_contains "still points at /workbench-ynab:setup" "$OUT" "/workbench-ynab:setup"
 
 echo ""
 echo "session-warmup: $PASS passed, $FAIL failed"
