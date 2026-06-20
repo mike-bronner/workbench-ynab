@@ -72,6 +72,13 @@ ALLOCATE_OP='{"id":"op-alloc-1","type":"allocate","budget_id":"b1","category_id"
 ALLOCATE_RES='{"tool":"mcp__ynab__ynab_update_category","status":"success","schema_version":"1.0.0","run_id":"run-A"}'
 RECONCILE_OP='{"id":"op-rec-1","type":"reconcile","budget_id":"b1","account_id":"acct-1","transaction_ids":["t1","t2"],"before":{"cleared_balance":100000,"reconciled_balance":90000},"after":{"reconciled_balance":100000},"rationale":"month-end","risk":"low"}'
 RECONCILE_RES='{"tool":"mcp__ynab__ynab_reconcile_account","status":"success","schema_version":"1.0.0","run_id":"run-B"}'
+# delete_duplicate carries the `amount` milliunit field (a REQUIRED before-field per
+# assets/changeset-schema.json:255) — the fourth and final field fixmu divides. This
+# fixture carries `amount` in BOTH before and after so the ÷1000 read transform is
+# proven in each position (the real op's after is {deleted:true}; here we add an
+# amount to exercise the after branch of fixmu too — the writer stores both verbatim).
+DELETE_OP='{"id":"op-del-1","type":"delete_duplicate","budget_id":"b1","transaction_id":"txn-dup-1","before":{"amount":-54990,"date":"2026-06-12","payee_name":"Amazon","category_name":"Shopping","import_id":"YNAB:-54990:2026-06-12:1"},"after":{"amount":12340,"deleted":true},"rationale":"exact duplicate","risk":"destructive"}'
+DELETE_RES='{"tool":"mcp__ynab__ynab_delete_transaction","status":"success","schema_version":"1.0.0","run_id":"run-C"}'
 
 # ---------------------------------------------------------------------------
 echo "AC: a normal operation appends one record with all required fields:"
@@ -187,6 +194,27 @@ RUNB_OUT="$(_audit_read_run run-B)"
 assert_jq "reconcile before.cleared_balance shown as 100 (÷1000)"    "$RUNB_OUT" '.before.cleared_balance == 100'
 assert_jq "reconcile before.reconciled_balance shown as 90 (÷1000)"  "$RUNB_OUT" '.before.reconciled_balance == 90'
 assert_jq "reconcile after.reconciled_balance shown as 100 (÷1000)"  "$RUNB_OUT" '.after.reconciled_balance == 100'
+
+# ---------------------------------------------------------------------------
+# `amount` is the FOURTH milliunit field fixmu divides (bin/audit-log.sh:114) and
+# the one no other fixture carried — budgeted, cleared_balance and reconciled_balance
+# are all read-asserted above. It is a REQUIRED before-field of delete_duplicate
+# (assets/changeset-schema.json:255), so every such record carries before.amount;
+# without this a regression that broke only the `amount` branch of fixmu would ship
+# raw milliunits in the human display while every other test stayed green. Read a
+# delete_duplicate record back through BOTH helpers and confirm the ÷1000 transform.
+echo "AC #7: the amount field is divided ÷1000 on read (delete_duplicate op):"
+export YNAB_AUDIT_DIR="$SANDBOX/p_del"
+export YNAB_AUDIT_MONTH="2026-06"
+export YNAB_AUDIT_TIMESTAMP="2026-06-15T16:30:00Z"
+_audit_append "$DELETE_OP" "$DELETE_RES" false
+DEL_LAST="$(_audit_read_last 1)"
+assert_jq "delete read via last: target_entity_ids = [transaction_id]" "$DEL_LAST" '.target_entity_ids == ["txn-dup-1"]'
+assert_jq "delete before.amount -54990 shown as -54.99 (÷1000)"        "$DEL_LAST" '.before.amount == -54.99'
+assert_jq "delete after.amount 12340 shown as 12.34 (÷1000)"           "$DEL_LAST" '.after.amount == 12.34'
+DEL_RUN="$(_audit_read_run run-C)"
+assert_jq "delete read via run-C: before.amount shown as -54.99 (÷1000)" "$DEL_RUN" '.before.amount == -54.99'
+assert_jq "delete read via run-C: after.amount shown as 12.34 (÷1000)"   "$DEL_RUN" '.after.amount == 12.34'
 
 # ---------------------------------------------------------------------------
 echo "diagnostics go to STDERR, never STDOUT; invalid JSON fails cleanly:"
