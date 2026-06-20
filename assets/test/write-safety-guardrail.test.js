@@ -23,6 +23,7 @@ const {
   ALLOWED_TOOLS,
   DENIED_TOOLS,
   RULES,
+  PASS,
   evaluateTool,
   evaluateOperation,
   evaluateChangeset,
@@ -179,6 +180,93 @@ test('a pre-existing transfer in the read-only before snapshot does NOT false-po
   assert.deepEqual(evaluateOperation(op, { activeBudgetId: BUDGET }), { verdict: 'pass' });
 });
 
+test('(#1) a categorize op that proposes a payee_id is blocked (payee repoint / transfer smuggle)', () => {
+  // No ledger-only op legitimately sets a payee, and an opaque payee_id may be an
+  // account transfer-payee id that moves real money. The guardrail can't resolve
+  // the UUID, so any proposed payee_id fails closed.
+  const op = {
+    id: 'op-pid',
+    type: 'categorize',
+    budget_id: BUDGET,
+    transaction_id: 't4',
+    before: { category_id: null, payee_id: 'p-existing' },
+    after: { category_id: 'c1', payee_id: 'p-transfer-savings' },
+    rationale: 'smuggled payee repoint',
+    risk: 'low',
+  };
+  const v = evaluateOperation(op, { activeBudgetId: BUDGET });
+  assert.equal(v.verdict, 'block');
+  assert.equal(v.rule, RULES.MONEY_MOVEMENT_IN_CATEGORIZE);
+  assert.equal(v.op_id, 'op-pid');
+});
+
+test('a payee_id only in the read-only before snapshot does NOT false-positive', () => {
+  const op = {
+    id: 'op-pid-before',
+    type: 'delete_duplicate',
+    budget_id: BUDGET,
+    transaction_id: 't5',
+    before: { payee_id: 'p-existing', amount: -100 },
+    after: { deleted: true },
+    rationale: 'duplicate of a normal (non-transfer) transaction',
+    risk: 'destructive',
+  };
+  assert.deepEqual(evaluateOperation(op, { activeBudgetId: BUDGET }), { verdict: 'pass' });
+});
+
+test('(#4) a categorize op with transfer_transaction_id in after is blocked', () => {
+  // Exercises the other half of TRANSFER_SIGNAL_KEYS, which was previously untested.
+  const op = {
+    id: 'op-ttid',
+    type: 'categorize',
+    budget_id: BUDGET,
+    transaction_id: 't6',
+    before: { category_id: null },
+    after: { category_id: 'c1', transfer_transaction_id: 'tt-1' },
+    rationale: 'smuggled transfer via transfer_transaction_id',
+    risk: 'low',
+  };
+  const v = evaluateOperation(op, { activeBudgetId: BUDGET });
+  assert.equal(v.verdict, 'block');
+  assert.equal(v.rule, RULES.MONEY_MOVEMENT_IN_CATEGORIZE);
+});
+
+test('(#3) an allocate op with a transfer signal blocks via the non-categorize arm', () => {
+  // The MONEY_MOVEMENT_DETECTED rule (transfer signal on a non-categorize op) was
+  // previously untested — every transfer test used a categorize op.
+  const op = {
+    id: 'op-alloc-mm',
+    type: 'allocate',
+    budget_id: BUDGET,
+    category_id: 'c1',
+    month: '2026-06-01',
+    before: { budgeted: 0 },
+    after: { budgeted: 10000, transfer_account_id: 'acct-savings' },
+    rationale: 'transfer smuggled into an allocate',
+    risk: 'low',
+  };
+  const v = evaluateOperation(op, { activeBudgetId: BUDGET });
+  assert.equal(v.verdict, 'block');
+  assert.equal(v.rule, RULES.MONEY_MOVEMENT_DETECTED);
+  assert.equal(v.op_type, 'allocate');
+});
+
+test('an unanchored "... Transfer : ..." payee still trips detection (regex not start-anchored)', () => {
+  const op = {
+    id: 'op-unanchored',
+    type: 'categorize',
+    budget_id: BUDGET,
+    transaction_id: 't7',
+    before: { category_id: null },
+    after: { category_id: 'c1', payee_name: 'My Transfer : Savings' },
+    rationale: 'transfer payee not at the start of the string',
+    risk: 'low',
+  };
+  const v = evaluateOperation(op, { activeBudgetId: BUDGET });
+  assert.equal(v.verdict, 'block');
+  assert.equal(v.rule, RULES.MONEY_MOVEMENT_IN_CATEGORIZE);
+});
+
 // --- (d) mismatched budget_id is blocked (scope assertion) ------------------
 
 test('(d) an operation with a mismatched budget_id is blocked', () => {
@@ -266,6 +354,42 @@ test('an explicit activeBudgetId override that disagrees with the envelope is bl
   const result = evaluateChangeset(cs, { activeBudgetId: 'a-different-active-budget' });
   assert.equal(result.verdict, 'block');
   assert.ok(result.blocks.some((b) => b.rule === RULES.BUDGET_ID_MISMATCH));
+});
+
+test('(#2) a change-set with no budget_id and no override fails closed (no resolvable active budget)', () => {
+  // Without an override, a missing envelope budget_id would leave activeBudgetId
+  // undefined and skip every per-op budget assertion — a fail-open. It must block.
+  const cs = loadFixture('categorize.example.json');
+  delete cs.budget_id;
+  const result = evaluateChangeset(cs);
+  assert.equal(result.verdict, 'block');
+  assert.ok(result.blocks.some((b) => b.rule === RULES.NO_ACTIVE_BUDGET));
+});
+
+test('a null or empty envelope budget_id with no override also fails closed', () => {
+  const csNull = loadFixture('categorize.example.json');
+  csNull.budget_id = null;
+  assert.ok(evaluateChangeset(csNull).blocks.some((b) => b.rule === RULES.NO_ACTIVE_BUDGET));
+  const csEmpty = loadFixture('categorize.example.json');
+  csEmpty.budget_id = '';
+  assert.ok(evaluateChangeset(csEmpty).blocks.some((b) => b.rule === RULES.NO_ACTIVE_BUDGET));
+});
+
+test('an explicit override resolves the active budget even when the envelope budget_id is absent... but the envelope must still match it', () => {
+  // With an override supplied there IS a resolvable active budget, so NO_ACTIVE_BUDGET
+  // never fires; a missing envelope budget_id instead trips the override mismatch.
+  const cs = loadFixture('categorize.example.json');
+  delete cs.budget_id;
+  const result = evaluateChangeset(cs, { activeBudgetId: BUDGET });
+  assert.equal(result.verdict, 'block');
+  assert.ok(!result.blocks.some((b) => b.rule === RULES.NO_ACTIVE_BUDGET));
+  assert.ok(result.blocks.some((b) => b.rule === RULES.BUDGET_ID_MISMATCH));
+});
+
+test('pass verdicts reuse the exported PASS constant', () => {
+  const cs = loadFixture('categorize.example.json');
+  assert.equal(evaluateOperation(cs.operations[0], { activeBudgetId: cs.budget_id }), PASS);
+  assert.equal(evaluateTool(ALLOWED_TOOLS[0]), PASS);
 });
 
 test('an empty / malformed change-set fails closed', () => {

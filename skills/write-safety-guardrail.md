@@ -109,8 +109,15 @@ operation.
 `evaluateOperation` scans the operation's **proposed state and every field except
 the read-only `before` snapshot** for a transfer signal:
 
-- a truthy `transfer_account_id` or `transfer_transaction_id`, or
-- a `payee_name` / `payee` of the form `Transfer : <account>`.
+- a truthy `transfer_account_id` or `transfer_transaction_id`,
+- a non-empty `payee_id` — a **proposed payee repoint**. None of the four
+  ledger-only op types legitimately sets a payee, and an opaque `payee_id` may be
+  an account's transfer-payee id (which moves real money across an account
+  boundary). The guardrail does no API lookup, so it cannot tell a transfer-payee
+  id from an ordinary one — it fails closed and treats any proposed `payee_id` as
+  a signal, or
+- a `payee_name` / `payee` containing `Transfer : <account>` (matched **unanchored**
+  and case-insensitively — the marker need not be at the start of the string).
 
 A `categorize` operation that sets `transfer_account_id` or a transfer payee in
 its `after` snapshot is blocked with rule
@@ -132,7 +139,10 @@ ledger-only and must not false-positive.
    (`money_movement_flag_not_false`).
 2. **Budget targeting** — every operation's `budget_id` must match the active
    budget id (the envelope's `budget_id`, or an explicit `activeBudgetId`
-   override). Mismatch → block (`budget_id_mismatch`).
+   override). Mismatch → block (`budget_id_mismatch`). With **no** override, the
+   envelope itself must carry a resolvable `budget_id`; a missing or empty one
+   would leave the active budget unresolved and skip the per-op assertion entirely,
+   so it fails closed → block (`no_resolvable_active_budget`).
 3. **Destructive tag** — every `delete_duplicate` operation must carry
    `risk: "destructive"`. Otherwise → block
    (`delete_duplicate_missing_destructive_risk`).
@@ -166,8 +176,8 @@ The full set of rule constants: `op_type_not_in_allow_list`,
 `denied_tool_money_movement`, `tool_not_in_allow_list`,
 `money_movement_detected_in_categorize`, `money_movement_detected`,
 `money_movement_flag_not_false`, `budget_id_mismatch`,
-`delete_duplicate_missing_destructive_risk`, `malformed_operation`,
-`malformed_changeset`.
+`no_resolvable_active_budget`, `delete_duplicate_missing_destructive_risk`,
+`malformed_operation`, `malformed_changeset`.
 
 ## Consumer contract
 

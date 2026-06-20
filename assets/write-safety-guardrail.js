@@ -98,6 +98,7 @@ const RULES = Object.freeze({
   MONEY_MOVEMENT_DETECTED: 'money_movement_detected',
   MONEY_MOVEMENT_FLAG: 'money_movement_flag_not_false',
   BUDGET_ID_MISMATCH: 'budget_id_mismatch',
+  NO_ACTIVE_BUDGET: 'no_resolvable_active_budget',
   DELETE_DUPLICATE_RISK: 'delete_duplicate_missing_destructive_risk',
   MALFORMED_OPERATION: 'malformed_operation',
   MALFORMED_CHANGESET: 'malformed_changeset',
@@ -107,8 +108,24 @@ const RULES = Object.freeze({
 const TRANSFER_SIGNAL_KEYS = Object.freeze(['transfer_account_id', 'transfer_transaction_id']);
 /** Payee keys whose value, when a "Transfer : <account>"-style string, signals a transfer. */
 const PAYEE_KEYS = Object.freeze(['payee_name', 'payee']);
-/** YNAB names transfer payees "Transfer : <account>". */
-const TRANSFER_PAYEE_RE = /^\s*transfer\s*:/i;
+/**
+ * Keys whose mere presence (any non-empty value) in an operation's PROPOSED state
+ * disqualifies it. None of the four ledger-only op types legitimately repoints a
+ * transaction's payee: setting a `payee_id` to an account's transfer-payee id turns
+ * the transaction into a real money-moving transfer, and the allow-listed
+ * `ynab_update_transaction` forwards `payee_id` straight to the YNAB API. The
+ * guardrail does pure object inspection with no API lookup, so it cannot tell a
+ * transfer-payee id from an ordinary one — it fails closed and treats ANY proposed
+ * `payee_id` as a money-movement signal.
+ */
+const PAYEE_REPOINT_KEYS = Object.freeze(['payee_id']);
+/**
+ * YNAB names transfer payees "Transfer : <account>". Matched UNANCHORED — the
+ * "Transfer :" marker need not sit at the very start of the string — and
+ * case-insensitively. A false-positive here only ever *blocks*, which is the
+ * fail-closed safe direction; real transfers also carry `transfer_account_id`.
+ */
+const TRANSFER_PAYEE_RE = /transfer\s*:/i;
 
 /** The canonical pass verdict. */
 const PASS = Object.freeze({ verdict: 'pass' });
@@ -133,8 +150,9 @@ function block(opId, opType, rule, reason) {
 
 /**
  * Recursively scan a value for any transfer / money-movement signal: a truthy
- * `transfer_account_id` / `transfer_transaction_id`, or a "Transfer : ..."-style
- * payee. Cycle-safe.
+ * `transfer_account_id` / `transfer_transaction_id`, a non-empty `payee_id`
+ * (a proposed payee repoint — disqualifying for every ledger-only op), or a
+ * "Transfer : ..."-style payee. Cycle-safe.
  * @param {unknown} value
  * @param {Set<object>} [seen]
  * @returns {boolean}
@@ -150,6 +168,9 @@ function hasTransferSignal(value, seen = new Set()) {
 
   for (const [key, v] of Object.entries(value)) {
     if (TRANSFER_SIGNAL_KEYS.includes(key) && v !== null && v !== undefined && v !== '') {
+      return true;
+    }
+    if (PAYEE_REPOINT_KEYS.includes(key) && v !== null && v !== undefined && v !== '') {
       return true;
     }
     if (PAYEE_KEYS.includes(key) && typeof v === 'string' && TRANSFER_PAYEE_RE.test(v)) {
@@ -181,7 +202,7 @@ function evaluateTool(toolName) {
     );
   }
   if (ALLOWED_TOOLS.includes(toolName)) {
-    return { verdict: 'pass' };
+    return PASS;
   }
   return block(
     null,
@@ -246,8 +267,8 @@ function evaluateOperation(op, context = {}) {
       opId,
       opType,
       rule,
-      'Operation carries a transfer / money-movement signal (transfer account or transfer payee) ' +
-        'in its proposed state; ledger-only writes may never move money.',
+      'Operation carries a transfer / money-movement signal (transfer account, transfer payee, ' +
+        'or a proposed payee_id repoint) in its proposed state; ledger-only writes may never move money.',
     );
   }
 
@@ -261,7 +282,7 @@ function evaluateOperation(op, context = {}) {
     );
   }
 
-  return { verdict: 'pass' };
+  return PASS;
 }
 
 /**
@@ -306,6 +327,20 @@ function evaluateChangeset(changeset, options = {}) {
       RULES.BUDGET_ID_MISMATCH,
       `Envelope budget_id ${JSON.stringify(changeset.budget_id)} does not match the active budget ` +
         `"${options.activeBudgetId}".`,
+    ));
+  }
+
+  // Fail-closed: without an explicit override, the envelope MUST carry a resolvable
+  // active budget. A missing/empty budget_id would otherwise leave activeBudgetId
+  // undefined and silently skip the per-op budget_id assertion for EVERY operation —
+  // a fail-open the guardrail must never allow (no resolvable budget = block).
+  if (!overrideBudget && (typeof changeset.budget_id !== 'string' || changeset.budget_id.length === 0)) {
+    blocks.push(block(
+      null,
+      null,
+      RULES.NO_ACTIVE_BUDGET,
+      `No resolvable active budget: neither an activeBudgetId override nor a valid envelope ` +
+        `budget_id was supplied (got ${JSON.stringify(changeset.budget_id)}); fail-closed block.`,
     ));
   }
 
