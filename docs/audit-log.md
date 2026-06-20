@@ -99,6 +99,11 @@ bash bin/audit-log.sh last 10
 bash bin/audit-log.sh run run-A
 ```
 
+Both helpers print **JSONL** (one JSON object per line), not a JSON array — a
+caller wanting an array can pipe through `jq -s`. A jq-level format failure (e.g.
+a corrupt line) is reported on `STDERR` with the `audit-log:` prefix, alongside
+jq's own detail.
+
 The raw log keeps milliunit integers; only the read path divides by 1000, so the
 on-disk record stays the exact value that was applied.
 

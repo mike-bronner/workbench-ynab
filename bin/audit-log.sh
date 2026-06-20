@@ -189,8 +189,10 @@ _audit_append() {
 
 # _audit_read_last [N]
 #   Print the last N records (default 10) from the CURRENT month's file, with
-#   milliunit amounts divided by 1000 for display, to STDOUT. Diagnostics (e.g.
-#   no file yet) go to STDERR; absence is not an error.
+#   milliunit amounts divided by 1000 for display, to STDOUT. Output is JSONL
+#   (one JSON object per line), not a JSON array — a caller wanting an array can
+#   `jq -s`. Diagnostics (e.g. no file yet, or a jq format failure) go to STDERR;
+#   absence is not an error.
 _audit_read_last() {
   local n="${1:-10}" file
   file="$(_audit_file)"
@@ -198,14 +200,21 @@ _audit_read_last() {
     echo "audit-log: no audit file for $(_audit_month) at $file" 1>&2
     return 0
   fi
-  tail -n "$n" "$file" | jq "$(_audit_fixmu_program)
-.before |= fixmu | .after |= fixmu"
+  # A jq failure (e.g. a corrupt line) also carries the `audit-log:` prefix every
+  # other error path uses — jq's own detail still reaches STDERR. The pipeline's
+  # exit status is jq's, so `if !` keys on the format step.
+  if ! tail -n "$n" "$file" | jq "$(_audit_fixmu_program)
+.before |= fixmu | .after |= fixmu"; then
+    echo "audit-log: failed to format records from $file" 1>&2
+    return 1
+  fi
 }
 
 # _audit_read_run <run_id>
 #   Print every record whose run_id matches, across ALL monthly files in the
 #   audit dir (chronological order), with milliunit amounts divided by 1000 for
-#   display, to STDOUT.
+#   display, to STDOUT. Output is JSONL (one JSON object per line), not a JSON
+#   array — a caller wanting an array can `jq -s`. Diagnostics go to STDERR.
 _audit_read_run() {
   local rid="${1:-}"
   if [ -z "$rid" ]; then
@@ -231,8 +240,14 @@ _audit_read_run() {
     return 0
   fi
 
-  cat "${files[@]}" | jq --arg rid "$rid" "$(_audit_fixmu_program)
-select(.run_id == \$rid) | .before |= fixmu | .after |= fixmu"
+  # A jq failure (e.g. a corrupt line) also carries the `audit-log:` prefix every
+  # other error path uses — jq's own detail still reaches STDERR. The pipeline's
+  # exit status is jq's, so `if !` keys on the format step.
+  if ! cat "${files[@]}" | jq --arg rid "$rid" "$(_audit_fixmu_program)
+select(.run_id == \$rid) | .before |= fixmu | .after |= fixmu"; then
+    echo "audit-log: failed to format records from $dir" 1>&2
+    return 1
+  fi
 }
 
 # --- CLI dispatch (only when executed directly, never when sourced) ----------
