@@ -179,6 +179,14 @@ assert_eq "run-A results are all run-A (no foreign run_id leaks through)" "0" \
 assert_jq "run_id read also divides milliunits (allocate)" "$(printf '%s' "$RUNA_OUT" | jq -s '.[] | select(.operation_id=="op-alloc-1")')" '.after.budgeted == 300'
 RUNB_COUNT="$(_audit_read_run run-B | jq -s 'length')"
 assert_eq "run-B matches exactly one record" "1" "$RUNB_COUNT"
+# AC #7 across EVERY field fixmu touches, not just `budgeted`: read the reconcile
+# record back through the run helper and confirm cleared_balance/reconciled_balance
+# are divided by 1000 on display (stored verbatim in raw milliunits on disk). A
+# regression that broke only the cleared/reconciled branch of fixmu must now fail.
+RUNB_OUT="$(_audit_read_run run-B)"
+assert_jq "reconcile before.cleared_balance shown as 100 (÷1000)"    "$RUNB_OUT" '.before.cleared_balance == 100'
+assert_jq "reconcile before.reconciled_balance shown as 90 (÷1000)"  "$RUNB_OUT" '.before.reconciled_balance == 90'
+assert_jq "reconcile after.reconciled_balance shown as 100 (÷1000)"  "$RUNB_OUT" '.after.reconciled_balance == 100'
 
 # ---------------------------------------------------------------------------
 echo "diagnostics go to STDERR, never STDOUT; invalid JSON fails cleanly:"
@@ -203,6 +211,10 @@ bash "$HELPER" bogus >/dev/null 2>&1; rc=$?
 assert_eq "CLI unknown command exits 2" "2" "$rc"
 bash "$HELPER" >/dev/null 2>&1; rc=$?
 assert_eq "CLI with no args prints usage and exits 2" "2" "$rc"
+# A missing run id is a usage error too: it must exit 2 like the other usage
+# errors, not 1 (the _audit_read_run empty-id guard's return code).
+bash "$HELPER" run >/dev/null 2>&1; rc=$?
+assert_eq "CLI 'run' with no id is a usage error (exit 2)" "2" "$rc"
 
 # ---------------------------------------------------------------------------
 echo "the audit trail is owner-only — dir 0700, record files 0600:"

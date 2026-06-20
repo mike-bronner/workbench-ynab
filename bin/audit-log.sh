@@ -237,18 +237,38 @@ select(.run_id == \$rid) | .before |= fixmu | .after |= fixmu"
 
 # --- CLI dispatch (only when executed directly, never when sourced) ----------
 
+# _audit_cli_usage
+#   Print the CLI usage block to STDERR. Shared by the help arm and the
+#   missing-run-id guard so both emit identical text. Defining it at load is a
+#   pure function definition — no side effect — the same sourceable contract the
+#   rest of this file keeps.
+_audit_cli_usage() {
+  cat 1>&2 <<'USAGE'
+usage: bin/audit-log.sh last [N]      # last N records (default 10) for the current UTC month
+       bin/audit-log.sh run <run_id>  # all records for a run id, across every month
+Both modes format milliunit amounts (÷1000) for display and print to STDOUT.
+USAGE
+}
+
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   set -u
   cmd="${1:-}"
   case "$cmd" in
     last) shift; _audit_read_last "${1:-10}" ;;
-    run)  shift; _audit_read_run "${1:-}" ;;
+    run)
+      # A missing run id is a usage error: exit 2 to match the unknown-command
+      # and no-command arms, rather than falling through to _audit_read_run's
+      # empty-id guard (which `return 1`s — an inconsistent CLI exit contract).
+      shift
+      if [ -z "${1:-}" ]; then
+        echo "audit-log: 'run' requires a run id" 1>&2
+        _audit_cli_usage
+        exit 2
+      fi
+      _audit_read_run "$1"
+      ;;
     ""|-h|--help|help)
-      cat 1>&2 <<'USAGE'
-usage: bin/audit-log.sh last [N]      # last N records (default 10) for the current UTC month
-       bin/audit-log.sh run <run_id>  # all records for a run id, across every month
-Both modes format milliunit amounts (÷1000) for display and print to STDOUT.
-USAGE
+      _audit_cli_usage
       exit 2 ;;
     *) echo "audit-log: unknown command: $cmd" 1>&2; exit 2 ;;
   esac
