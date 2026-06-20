@@ -1,6 +1,5 @@
 {
   "name": "@workbench-ynab/changeset",
-  "version": "0.1.0",
   "private": true,
   "description": "Change-set schema, contract, validator, and example fixtures for workbench-ynab write-back (M4).",
   "main": "validate-changeset.js",
