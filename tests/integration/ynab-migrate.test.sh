@@ -313,15 +313,39 @@ test_migrate_config_is_idempotent() {
 }
 
 test_migrate_config_fails_closed_on_malformed_config() {
-  local sb cfg before after rc=0
+  local sb cfg before after out rc=0
   sb="$(mktemp -d)"; cfg="$sb/config.json"
   printf '{"budget": {\n' > "$cfg"   # unparseable
   before="$(_snapshot "$sb")"
-  bash "$MIGRATE" migrate-config "$cfg" '["budget","name"]' '"Personal 2024"' >/dev/null 2>&1 || rc=$?
+  out="$(bash "$MIGRATE" migrate-config "$cfg" '["budget","name"]' '"Personal 2024"' 2>&1)" || rc=$?
   after="$(_snapshot "$sb")"
   rm -rf "$sb"
   assert_eq 2 "$rc" "migrate-config must fail closed (exit 2) on a config it cannot parse"
+  assert_contains "$out" "refusing to edit"
   assert_eq "$before" "$after" "a malformed config must be left untouched"
+}
+
+# The migrate-config twin of test_remove_connector_fails_closed_when_rewrite_fails:
+# the config parses fine and the target field is blank, but the rewrite itself
+# fails (a read-only parent dir blocks the final mv). migrate-config must honor its
+# documented exit 2 and leave the config byte-for-byte intact — the branch the
+# malformed-config test above does NOT exercise.
+test_migrate_config_fails_closed_when_rewrite_fails() {
+  local sb cfg before after out rc=0
+  # Root bypasses directory permissions, so the read-only-dir trigger can't fire;
+  # skip rather than assert a false green (dev + CI both run non-root).
+  [ "$(id -u)" -eq 0 ] && { printf '  (skipped: cannot block writes as root)\n'; return 0; }
+  sb="$(mktemp -d)"; cfg="$sb/config.json"
+  printf '{"budget":{"name":"<budget-name>"}}\n' > "$cfg"   # a <PLACEHOLDER> is blank
+  before="$(_snapshot "$sb")"
+  chmod 500 "$sb"                       # read-only dir → the mv back over $cfg fails
+  out="$(bash "$MIGRATE" migrate-config "$cfg" '["budget","name"]' '"Personal 2024"' 2>&1)" || rc=$?
+  chmod 700 "$sb"                       # restore so snapshot + cleanup can proceed
+  after="$(_snapshot "$sb")"
+  rm -rf "$sb"
+  assert_eq 2 "$rc" "migrate-config must exit 2 when it cannot rewrite the config"
+  assert_contains "$out" "Failed to write config"
+  assert_eq "$before" "$after" "a failed rewrite must leave the config byte-for-byte untouched"
 }
 
 run_tests

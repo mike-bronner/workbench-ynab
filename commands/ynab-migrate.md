@@ -172,6 +172,9 @@ plugin's out-of-repo config so the user doesn't re-enter it.
    mkdir -p "$CONFIG_DIR"
    # Seed from the shipped example shape on first run.
    [ -f "$CONFIG_FILE" ] || cp "${CLAUDE_PLUGIN_ROOT}/assets/config.example.json" "$CONFIG_FILE"
+   # This file holds the budget name, business accounts, and tax profile — keep it
+   # owner-only (config.example.json ships 0644, which cp would otherwise inherit).
+   chmod 600 "$CONFIG_FILE"
    ```
 
 4. Show the user the exact fields you propose to write (their migrated values) and

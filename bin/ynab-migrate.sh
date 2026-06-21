@@ -130,14 +130,18 @@ do_remove_connector() {
   # untouched. The mv lives inside the if-condition so its failure can't slip
   # past `set -e`; every rewrite failure falls through to the documented exit 2.
   local tmp
-  tmp="$(mktemp)"
+  tmp="$(mktemp)" || return 2
+  # Clean the temp copy on EVERY exit from here — including a SIGINT mid-rewrite,
+  # which would otherwise strand a copy of the Desktop config (legacy plaintext
+  # token and all) on disk. The trap clears itself so it never re-fires for a
+  # caller frame (where $tmp is out of scope and `set -u` would abort).
+  trap 'rm -f "$tmp"; trap - RETURN' RETURN
   if jq 'del(.mcpServers.ynab)' "$DESKTOP_CONFIG" > "$tmp" \
     && jq -e . "$tmp" >/dev/null 2>&1 \
     && mv "$tmp" "$DESKTOP_CONFIG"; then
     printf 'Removed mcpServers.ynab from the Desktop config (other servers preserved).\n'
     return 0
   fi
-  rm -f "$tmp"
   printf '⚠️  Failed to rewrite the Desktop config — left unchanged.\n' >&2
   printf '    Location: %s\n' "$DESKTOP_CONFIG" >&2
   return 2
@@ -193,9 +197,13 @@ do_migrate_config() {
     return 2
   fi
   jq -e . "$config" >/dev/null 2>&1 || { printf '⚠️  Unparseable config — refusing to edit: %s\n' "$config" >&2; return 2; }
-  # Reject a PATH/VALUE that is not valid JSON before touching the config.
-  jq -e . >/dev/null 2>&1 <<<"$path"  || { printf '⚠️  migrate-config PATH must be a JSON array: %s\n' "$path" >&2; return 2; }
-  jq -e . >/dev/null 2>&1 <<<"$value" || { printf '⚠️  migrate-config VALUE must be a JSON literal: %s\n' "$value" >&2; return 2; }
+  # Reject a malformed PATH/VALUE before touching the config. PATH must be a JSON
+  # ARRAY (asserted directly, so the message fires where it claims to — a non-array
+  # would otherwise only blow up later at join(".")). VALUE must merely PARSE as
+  # JSON — `jq empty` checks parse-validity without `-e`'s truthiness test, so the
+  # JSON literals `false` and `null` are accepted (they are valid literals).
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$path"  || { printf '⚠️  migrate-config PATH must be a JSON array: %s\n' "$path" >&2; return 2; }
+  jq empty                >/dev/null 2>&1 <<<"$value" || { printf '⚠️  migrate-config VALUE must be a JSON literal: %s\n' "$value" >&2; return 2; }
   dotted="$(jq -rn --argjson p "$path" '$p | join(".")')" || return 2
   blank="$(jq -r --argjson path "$path" '
     def is_blank: . == null or . == "" or . == [] or . == {}
@@ -206,14 +214,16 @@ do_migrate_config() {
     printf '%s already set — leaving it (already done).\n' "$dotted"
     return 0
   fi
-  tmp="$(mktemp)"
+  tmp="$(mktemp)" || return 2
+  # Clean the temp copy on EVERY exit, signals included (it holds the user's
+  # budget/business/tax data). Self-clearing so it never re-fires for a caller.
+  trap 'rm -f "$tmp"; trap - RETURN' RETURN
   if jq --argjson path "$path" --argjson v "$value" 'setpath($path; $v)' "$config" > "$tmp" \
     && jq -e . "$tmp" >/dev/null 2>&1 \
     && mv "$tmp" "$config"; then
     printf 'Set %s from the migrated prototype config.\n' "$dotted"
     return 0
   fi
-  rm -f "$tmp"
   printf '⚠️  Failed to write config — left unchanged: %s\n' "$config" >&2
   return 2
 }
