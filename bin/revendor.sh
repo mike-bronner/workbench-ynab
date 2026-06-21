@@ -81,8 +81,12 @@ log "  marker:  $MARKER"
 log "  pinned:  $PINNED_VERSION"
 
 # --- Temp workspace (cleaned on ANY exit, including error) ------------------
+# The marker temp ($MARKER.tmp) is rewritten in the tracked vendor dir, NOT under
+# $TMP, so its mv into place stays same-filesystem and atomic. That puts it
+# outside $TMP's cleanup, so the trap drops it too: a jq/mv failure mid-write (or
+# any `set -e` abort) must never strand vendored.json.tmp in the tracked tree.
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/revendor-ynab.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" "$MARKER.tmp"' EXIT
 
 # --- Download via npm pack --json (no install, no repo pollution) -----------
 log "Downloading $SPEC via npm pack…"
