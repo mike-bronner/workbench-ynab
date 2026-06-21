@@ -43,8 +43,10 @@ function recordingSleep() {
 }
 
 // The vendored bundle throws an Error named 'RateLimitError' carrying resetTime
-// (epoch ms) + remaining; an HTTP path may instead carry a 429 message. These
-// builders mirror both shapes.
+// (a `Date` for when the window clears, built as `new Date(now + windowMs)`) +
+// remaining; an HTTP path may instead carry a 429 message with a Retry-After.
+// These builders mirror both shapes — pass resetTime as a Date to mirror the real
+// bundle, or as epoch-ms to exercise the numeric-coercion path.
 function bundleRateLimit({ resetTime, remaining = 0 } = {}) {
   const e = new Error('Rate limit exceeded. Please wait before making additional requests');
   e.name = 'RateLimitError';
@@ -99,6 +101,20 @@ test('retryDelayMs honours a future resetTime and ignores a past one', () => {
   assert.equal(retryDelayMs(1, bundleRateLimit({ resetTime: NOW + 3000 }), { now }), 3000);
   // A past resetTime is stale; fall back to exponential backoff, not a negative wait.
   assert.equal(retryDelayMs(2, bundleRateLimit({ resetTime: NOW - 5000 }), { now, baseDelayMs: 1000 }), 2000);
+});
+
+test('retryDelayMs honours a Date resetTime from the real bundle (coerced to ms)', () => {
+  // The vendored bundle sets resetTime = new Date(now + windowMs) — a Date, NOT
+  // epoch-ms. A bare Number.isFinite(Date) is false, so without coercion the
+  // bundle's only reset signal is silently discarded and backoff falls through to
+  // blind exponential. This pins the coercion against the REAL bundle shape.
+  const NOW = 2_000_000;
+  const now = () => NOW;
+  const future = bundleRateLimit({ resetTime: new Date(NOW + 4000) });
+  assert.equal(retryDelayMs(1, future, { now }), 4000, 'Date resetTime honoured, not discarded');
+  // A past Date is stale → fall back to exponential, never a negative wait.
+  const past = bundleRateLimit({ resetTime: new Date(NOW - 5000) });
+  assert.equal(retryDelayMs(3, past, { now, baseDelayMs: 1000 }), 4000); // 1000 * 2^2
 });
 
 // --- withRateLimitRetry: AC #3 retry, AC #8 bound ----------------------------
@@ -306,6 +322,37 @@ test('createReadCache lets a non-rate-limit error surface (no false degrade)', a
   assert.deepEqual(cache.partials(), [], 'a 401 is not a partial-review condition');
 });
 
+test('createReadCache rejects a non-scalar param (no silent cache-key collision)', async () => {
+  // JSON.stringify silently drops a function-valued param, so two distinct param
+  // sets could otherwise collide on one key. The guard fails loud instead.
+  const cache = createReadCache(async () => ({ transactions: [], has_more: false }));
+  await assert.rejects(
+    () => cache.get('transactions', { weird: () => {} }),
+    (err) => {
+      assert.ok(err instanceof TypeError);
+      assert.match(err.message, /non-scalar param 'weird'/);
+      return true;
+    },
+  );
+});
+
+test('RateLimitExhaustedError scrubs the upstream cause to a minimal descriptor', async () => {
+  const { sleep } = recordingSleep();
+  // An upstream error carrying a sensitive field that must NOT survive onto cause.
+  const dirty = httpRateLimit({ retryAfter: 1 });
+  dirty.config = { headers: { authorization: 'Bearer SECRET' } };
+  await assert.rejects(
+    () => withRateLimitRetry(async () => { throw dirty; }, { sleep, maxRetries: 1 }),
+    (err) => {
+      assert.ok(err instanceof RateLimitExhaustedError);
+      assert.deepEqual(Object.keys(err.cause).sort(), ['message', 'name', 'status']);
+      assert.equal(err.cause.status, 429);
+      assert.equal('config' in err.cause, false, 'sensitive upstream fields are dropped');
+      return true;
+    },
+  );
+});
+
 // --- AC #7: the read path's timeout context is its own, not the orchestrator's
 
 test('rate-limit defaults are self-contained and distinct from boot patience', () => {
@@ -317,8 +364,10 @@ test('rate-limit defaults are self-contained and distinct from boot patience', (
   assert.ok(Object.isFrozen(RATE_LIMIT_DEFAULTS) && Object.isFrozen(PAGINATION_DEFAULTS));
   // Callers can override the read path's budget without touching any global.
   assert.equal(retryDelayMs(1, new Error('x'), { baseDelayMs: 500 }), 500);
+  // Scheduled transactions are deliberately absent: the bundle has no list tool
+  // for them and v1 defers them (docs §1).
   assert.deepEqual(CACHEABLE_RESOURCES, [
-    'transactions', 'categories', 'accounts', 'payees', 'scheduled_transactions',
+    'transactions', 'categories', 'accounts', 'payees',
   ]);
 });
 

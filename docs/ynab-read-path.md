@@ -16,12 +16,11 @@
 ## Why this exists
 
 YNAB enforces **200 requests/hour per token** (rolling window). A heavy review
-fires `list_transactions` / `list_categories` / `list_accounts` / `list_payees` /
-`list_scheduled_transactions` across **12 sections**; re-querying per section
-would multiply calls and can exhaust the hourly budget. The orchestrator's
-cold-start *boot patience* covers a server that is still spawning — it does
-**not** cover a live server's rate-limit window. This is the read path's
-reliability layer for that gap.
+fires `list_transactions` / `list_categories` / `list_accounts` / `list_payees`
+across **12 sections**; re-querying per section would multiply calls and can
+exhaust the hourly budget. The orchestrator's cold-start *boot patience* covers a
+server that is still spawning — it does **not** cover a live server's rate-limit
+window. This is the read path's reliability layer for that gap.
 
 ## 1. Vendored-bundle behaviour (investigation)
 
@@ -32,9 +31,20 @@ re-vendor or MCP swap (see the capability map's swap procedure).
 
 | Concern | What the bundle does | What the skill must therefore do |
 |---|---|---|
-| **HTTP 429 / rate limit** | Ships a **client-side preemptive limiter** — a sliding window `{ maxRequests: 200, windowMs: 3600000 }`. On `tryAcquire`, when the window is full it **throws** a `RateLimitError` (an `Error` subclass carrying `resetTime` — an epoch-ms timestamp for when the window clears — and `remaining`). It also classifies a real HTTP 429 (`message.includes("429") \|\| "Too Many Requests"` → `RATE_LIMIT_EXCEEDED`). **It does *not* retry or back off** — it surfaces the error. | Catch the rate-limit error and back off ourselves: honour `resetTime` (or an HTTP `Retry-After`), else exponential backoff; cap the retries; degrade to a labelled partial review. The bundle gives us no retry, so the skill owns it. |
+| **HTTP 429 / rate limit** | Ships a **client-side preemptive limiter** — a sliding window `{ maxRequests: 200, windowMs: 3600000 }`. On `tryAcquire`, when the window is full it **throws** a `RateLimitError` (an `Error` subclass carrying `resetTime` — a **`Date`** for when the window clears, built as `new Date(now + windowMs)` — and `remaining`). It also classifies a real HTTP 429 (`message.includes("429") \|\| "Too Many Requests"` → `RATE_LIMIT_EXCEEDED`). **It does *not* retry or back off** — it surfaces the error. | Catch the rate-limit error and back off ourselves: honour `resetTime` (coerce its `Date` to epoch-ms) or an HTTP `Retry-After`, else exponential backoff; cap the retries; degrade to a labelled partial review. The bundle gives us no retry, so the skill owns it. |
 | **Pagination** | **The list tools paginate — 5 of the 6 do.** `ynab_list_accounts`, `ynab_list_categories`, `ynab_list_payees`, `ynab_list_transactions`, and `ynab_list_months` each register `limit (int, optional, **default 50**)` and `offset (int, optional, zero-based)`. Each list response carries `total_count`, `returned_count`, `offset`, `has_more`, and `next_offset` (`= offset + limit` when `has_more`, else absent), with rows keyed by the resource name (`{ transactions: [...] }`). Only `ynab_list_budgets` returns its whole collection in one shot. Continuation is **offset-based**, not cursor-based — the `cursor`/`hasMore`/`nextCursor` symbols elsewhere in the bundle are the MCP framework's internal *task-listing*, unrelated to YNAB data. | **Walk every page** before caching: re-issue the list call advancing `offset` by the page size while `has_more` is true (following `next_offset`). The default page size is 50, so any resource with >50 rows — a routine weekly transaction set — is multiple calls. Failing to do this silently truncates the review to the first 50 rows, exactly what AC #4 forbids. The driver does this with an offset-based default adapter, bounded by a page ceiling so a misbehaving endpoint fails loud instead of looping. |
 | **`server_knowledge` deltas** | **Supported internally, not surfaced on list output.** The bundle threads `lastKnowledgeOfServer` into the raw YNAB API calls (whose REST responses carry `server_knowledge`) and maintains a `knowledgeStore` + `cacheManager` (with TTLs) for incremental pulls. But the MCP **list tool's structured output does not echo `server_knowledge`** to the client — it ends at `…has_more, next_offset, cached, cache_info`. | v1 does **full pulls** and does **not** persist a cursor — see §3. The driver carries a forward-compat hook that records `server_knowledge` from any response that surfaces it; against the vendored bundle that is always undefined, so a later delta milestone must switch to a transport that exposes the cursor (and own persistence + invalidation) without a shape change here. |
+
+**Scheduled transactions have no list tool.** The bundle's complete `ynab_list_*`
+set is `accounts, budgets, categories, months, payees, transactions` — confirmed
+against `vendor/ynab-mcp/index.cjs` and the repo's canonical registry
+[`skills/protocol/ynab-tools.md`](../skills/protocol/ynab-tools.md). Scheduled
+transactions are exposed only **inside the full `get_budget` BudgetDetail**
+(`scheduled_transactions[]`), never via a list endpoint. Pulling the entire budget
+detail solely for them would duplicate the per-resource list pulls above, so **v1
+defers scheduled-transactions analysis** to a later milestone — which can adopt a
+wholesale `get_budget` strategy or a transport that lists them. They are therefore
+not a cacheable list resource in v1 (absent from `CACHEABLE_RESOURCES` and §4).
 
 ## 2. The read strategy (fetch-once)
 
@@ -44,7 +54,8 @@ the MCP per section. This is [`createReadCache`](../lib/ynab/readPath.mjs):
 `get(resource, params)` pulls once (paginated in full, rate-limit-retried), then
 memoizes by `resource + params`; every later read is served from memory with no
 further MCP traffic. The cacheable resources are
-`transactions, categories, accounts, payees, scheduled_transactions`.
+`transactions, categories, accounts, payees` (scheduled transactions are deferred
+— they have no list tool; see §1).
 
 We keep our own in-memory cache rather than leaning on the bundle's internal
 `cacheManager` TTLs: the fetch-once guarantee is then explicit and observable
@@ -85,14 +96,14 @@ heavier-than-typical budget so the total is a true ceiling, not a best case.
 | `list_categories` | ~120 | 3 | fetch-once (groups + categories) |
 | `list_transactions` | ~300 | 6 | fetch-once; `since_date`-scoped to the review period |
 | `list_payees` | ~200 | 4 | fetch-once; a mature budget accrues many payees |
-| `list_scheduled_transactions` | ~20 | 1 | fetch-once |
 | `get_month` | 1 per month | 1–3 | one per in-scope month (weekly review ⇒ 1) |
-| **Total** | | **≈ 17 (≈ 19 worst-case)** | **well under the ~200 requests/hour limit** |
+| **Total** | | **≈ 16 (≈ 18 worst-case)** | **well under the ~200 requests/hour limit** |
 
-The page count scales with budget size, but even a large budget lands near ~17
-calls — roughly **10×** headroom against 200/hr, and a re-run inside the same
-hour stays well within it. The 12 sections add **zero** calls beyond this set —
-they read the cache, which is the point of fetch-once.
+Scheduled transactions are **not** in this budget — they have no list tool and v1
+defers them (§1). The page count scales with budget size, but even a large budget
+lands near ~16 calls — roughly **10×** headroom against 200/hr, and a re-run inside
+the same hour stays well within it. The 12 sections add **zero** calls beyond this
+set — they read the cache, which is the point of fetch-once.
 
 ## 5. Two separate timeout contexts (they must not interfere)
 
