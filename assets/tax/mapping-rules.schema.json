@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mike-bronner.github.io/workbench-ynab/schemas/mapping-rules.schema.json",
+  "title": "TaxMappingRules",
+  "type": "object",
+  "description": "Schema for the workbench-ynab payee/category → tax-line mapping ruleset (issue #23, M3-4). A ruleset is an ordered list of rules; the classifier (lib/tax/classifyTransaction.mjs) evaluates them against an already-fetched YNAB transaction and returns the highest-priority match. This schema is GENERIC and shareable: nothing here may be specific to one taxpayer. Real business names, account names, and category-group labels live ONLY in the user's profile/rules instance (issue #25), never in the bundled defaults (assets/tax/mapping-rules.json).",
+  "$comment": "MONEY UNITS: a rule's amountThresholdDollars is in US DOLLARS, not YNAB milliunits. YNAB returns transaction amounts in milliunits (1000 milliunits = $1); the classifier divides the transaction's milliunit amount by 1000 BEFORE comparing it to amountThresholdDollars or deriving amountSign. taxLineId references the bundled tax-line catalog (assets/tax/us-tax-lines.json, issue #21): e.g. schedC.27a, schedA.medical, schedA.salt, schedA.interest, schedA.charitable. The reason field is a template: {payee}, {categoryName}, {categoryGroup}, {accountName}, {taxLineId}, {businessEntityId}, and {matchedKeyword} are substituted at classify time. A businessEntityId of \"$profile\" is a SENTINEL, not a real id: the classifier resolves it to the owning business entity from the profile (the entity whose declared business category-groups/accounts the transaction belongs to, or — for non-structural matches — the sole business entity when exactly one exists). This keeps owner-specific entity ids out of the bundled defaults (issue #23 AC).",
+  "required": ["rulesetVersion", "rules"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "description": "Optional pointer to this schema, so editors can validate an instance. Annotation only.",
+      "type": "string"
+    },
+    "$comment": {
+      "description": "Optional inline documentation for the ruleset file (matches the convention used by us-tax-lines.json). Annotation only.",
+      "type": "string"
+    },
+    "rulesetVersion": {
+      "description": "Version of this ruleset shape, so future migrations can detect and upgrade older bundled/user rulesets.",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "integer", "minimum": 1 }
+      ]
+    },
+    "rules": {
+      "description": "Ordered list of mapping rules. Evaluation order is governed by each rule's priority (ascending) with documented tie-breaking, NOT array position — see docs/mapping-engine.md.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/rule" }
+    }
+  },
+  "$defs": {
+    "rule": {
+      "type": "object",
+      "description": "A single mapping rule. A rule matches a transaction when EVERY criterion present in its match object matches (logical AND). A rule must declare at least one criterion.",
+      "required": ["id", "match", "taxLineId", "priority", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "Stable, opaque rule identifier. A user rule whose id equals a bundled rule's id REPLACES that bundled rule (so users disable, re-prioritize, or patch a default by id without editing repo files); a user rule with a new id is appended.",
+          "type": "string",
+          "minLength": 1
+        },
+        "match": {
+          "description": "Match criteria. At least one must be present; all present criteria are ANDed. Match-type precedence (strongest signal first), used for tie-breaking among equal-priority rules: categoryName > categoryGroup > accountName > payeeKeywords. The structural businessSignal matcher is treated at the categoryGroup/accountName strength tier.",
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "payeeKeywords": {
+              "description": "Match if ANY keyword matches the transaction payee (case-insensitive). A plain string is a case-insensitive substring match; a string wrapped in slashes (\"/aws|gcp/\") is a case-insensitive regular expression (the i flag is always added).",
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "categoryName": {
+              "description": "Case-insensitive EXACT match against the transaction's YNAB category name. Strongest signal.",
+              "type": "string",
+              "minLength": 1
+            },
+            "categoryGroup": {
+              "description": "Case-insensitive EXACT match against the transaction's YNAB category-group name.",
+              "type": "string",
+              "minLength": 1
+            },
+            "accountName": {
+              "description": "Case-insensitive EXACT match against the transaction's YNAB account name.",
+              "type": "string",
+              "minLength": 1
+            },
+            "amountSign": {
+              "description": "Match the direction of money flow. YNAB convention: an outflow (expense) is a NEGATIVE amount, an inflow (income/refund) is POSITIVE. The classifier reads the sign of the dollar amount (milliunits / 1000); the sign is unchanged by the conversion.",
+              "type": "string",
+              "enum": ["inflow", "outflow"]
+            },
+            "amountThresholdDollars": {
+              "description": "Match when the transaction's ABSOLUTE dollar magnitude is at least this many DOLLARS. The classifier divides the YNAB milliunit amount by 1000 before comparing — this field is dollars, never milliunits.",
+              "type": "number",
+              "minimum": 0
+            },
+            "businessSignal": {
+              "description": "Structural matcher. When true, the rule matches only if the transaction posts to a business category-group or business account declared by some profile business entity (entity.scheduleLineMap.categoryGroups / .accounts). On a match the owning entity scopes a \"$profile\" businessEntityId. Encodes the prototype's \"transaction in a business account or business category-group is a likely Schedule C expense\" signal without naming any entity.",
+              "type": "boolean"
+            }
+          }
+        },
+        "taxLineId": {
+          "description": "Tax-line id this rule classifies to, referencing the bundled catalog (assets/tax/us-tax-lines.json, issue #21), e.g. schedC.27a or schedA.medical.",
+          "type": "string",
+          "minLength": 1
+        },
+        "businessEntityId": {
+          "description": "Optional Schedule C scoping. A literal entity id scopes to that entity; the sentinel \"$profile\" defers resolution to the classifier (the entity owning the matched business category-group/account, or the sole business entity for non-structural matches). MUST NOT be a real, owner-specific id in the bundled defaults.",
+          "type": "string",
+          "minLength": 1
+        },
+        "priority": {
+          "description": "Evaluation precedence, ASCENDING: the lowest priority number is evaluated first and the first matching rule wins. Lower number = stronger.",
+          "type": "integer"
+        },
+        "confidence": {
+          "description": "Confidence in [0,1] returned with a match, so the review skill can decide what to auto-suggest versus flag for human approval. Defaults to 0.5 when omitted.",
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "enabled": {
+          "description": "Whether this rule participates in evaluation. Defaults to true. A user disables a bundled default by overlaying a rule with the same id and enabled:false.",
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "Human-readable explanation template returned with a match. Supports {payee}, {categoryName}, {categoryGroup}, {accountName}, {taxLineId}, {businessEntityId}, and {matchedKeyword} placeholders.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

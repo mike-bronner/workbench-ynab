@@ -15,9 +15,11 @@
       "displayName": "Business A",
       "schedule": "C",
       "scheduleLineMap": {
-        "note": "Detailed shape is defined by issue M3-2; placeholder content only.",
+        "note": "Detailed shape is owned by the mapping engine (issue #23); placeholder content only. categoryGroups / accounts declare this entity's business YNAB structure so the engine can route those transactions to Schedule C — use placeholder names here, never real ones.",
         "advertising": "Category Group Placeholder 1",
-        "officeExpense": "Category Group Placeholder 2"
+        "officeExpense": "Category Group Placeholder 2",
+        "categoryGroups": ["Category Group Placeholder 1", "Category Group Placeholder 2"],
+        "accounts": ["Account Placeholder — Business Checking"]
       }
     }
   ],
@@ -55,6 +57,25 @@
   "overrides": {
     "thresholds": {
       "saltCap": 10000
-    }
+    },
+    "mappingRules": [
+      {
+        "id": "my-accountant-fees",
+        "match": { "payeeKeywords": ["bookkeeping placeholder", "accountant placeholder"], "amountSign": "outflow" },
+        "taxLineId": "schedC.17",
+        "businessEntityId": "biz-a",
+        "priority": 40,
+        "confidence": 0.9,
+        "reason": "Payee '{payee}' is my bookkeeper; classifying as Schedule C legal and professional services."
+      },
+      {
+        "id": "charitable-tithing",
+        "enabled": false,
+        "match": { "payeeKeywords": ["unused"] },
+        "taxLineId": "schedA.charitable",
+        "priority": 50,
+        "reason": "Disable the bundled charitable rule by overlaying its id with enabled:false."
+      }
+    ]
   }
 }

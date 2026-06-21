@@ -1,0 +1,134 @@
+{
+  "$comment": "Default US payee/category → tax-line mapping ruleset (issue #23, M3-4). The classifier (lib/tax/classifyTransaction.mjs) overlays the user's rules from their tax profile (overrides.mappingRules, surfaced by the M3-1 loader at profile.mappingRules) ON TOP of these, then evaluates by ascending priority. PURELY DECLARATIVE data — no JavaScript, no executable logic. GENERIC and shareable: NOTHING here is specific to one taxpayer — no real business, account, lender, or category-group names. Per-user identifiers live in the profile INSTANCE (issue #25), never here. SCHEMA: assets/tax/mapping-rules.schema.json. MONEY UNITS: amountThresholdDollars and amountSign are evaluated in DOLLARS (YNAB milliunits / 1000), never raw milliunits. taxLineId values reference the bundled tax-line catalog (assets/tax/us-tax-lines.json, issue #21). A businessEntityId of \"$profile\" is a sentinel the classifier resolves to the owning business entity from the profile — it keeps owner-specific entity ids out of these defaults. Expense rules require amountSign:outflow so a refund/inflow at the same payee is never misclassified as a deductible expense. See docs/mapping-engine.md for precedence, tie-breaking, and the structural-signal mechanism.",
+  "rulesetVersion": "1",
+  "rules": [
+    {
+      "id": "business-category-or-account",
+      "match": { "businessSignal": true, "amountSign": "outflow" },
+      "taxLineId": "schedC.27a",
+      "businessEntityId": "$profile",
+      "priority": 10,
+      "confidence": 0.7,
+      "reason": "Transaction posts to a business category-group or account; classifying as Schedule C other expenses for {businessEntityId}."
+    },
+    {
+      "id": "dev-tools-saas-hosting",
+      "match": {
+        "amountSign": "outflow",
+        "payeeKeywords": [
+          "saas",
+          "subscription",
+          "web hosting",
+          "hosting",
+          "domain",
+          "vps",
+          "github",
+          "gitlab",
+          "bitbucket",
+          "aws",
+          "amazon web services",
+          "azure",
+          "google cloud",
+          "digitalocean",
+          "digital ocean",
+          "linode",
+          "vultr",
+          "cloudflare",
+          "namecheap",
+          "godaddy",
+          "jetbrains",
+          "openai",
+          "anthropic",
+          "vercel",
+          "netlify",
+          "heroku",
+          "fastly",
+          "forge"
+        ]
+      },
+      "taxLineId": "schedC.27a",
+      "businessEntityId": "$profile",
+      "priority": 50,
+      "confidence": 0.6,
+      "reason": "Payee '{payee}' matches developer-tools / SaaS / hosting / domain keywords (matched '{matchedKeyword}'); classifying as Schedule C other expenses."
+    },
+    {
+      "id": "medical-dental",
+      "match": {
+        "amountSign": "outflow",
+        "payeeKeywords": [
+          "pharmacy",
+          "prescription",
+          "clinic",
+          "hospital",
+          "dental",
+          "dentist",
+          "doctor",
+          "physician",
+          "optometr",
+          "urgent care",
+          "co-pay",
+          "copay",
+          "medical"
+        ]
+      },
+      "taxLineId": "schedA.medical",
+      "priority": 50,
+      "confidence": 0.55,
+      "reason": "Payee '{payee}' matches medical/dental keywords (matched '{matchedKeyword}'); classifying as Schedule A medical and dental expenses."
+    },
+    {
+      "id": "mortgage-heloc-interest",
+      "match": {
+        "amountSign": "outflow",
+        "payeeKeywords": ["mortgage", "heloc", "home equity", "home loan"]
+      },
+      "taxLineId": "schedA.interest",
+      "priority": 50,
+      "confidence": 0.55,
+      "reason": "Payee '{payee}' matches mortgage/HELOC interest keywords (matched '{matchedKeyword}'); classifying as Schedule A home mortgage interest."
+    },
+    {
+      "id": "state-and-local-tax",
+      "match": {
+        "amountSign": "outflow",
+        "payeeKeywords": [
+          "property tax",
+          "state income tax",
+          "state tax",
+          "department of revenue",
+          "franchise tax board",
+          "tax collector",
+          "county treasurer"
+        ]
+      },
+      "taxLineId": "schedA.salt",
+      "priority": 50,
+      "confidence": 0.55,
+      "reason": "Payee '{payee}' matches state/local tax keywords (matched '{matchedKeyword}'); classifying as Schedule A state and local taxes."
+    },
+    {
+      "id": "charitable-tithing",
+      "match": {
+        "amountSign": "outflow",
+        "payeeKeywords": [
+          "tithe",
+          "tithing",
+          "church",
+          "synagogue",
+          "mosque",
+          "temple",
+          "charity",
+          "donation",
+          "nonprofit",
+          "non-profit",
+          "foundation"
+        ]
+      },
+      "taxLineId": "schedA.charitable",
+      "priority": 50,
+      "confidence": 0.55,
+      "reason": "Payee '{payee}' matches charitable/tithing keywords (matched '{matchedKeyword}'); classifying as Schedule A gifts to charity."
+    }
+  ]
+}

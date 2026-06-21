@@ -16,6 +16,27 @@ become one *instance* of this schema, stored outside the repo (see
 | [`tax-profile.d.ts`](./tax-profile.d.ts) | TypeScript declaration (`TaxProfile` + supporting types) for the engine to import. Zero runtime overhead. |
 | [`tax-profile.example.json`](./tax-profile.example.json) | A valid instance built entirely from placeholder values. |
 | [`us-tax-lines.json`](./us-tax-lines.json) | The **default US ruleset**: the Schedule C / A / 1 / SE line catalog the mapping engine maps onto, plus the default `standardDeductionByYear` table and `thresholds`. Purely declarative data; no per-taxpayer numbers. |
+| [`mapping-rules.schema.json`](./mapping-rules.schema.json) | Canonical JSON Schema (draft 2020-12) for the payee/category → tax-line **mapping ruleset** (issue #23). |
+| [`mapping-rules.json`](./mapping-rules.json) | The **default US mapping ruleset**: generic, ordered rules that classify a YNAB transaction to a tax line by payee keyword, category, account, or amount. Purely declarative data; no owner-specific names. |
+
+## The mapping engine — payee/category → tax line
+
+[`lib/tax/classifyTransaction.mjs`](../../lib/tax/classifyTransaction.mjs)
+(issue #23) turns an already-fetched YNAB transaction into a suggested tax line.
+It evaluates the bundled [`mapping-rules.json`](./mapping-rules.json) defaults,
+overlaid by the user's own rules, in ascending `priority`; the first matching
+rule wins, and nothing matching yields an explicit `unclassified` result (never
+a wrong guess). Users add, disable, or re-prioritize rules by putting them under
+`overrides.mappingRules` in their profile instance — a user rule with the same
+`id` as a bundled rule replaces it (set `enabled: false` to disable a default),
+a new `id` is appended. See
+[`docs/mapping-engine.md`](../../docs/mapping-engine.md) for the precedence,
+tie-breaking, milliunit handling, and the `$profile` business-scoping mechanism.
+
+> **YNAB namespacing.** The transactions the engine classifies are fetched by
+> the consuming skill with the vendored MCP tools namespaced
+> `mcp__plugin_workbench-ynab_ynab__*` (e.g. `ynab_list_transactions`) — **not**
+> `mcp__ynab__*`. The engine itself is MCP-agnostic: it only reads plain objects.
 
 ## Generic and shareable — a locked decision
 
