@@ -191,7 +191,7 @@ Every command is namespaced under `/workbench-ynab:`. The plugin is mid-build; t
 
 ## Versioning
 
-**The plugin and its vendored YNAB MCP bundle are pinned together in git.** The bundle is [`@dizzlkheinz/ynab-mcpb`](https://www.npmjs.com/package/@dizzlkheinz/ynab-mcpb), **version-frozen at `0.26.10`** and vendored as a self-contained `vendor/ynab-mcp/index.cjs` — no `npx`-on-demand, no floating dependency. The pinned version, tarball hash, and provenance are recorded in [`vendor/ynab-mcp/vendored.json`](vendor/ynab-mcp/vendored.json); the bundle is only ever updated via the re-vendor script, never by hand.
+**The plugin and its vendored YNAB MCP bundle are pinned together in git.** The bundle is [`@dizzlkheinz/ynab-mcpb`](https://www.npmjs.com/package/@dizzlkheinz/ynab-mcpb), **version-frozen at `0.26.10`** and vendored as a self-contained `vendor/ynab-mcp/index.cjs` — no `npx`-on-demand, no floating dependency. The pinned version, tarball hash, and provenance are recorded in [`vendor/ynab-mcp/vendored.json`](vendor/ynab-mcp/vendored.json); the bundle is only ever updated via the re-vendor script (`bin/revendor.sh`), never by hand. See [`docs/vendoring.md`](docs/vendoring.md) for how to update the bundle, verify the result, and the version-marker format.
 
 Pinning both versions in git means a given `workbench-ynab` commit always runs against the exact MCP bundle it was tested with — boot is offline, frozen, and reproducible.
 
