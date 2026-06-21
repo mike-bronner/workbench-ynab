@@ -3,9 +3,12 @@
 # tests/unit/revendor.test.sh — covers bin/revendor.sh (the M1-4 re-vendor
 # script, issue #11) with a MOCK npm so no network or real registry is touched.
 #
-# Two AC-load-bearing paths are exercised:
+# Three AC-load-bearing paths are exercised:
 #   * Idempotency — re-vendoring the already-pinned version, whose bundle bytes
 #     are unchanged, must print a "no change" line, exit 0, and modify nothing.
+#   * Changed bundle (the primary write path) — new bytes + a new version must
+#     overwrite index.cjs, rewrite the marker (version, both hashes, date), print
+#     an old → new summary to stdout, and leave no vendored.json.tmp behind.
 #   * Prereq failure — with `npm` absent from $PATH the script must hard-error
 #     (non-zero) and name the missing prerequisite, rather than failing obscurely
 #     half-way through.
@@ -85,6 +88,51 @@ test_idempotent_no_change() {
   assert_contains "$out" "No change" "should report no change on stdout"
   assert_eq "$marker_before" "$(hash_of "$marker")" "marker must be untouched"
   assert_eq "$bundle_before" "$(hash_of "$bundle")" "bundle must be untouched"
+  rm -rf "$sb"
+}
+
+# A CHANGED bundle (new bytes + a new version) drives the script's primary path:
+# index.cjs overwritten, the marker rewritten (version, both hashes, today's
+# date), an old → new summary on stdout, and — guarding the trap fix — NO
+# vendored.json.tmp stranded in the tracked vendor dir afterward.
+test_changed_bundle_updates_marker_and_bundle() {
+  local sb mockbin marker bundle newsrc new_version new_sha date_before out rc tsha
+  sb="$(make_sandbox)"
+  mockbin="$(make_mockbin "$sb")"
+  marker="$sb/vendor/ynab-mcp/vendored.json"
+  bundle="$sb/vendor/ynab-mcp/index.cjs"
+  new_version="9.9.9-test"
+  date_before="$(jq -r '.date_vendored' "$marker")"
+
+  # Bundle bytes that differ from the pinned vendored bundle, so the hash-keyed
+  # idempotency check falls through to the write path instead of no-op'ing.
+  newsrc="$sb/new-index.cjs"
+  printf 'changed-bundle-bytes %s\n' "$(date +%s)-$RANDOM" > "$newsrc"
+  new_sha="$(hash_of "$newsrc")"
+
+  set +e
+  out="$(env PATH="$mockbin:$PATH" MOCK_BUNDLE_SRC="$newsrc" \
+    "$BASH_BIN" "$sb/bin/revendor.sh" "$new_version" 2>/dev/null)"
+  rc=$?
+  set -e
+
+  assert_eq 0 "$rc" "changed-bundle re-vendor should exit 0"
+  # (a) index.cjs overwritten with the new bytes
+  assert_eq "$new_sha" "$(hash_of "$bundle")" "index.cjs must be overwritten with the new bundle bytes"
+  # (b) marker rewritten: version, bundle hash, tarball hash, and date
+  assert_eq "$new_version" "$(jq -r '.version' "$marker")" "marker version must be rewritten"
+  assert_eq "$new_sha" "$(jq -r '.bundle_sha256' "$marker")" "marker bundle_sha256 must match the new bytes"
+  tsha="$(jq -r '.tarball_sha256' "$marker")"
+  assert_eq 64 "${#tsha}" "marker tarball_sha256 must be a 64-char SHA-256"
+  assert_eq false "$([ "$date_before" = "$(jq -r '.date_vendored' "$marker")" ] && echo true || echo false)" \
+    "marker date_vendored must be rewritten"
+  # (c) human-readable old → new summary on stdout
+  assert_contains "$out" "Re-vendored" "summary header must print to stdout"
+  assert_contains "$out" "0.26.10 → $new_version" "summary must show the old → new version"
+  # (d) no marker temp stranded in the tracked vendor dir (guards the trap fix)
+  if [ -e "$marker.tmp" ]; then
+    fail "vendored.json.tmp must not remain in the vendor dir after a successful write"
+  fi
   rm -rf "$sb"
 }
 
