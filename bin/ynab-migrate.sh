@@ -26,6 +26,15 @@
 #                         be a known deprecated name — never an arbitrary path — so
 #                         a bad argument can never rm -rf the wrong thing.
 #                         Idempotent. Exit 0 ok, 2 on a rejected name.
+#   migrate-config CONFIG PATH VALUE
+#                         Set ONE config.json field to VALUE only when it is
+#                         currently blank (absent, null, "", [], {}, or a
+#                         <PLACEHOLDER> string) — an existing real value is NEVER
+#                         overwritten. PATH is a JSON array (e.g. ["budget","name"])
+#                         and VALUE a JSON literal. Writes via temp-file→validate→mv,
+#                         so a jq failure can't leave a half-written config. Idempotent.
+#                         Exit 0 ok (wrote or already-set), 2 on a config it cannot
+#                         parse/rewrite or a malformed PATH/VALUE argument.
 #
 # PATH OVERRIDES (defaults are the real on-disk locations; the overrides let the
 # test harness point every surface at a sandbox):
@@ -79,14 +88,14 @@ do_detect_connector() {
     return 2
   fi
   local has_ynab pkg_match
-  has_ynab="$(jq -r '(.mcpServers // {}) | has("ynab")' "$DESKTOP_CONFIG")"
+  has_ynab="$(jq -r '(.mcpServers // {}) | has("ynab")' "$DESKTOP_CONFIG")" || return 2
   if [ "$has_ynab" != true ]; then
     printf 'No legacy "ynab" connector in the Desktop config (good — nothing to remove).\n'
     return 1
   fi
   pkg_match="$(jq -r --arg pkg "$LEGACY_PKG" '
     [ (.mcpServers.ynab.args // [])[] | select(type == "string") | select(contains($pkg)) ] | length > 0
-  ' "$DESKTOP_CONFIG")"
+  ' "$DESKTOP_CONFIG")" || return 2
   if [ "$pkg_match" = true ]; then
     printf 'LEGACY CONNECTOR PRESENT — mcpServers.ynab runs %s\n' "$LEGACY_PKG"
     printf '  Config: %s\n' "$DESKTOP_CONFIG"
@@ -110,23 +119,28 @@ do_remove_connector() {
     return 2
   fi
   local has_ynab
-  has_ynab="$(jq -r '(.mcpServers // {}) | has("ynab")' "$DESKTOP_CONFIG")"
+  has_ynab="$(jq -r '(.mcpServers // {}) | has("ynab")' "$DESKTOP_CONFIG")" || return 2
   if [ "$has_ynab" != true ]; then
     printf 'mcpServers.ynab already absent — nothing to remove (already done).\n'
     return 0
   fi
   # Remove ONLY the ynab key; every other server is preserved. Write to a temp
-  # file and validate it is JSON before replacing the original, so a jq failure
-  # can never leave a half-written Desktop config behind.
+  # file, validate it is JSON, and only then mv over the original — so a failure
+  # at ANY step (jq del, validation, or the mv itself) leaves the config
+  # untouched. The mv lives inside the if-condition so its failure can't slip
+  # past `set -e`; every rewrite failure falls through to the documented exit 2.
   local tmp
   tmp="$(mktemp)"
-  if jq 'del(.mcpServers.ynab)' "$DESKTOP_CONFIG" > "$tmp" && jq -e . "$tmp" >/dev/null 2>&1; then
-    mv "$tmp" "$DESKTOP_CONFIG"
+  if jq 'del(.mcpServers.ynab)' "$DESKTOP_CONFIG" > "$tmp" \
+    && jq -e . "$tmp" >/dev/null 2>&1 \
+    && mv "$tmp" "$DESKTOP_CONFIG"; then
     printf 'Removed mcpServers.ynab from the Desktop config (other servers preserved).\n'
     return 0
   fi
   rm -f "$tmp"
-  die "Failed to rewrite the Desktop config — left unchanged: $DESKTOP_CONFIG"
+  printf '⚠️  Failed to rewrite the Desktop config — left unchanged.\n' >&2
+  printf '    Location: %s\n' "$DESKTOP_CONFIG" >&2
+  return 2
 }
 
 do_detect_task_dirs() {
@@ -163,6 +177,47 @@ do_remove_task_dir() {
   printf 'Removed deprecated task directory: %s\n' "$target"
 }
 
+# Set ONE config.json field, but ONLY when it is currently blank — never
+# blind-overwrite a real value. "Blank" = absent, null, "", [], {}, or a
+# <PLACEHOLDER>-shaped string. PATH is a JSON array (e.g. ["budget","name"]);
+# VALUE is a JSON literal (a string is "\"x\"", an array "[…]", an object "{…}").
+# Both go through jq via --argjson, so a config value can never be interpreted as
+# a jq program. Writes through a temp file validated before mv, mirroring
+# remove-connector. Exit 0 (wrote or already-set), 2 on parse/rewrite failure or
+# a malformed PATH/VALUE.
+do_migrate_config() {
+  local config="${1:-}" path="${2:-}" value="${3:-}" dotted blank tmp
+  [ -n "$config" ] && [ "$#" -ge 3 ] || die "migrate-config requires CONFIG PATH VALUE"
+  if [ ! -f "$config" ]; then
+    printf '⚠️  No config to migrate into: %s\n' "$config" >&2
+    return 2
+  fi
+  jq -e . "$config" >/dev/null 2>&1 || { printf '⚠️  Unparseable config — refusing to edit: %s\n' "$config" >&2; return 2; }
+  # Reject a PATH/VALUE that is not valid JSON before touching the config.
+  jq -e . >/dev/null 2>&1 <<<"$path"  || { printf '⚠️  migrate-config PATH must be a JSON array: %s\n' "$path" >&2; return 2; }
+  jq -e . >/dev/null 2>&1 <<<"$value" || { printf '⚠️  migrate-config VALUE must be a JSON literal: %s\n' "$value" >&2; return 2; }
+  dotted="$(jq -rn --argjson p "$path" '$p | join(".")')" || return 2
+  blank="$(jq -r --argjson path "$path" '
+    def is_blank: . == null or . == "" or . == [] or . == {}
+      or (type == "string" and test("^<.*>$"));
+    getpath($path) | is_blank
+  ' "$config")" || return 2
+  if [ "$blank" != true ]; then
+    printf '%s already set — leaving it (already done).\n' "$dotted"
+    return 0
+  fi
+  tmp="$(mktemp)"
+  if jq --argjson path "$path" --argjson v "$value" 'setpath($path; $v)' "$config" > "$tmp" \
+    && jq -e . "$tmp" >/dev/null 2>&1 \
+    && mv "$tmp" "$config"; then
+    printf 'Set %s from the migrated prototype config.\n' "$dotted"
+    return 0
+  fi
+  rm -f "$tmp"
+  printf '⚠️  Failed to write config — left unchanged: %s\n' "$config" >&2
+  return 2
+}
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") <subcommand> [args]
@@ -175,6 +230,10 @@ Usage: $(basename "$0") <subcommand> [args]
   detect-task-dirs      Report which deprecated prototype task directories exist
                         under the Scheduled root. Exit 0 if any exist, else 1.
   remove-task-dir NAME  Remove one known deprecated task directory. Idempotent.
+  migrate-config CONFIG PATH VALUE
+                        Set one config.json field (PATH = JSON array, VALUE = JSON
+                        literal) only when it is currently blank — never a blind
+                        overwrite. Idempotent. Exit 0 ok, 2 on parse/rewrite failure.
   -h, --help            Show this help.
 
 Path overrides: YNAB_DESKTOP_CONFIG, YNAB_SCHEDULED_ROOT (see the header).
@@ -187,6 +246,7 @@ main() {
     remove-connector)  do_remove_connector ;;
     detect-task-dirs)  do_detect_task_dirs ;;
     remove-task-dir)   shift; do_remove_task_dir "${1:-}" ;;
+    migrate-config)    shift; do_migrate_config "$@" ;;
     -h | --help | '')  usage ;;
     *)                 usage >&2; die "Unknown subcommand: $1" ;;
   esac

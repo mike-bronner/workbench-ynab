@@ -195,8 +195,6 @@ Every command is namespaced under `/workbench-ynab:`. The plugin is mid-build; t
 
 Pinning both versions in git means a given `workbench-ynab` commit always runs against the exact MCP bundle it was tested with — boot is offline, frozen, and reproducible.
 
-## Versioning
-
 Two version numbers live in this repo. They track different things, are deliberately **independent**, and are **never co-bumped**.
 
 - **The plugin's own version** lives in [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json) (currently `0.1.0`). This is the **only** version release automation bumps — the release workflow's sole bump target is `.claude-plugin/plugin.json`, and no other manifest, JSON, or config file in the repo carries a release version. It starts at `0.1.0` and is cut to `1.0.0` at first release.

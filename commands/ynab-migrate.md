@@ -106,14 +106,33 @@ be held until the plugin is verified working). On **Yes — rotated**:
 
    If it exists, print the "already seeded" line and move on.
 
-2. Otherwise prompt for the **fresh** token with hidden input and store it — never
-   pass the token as a literal on the command line (that writes it to shell
-   history), and never echo it:
+2. Otherwise, **have the user seed the Keychain in their own terminal** — do NOT
+   try to read the token here. The Bash this command runs in is **non-interactive**
+   (no controlling TTY), so `read -rs` returns EOF immediately and would seed an
+   *empty* entry (then Step 4 fails with no clue why); and passing the token as a
+   `-w "$TOKEN"` argv value exposes it to any `ps`-watching process — the exact
+   secret-in-the-clear hygiene this command exists to retire (#73). Instead, tell
+   the user to run this in their own terminal and paste the **fresh** token at the
+   hidden prompt:
 
    ```bash
-   read -rs NEW_TOKEN   # hidden input
-   security add-generic-password -s "ynab-mcp" -a "access-token" -w "$NEW_TOKEN" -U
-   unset NEW_TOKEN
+   security add-generic-password -s "ynab-mcp" -a "access-token" -U -w
+   ```
+
+   The **bare trailing `-w`** (no value) makes `security` prompt for the password on
+   its own controlled input — the token never touches argv, shell history, or this
+   chat. Do NOT substitute a `-w "$TOKEN"` form, and never ask the user to paste the
+   token into the conversation.
+
+3. Once the user confirms they've run it, verify the entry exists — this only
+   checks for presence and never prints the token:
+
+   ```bash
+   if security find-generic-password -s "ynab-mcp" -a "access-token" >/dev/null 2>&1; then
+     echo "Keychain entry confirmed (service ynab-mcp / account access-token)."
+   else
+     echo "Keychain entry not found — the seed didn't take. Re-run the security command above in your terminal."
+   fi
    ```
 
    `bin/launcher.sh` reads the token from this exact Keychain location at launch.
@@ -156,20 +175,28 @@ plugin's out-of-repo config so the user doesn't re-enter it.
    ```
 
 4. Show the user the exact fields you propose to write (their migrated values) and
-   ask for confirmation. On **yes**, write each field with `jq`, **never** a blind
-   overwrite — write to a temp file and validate before replacing:
+   ask for confirmation. On **yes**, write each field through the tested helper —
+   it fills a field **only** when the current value is absent, null, empty, or a
+   `<PLACEHOLDER>`, and writes via a temp-file→validate→`mv`, so it can **never**
+   blind-overwrite a value the user already set:
 
    ```bash
-   # Example: set budget.name only if it is currently unset/placeholder.
-   jq --arg v "$BUDGET_NAME" '
-     if (.budget.name // "" | test("^$|^<.*>$")) then .budget.name = $v else . end
-   ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && jq -e . "$CONFIG_FILE.tmp" >/dev/null \
-     && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE" || rm -f "$CONFIG_FILE.tmp"
+   # Each call takes the config file, the field as a JSON path array, and the
+   # migrated value as a JSON literal. A field that already holds a real value is
+   # left untouched and reported "already set".
+   M="${CLAUDE_PLUGIN_ROOT}/bin/ynab-migrate.sh"
+   bash "$M" migrate-config "$CONFIG_FILE" '["budget","name"]'              "$(jq -n --arg v "$BUDGET_NAME" '$v')"
+   bash "$M" migrate-config "$CONFIG_FILE" '["business","name"]'            "$(jq -n --arg v "$BUSINESS_NAME" '$v')"
+   bash "$M" migrate-config "$CONFIG_FILE" '["business","accounts"]'        "$BUSINESS_ACCOUNTS_JSON"      # a JSON array
+   bash "$M" migrate-config "$CONFIG_FILE" '["business","category_group"]'  "$(jq -n --arg v "$CATEGORY_GROUP" '$v')"
+   bash "$M" migrate-config "$CONFIG_FILE" '["business","expense_categories"]' "$EXPENSE_CATEGORIES_JSON"  # a JSON array
+   bash "$M" migrate-config "$CONFIG_FILE" '["tax_profile"]'                "$TAX_PROFILE_JSON"            # a JSON object
    ```
 
-   Repeat the same guard pattern for each migrated field. Validate the final file
-   against `${CLAUDE_PLUGIN_ROOT}/assets/config.schema.json` if a validator is
-   available.
+   Build each VALUE as a JSON literal — `jq -n --arg v "$STR" '$v'` for a string, a
+   `jq -n`-built array/object for the structured fields — so a value can never be
+   misread as a jq program. Validate the final file against
+   `${CLAUDE_PLUGIN_ROOT}/assets/config.schema.json` if a validator is available.
 
 ## Step 6 — Detect the prototype scheduled tasks and directories
 

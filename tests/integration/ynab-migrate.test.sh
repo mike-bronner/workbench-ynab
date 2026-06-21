@@ -68,9 +68,11 @@ test_detect_connector_reports_present() {
 }
 
 test_detect_connector_absent_when_no_config() {
-  local missing out rc=0
-  missing="$(mktemp -d)/nope.json"
+  local tmp missing out rc=0
+  tmp="$(mktemp -d)"
+  missing="$tmp/nope.json"
   out="$(YNAB_DESKTOP_CONFIG="$missing" bash "$MIGRATE" detect-connector)" || rc=$?
+  rm -rf "$tmp"
   assert_eq 1 "$rc" "detect-connector should exit 1 when there is no Desktop config"
   assert_contains "$out" "No Claude Desktop config"
 }
@@ -124,16 +126,41 @@ test_remove_connector_is_idempotent() {
 }
 
 test_remove_connector_fails_closed_on_malformed_config() {
-  local sb desk before after rc=0
+  local sb desk before after out rc=0
   sb="$(mktemp -d)"
   desk="$sb/claude_desktop_config.json"
   printf '{"mcpServers": {"ynab": {\n' > "$desk"   # unparseable
   before="$(_snapshot "$sb")"
-  YNAB_DESKTOP_CONFIG="$desk" bash "$MIGRATE" remove-connector >/dev/null 2>&1 || rc=$?
+  out="$(YNAB_DESKTOP_CONFIG="$desk" bash "$MIGRATE" remove-connector 2>&1)" || rc=$?
   after="$(_snapshot "$sb")"
   rm -rf "$sb"
   assert_eq 2 "$rc" "remove-connector must refuse (exit 2) to edit a config it cannot parse"
+  assert_contains "$out" "refusing to edit"
   assert_eq "$before" "$after" "a malformed config must be left byte-for-byte untouched"
+}
+
+# The OTHER fail-closed branch: the config parses fine and has a ynab block, but
+# the rewrite itself fails (here, a read-only parent dir blocks the final mv).
+# remove-connector must still honor its documented exit 2 and leave the config
+# byte-for-byte intact — never abort with jq/mv's raw exit under `set -e`. This is
+# the branch the malformed-config test above does NOT exercise.
+test_remove_connector_fails_closed_when_rewrite_fails() {
+  local sb desk before after out rc=0
+  # Root bypasses directory permissions, so the read-only-dir trigger can't fire;
+  # skip rather than assert a false green (dev + CI both run non-root).
+  [ "$(id -u)" -eq 0 ] && { printf '  (skipped: cannot block writes as root)\n'; return 0; }
+  sb="$(mktemp -d)"
+  desk="$sb/claude_desktop_config.json"
+  printf '{"mcpServers":{"ynab":{"command":"npx","args":["-y","@dizzlkheinz/ynab-mcpb@latest"]},"other":{}}}\n' > "$desk"
+  before="$(_snapshot "$sb")"
+  chmod 500 "$sb"                       # read-only dir → the mv back over $desk fails
+  out="$(YNAB_DESKTOP_CONFIG="$desk" bash "$MIGRATE" remove-connector 2>&1)" || rc=$?
+  chmod 700 "$sb"                       # restore so snapshot + cleanup can proceed
+  after="$(_snapshot "$sb")"
+  rm -rf "$sb"
+  assert_eq 2 "$rc" "remove-connector must exit 2 when it cannot rewrite the config"
+  assert_contains "$out" "Failed to rewrite"
+  assert_eq "$before" "$after" "a failed rewrite must leave the config byte-for-byte untouched"
 }
 
 test_detect_task_dirs_reports_presence() {
@@ -168,14 +195,17 @@ test_remove_task_dir_removes_named_and_preserves_rest() {
 }
 
 test_remove_task_dir_is_idempotent() {
-  local sb sched out rc=0
+  local sb sched before after out rc=0
   sb="$(_make_sandbox)"
   sched="$sb/Scheduled"
   YNAB_SCHEDULED_ROOT="$sched" bash "$MIGRATE" remove-task-dir ynab-financial-review >/dev/null
+  before="$(_snapshot "$sb")"
   out="$(YNAB_SCHEDULED_ROOT="$sched" bash "$MIGRATE" remove-task-dir ynab-financial-review)" || rc=$?
+  after="$(_snapshot "$sb")"
   rm -rf "$sb"
   assert_eq 0 "$rc" "a second remove-task-dir must exit 0"
   assert_contains "$out" "already"
+  assert_eq "$before" "$after" "a second remove-task-dir must not mutate the sandbox"
 }
 
 test_remove_task_dir_rejects_unknown_name() {
@@ -216,6 +246,82 @@ test_full_migration_is_idempotent() {
   assert_contains "$out1" "already"
   assert_contains "$out2" "already"
   assert_contains "$out3" "already"
+}
+
+# ── migrate-config: the tested "never blind-overwrite" mechanism for config.json ──
+# Step 5 of the command delegates each field write to this subcommand instead of
+# hand-rolling jq, so the guarantee — fill ONLY a blank field, via temp→validate→mv
+# — is a tested mechanism, not agent prose.
+
+test_migrate_config_sets_blank_field() {
+  local sb cfg out rc=0
+  sb="$(mktemp -d)"; cfg="$sb/config.json"
+  printf '{"budget":{"name":"<budget-name>"}}\n' > "$cfg"   # a <PLACEHOLDER> is blank
+  out="$(bash "$MIGRATE" migrate-config "$cfg" '["budget","name"]' '"Personal 2024"')" || rc=$?
+  assert_eq 0 "$rc" "migrate-config should exit 0 after writing a blank field"
+  assert_contains "$out" "Set budget.name"
+  assert_eq "Personal 2024" "$(jq -r '.budget.name' "$cfg" 2>/dev/null)" "the placeholder must be replaced with the migrated value"
+  rm -rf "$sb"
+}
+
+test_migrate_config_never_overwrites_existing_value() {
+  local sb cfg before after out rc=0
+  sb="$(mktemp -d)"; cfg="$sb/config.json"
+  printf '{"budget":{"name":"My Real Budget"}}\n' > "$cfg"
+  before="$(_snapshot "$sb")"
+  out="$(bash "$MIGRATE" migrate-config "$cfg" '["budget","name"]' '"Should Not Win"')" || rc=$?
+  after="$(_snapshot "$sb")"
+  rm -rf "$sb"
+  assert_eq 0 "$rc" "migrate-config exits 0 when the field already holds a value"
+  assert_contains "$out" "already set"
+  assert_eq "$before" "$after" "an existing real value must NEVER be blind-overwritten"
+}
+
+test_migrate_config_creates_absent_field() {
+  local sb cfg rc=0
+  sb="$(mktemp -d)"; cfg="$sb/config.json"
+  printf '{}\n' > "$cfg"
+  bash "$MIGRATE" migrate-config "$cfg" '["budget","name"]' '"Personal 2024"' >/dev/null || rc=$?
+  assert_eq 0 "$rc" "migrate-config should create a missing field"
+  assert_eq "Personal 2024" "$(jq -r '.budget.name' "$cfg" 2>/dev/null)" "an absent field must be created with the migrated value"
+  rm -rf "$sb"
+}
+
+test_migrate_config_writes_structured_value() {
+  local sb cfg rc=0
+  sb="$(mktemp -d)"; cfg="$sb/config.json"
+  printf '{"business":{"accounts":[]}}\n' > "$cfg"   # an empty array is blank
+  bash "$MIGRATE" migrate-config "$cfg" '["business","accounts"]' '["GeneaLabs Checking","GeneaLabs Savings"]' >/dev/null || rc=$?
+  assert_eq 0 "$rc" "migrate-config should set a structured (array) value"
+  assert_eq "GeneaLabs Checking" "$(jq -r '.business.accounts[0]' "$cfg" 2>/dev/null)" "the JSON array value must land intact"
+  assert_eq 2 "$(jq -r '.business.accounts | length' "$cfg" 2>/dev/null)" "both array elements must be written"
+  rm -rf "$sb"
+}
+
+test_migrate_config_is_idempotent() {
+  local sb cfg before after out rc=0
+  sb="$(mktemp -d)"; cfg="$sb/config.json"
+  printf '{"budget":{"name":"<budget-name>"}}\n' > "$cfg"
+  bash "$MIGRATE" migrate-config "$cfg" '["budget","name"]' '"Personal 2024"' >/dev/null
+  before="$(_snapshot "$sb")"
+  out="$(bash "$MIGRATE" migrate-config "$cfg" '["budget","name"]' '"Personal 2024"')" || rc=$?
+  after="$(_snapshot "$sb")"
+  rm -rf "$sb"
+  assert_eq 0 "$rc" "a second migrate-config must exit 0"
+  assert_contains "$out" "already"
+  assert_eq "$before" "$after" "a second migrate-config pass must not mutate the config"
+}
+
+test_migrate_config_fails_closed_on_malformed_config() {
+  local sb cfg before after rc=0
+  sb="$(mktemp -d)"; cfg="$sb/config.json"
+  printf '{"budget": {\n' > "$cfg"   # unparseable
+  before="$(_snapshot "$sb")"
+  bash "$MIGRATE" migrate-config "$cfg" '["budget","name"]' '"Personal 2024"' >/dev/null 2>&1 || rc=$?
+  after="$(_snapshot "$sb")"
+  rm -rf "$sb"
+  assert_eq 2 "$rc" "migrate-config must fail closed (exit 2) on a config it cannot parse"
+  assert_eq "$before" "$after" "a malformed config must be left untouched"
 }
 
 run_tests
