@@ -26,15 +26,15 @@ reliability layer for that gap.
 ## 1. Vendored-bundle behaviour (investigation)
 
 Findings from reading the vendored bundle `@dizzlkheinz/ynab-mcpb@0.26.10`
-(`vendor/ynab-mcp/index.cjs`, the prebuilt `dist/bundle/index.cjs`). These are
-the behaviours the skill must build on; re-confirm them on any re-vendor or MCP
-swap (see the capability map's swap procedure).
+(`vendor/ynab-mcp/index.cjs` — the frozen copy of record; `bin/ynab-mcp` execs
+it). These are the behaviours the skill must build on; re-confirm them on any
+re-vendor or MCP swap (see the capability map's swap procedure).
 
 | Concern | What the bundle does | What the skill must therefore do |
 |---|---|---|
 | **HTTP 429 / rate limit** | Ships a **client-side preemptive limiter** — a sliding window `{ maxRequests: 200, windowMs: 3600000 }`. On `tryAcquire`, when the window is full it **throws** a `RateLimitError` (an `Error` subclass carrying `resetTime` — an epoch-ms timestamp for when the window clears — and `remaining`). It also classifies a real HTTP 429 (`message.includes("429") \|\| "Too Many Requests"` → `RATE_LIMIT_EXCEEDED`). **It does *not* retry or back off** — it surfaces the error. | Catch the rate-limit error and back off ourselves: honour `resetTime` (or an HTTP `Retry-After`), else exponential backoff; cap the retries; degrade to a labelled partial review. The bundle gives us no retry, so the skill owns it. |
-| **Pagination** | YNAB's REST **list endpoints are not page-paginated** — `GET /transactions`, `/categories`, `/accounts`, `/payees`, `/scheduled_transactions` return the **full collection** in one response (optionally filtered by `since_date`). The bundle exposes no `offset`/`page`/`per_page`/cursor for these. (The `cursor`/`hasMore`/`nextCursor` symbols in the bundle are the MCP framework's internal *task-listing*, unrelated to YNAB data.) | A single pull is complete for the vendored bundle, so there is no first-page-only truncation risk today. The driver still follows any continuation signal to exhaustion (and is bounded by a page ceiling) so a future endpoint or bundled-own MCP that *does* paginate is handled without a rewrite. |
-| **`server_knowledge` deltas** | **Supported.** The bundle threads `lastKnowledgeOfServer` into the raw list calls, list responses carry `server_knowledge`, and it maintains a `knowledgeStore` + `cacheManager` (with TTLs) for incremental pulls. | v1 does **full pulls** and does **not** persist a cursor — see §3. The driver records the latest `server_knowledge` so a later milestone can opt into deltas without a shape change. |
+| **Pagination** | **The list tools paginate — 5 of the 6 do.** `ynab_list_accounts`, `ynab_list_categories`, `ynab_list_payees`, `ynab_list_transactions`, and `ynab_list_months` each register `limit (int, optional, **default 50**)` and `offset (int, optional, zero-based)`. Each list response carries `total_count`, `returned_count`, `offset`, `has_more`, and `next_offset` (`= offset + limit` when `has_more`, else absent), with rows keyed by the resource name (`{ transactions: [...] }`). Only `ynab_list_budgets` returns its whole collection in one shot. Continuation is **offset-based**, not cursor-based — the `cursor`/`hasMore`/`nextCursor` symbols elsewhere in the bundle are the MCP framework's internal *task-listing*, unrelated to YNAB data. | **Walk every page** before caching: re-issue the list call advancing `offset` by the page size while `has_more` is true (following `next_offset`). The default page size is 50, so any resource with >50 rows — a routine weekly transaction set — is multiple calls. Failing to do this silently truncates the review to the first 50 rows, exactly what AC #4 forbids. The driver does this with an offset-based default adapter, bounded by a page ceiling so a misbehaving endpoint fails loud instead of looping. |
+| **`server_knowledge` deltas** | **Supported internally, not surfaced on list output.** The bundle threads `lastKnowledgeOfServer` into the raw YNAB API calls (whose REST responses carry `server_knowledge`) and maintains a `knowledgeStore` + `cacheManager` (with TTLs) for incremental pulls. But the MCP **list tool's structured output does not echo `server_knowledge`** to the client — it ends at `…has_more, next_offset, cached, cache_info`. | v1 does **full pulls** and does **not** persist a cursor — see §3. The driver carries a forward-compat hook that records `server_knowledge` from any response that surfaces it; against the vendored bundle that is always undefined, so a later delta milestone must switch to a transport that exposes the cursor (and own persistence + invalidation) without a shape change here. |
 
 ## 2. The read strategy (fetch-once)
 
@@ -66,29 +66,33 @@ could change across a re-vendor.
   (§4) — far under 200/hour. Deltas optimize a constraint v1 is nowhere near.
 - **Deltas pay off only for frequent polling.** The win is for the M6-1
   between-run *monitor* (cheap, frequent polls), not a once-weekly review. The
-  driver already surfaces `server_knowledge`, so that milestone can adopt deltas
-  (and own the cursor-persistence + invalidation) without changing this shape.
+  driver carries a forward-compat hook that records `server_knowledge` from any
+  response surfacing it — but the vendored bundle's list output does not expose
+  it (§1), so that milestone must adopt a transport that does, then own the
+  cursor-persistence + invalidation, without changing this shape.
 
 ## 4. Request budget for a typical weekly review
 
 One fetch-once pull per list resource, plus the planner's resolve/sizing reads.
-Each YNAB list endpoint returns its full collection in a single response (§1), so
-pages-per-resource is **1** for the vendored bundle.
+The bundle's list tools paginate at a **default page size of 50** (§1), so a
+resource of `N` rows costs `ceil(N / 50)` calls — not 1. The counts below size a
+heavier-than-typical budget so the total is a true ceiling, not a best case.
 
-| Call | Count | Notes |
-|---|---|---|
-| `list_budgets` | 1 | resolve the target budget (planner) |
-| `list_accounts` | 1 | fetch-once |
-| `list_categories` | 1 | fetch-once |
-| `list_transactions` | 1 | fetch-once; `since_date`-scoped to the review period |
-| `list_payees` | 1 | fetch-once |
-| `list_scheduled_transactions` | 1 | fetch-once |
-| `get_month` | 1–3 | one per in-scope month (weekly review ⇒ 1) |
-| **Total** | **≈ 7–9** | **well under the ~200 requests/hour limit** |
+| Call | Rows (example) | Calls = ⌈N/50⌉ | Notes |
+|---|---|---|---|
+| `list_budgets` | — | 1 | resolve the target budget (planner); not paginated |
+| `list_accounts` | ~10 | 1 | fetch-once |
+| `list_categories` | ~120 | 3 | fetch-once (groups + categories) |
+| `list_transactions` | ~300 | 6 | fetch-once; `since_date`-scoped to the review period |
+| `list_payees` | ~200 | 4 | fetch-once; a mature budget accrues many payees |
+| `list_scheduled_transactions` | ~20 | 1 | fetch-once |
+| `get_month` | 1 per month | 1–3 | one per in-scope month (weekly review ⇒ 1) |
+| **Total** | | **≈ 17 (≈ 19 worst-case)** | **well under the ~200 requests/hour limit** |
 
-Even a re-run inside the same hour stays in the single digits. The 12 sections
-add **zero** calls beyond this set — they read the cache, which is the point of
-fetch-once. Headroom against 200/hr is roughly **20×**.
+The page count scales with budget size, but even a large budget lands near ~17
+calls — roughly **10×** headroom against 200/hr, and a re-run inside the same
+hour stays well within it. The 12 sections add **zero** calls beyond this set —
+they read the cache, which is the point of fetch-once.
 
 ## 5. Two separate timeout contexts (they must not interfere)
 
@@ -117,6 +121,8 @@ Every loop in the read path is bounded by construction:
   `[YNAB rate limit hit — partial review]`. No data is silently truncated; the
   partial state is explicit.
 - **Pagination** is capped at `maxPages` (default 1000): an endpoint that never
-  stops signalling "more" raises a `PaginationBoundError` instead of looping
-  forever. The vendored bundle returns a single page, so this is a guard, not a
-  hot path.
+  stops signalling `has_more` raises a `PaginationBoundError` instead of looping
+  forever. The vendored bundle paginates at 50 rows/page (§1), so multi-page
+  walks are the normal path; at 1000 pages the ceiling is ~50,000 rows — far
+  above any real budget, so it bounds a misbehaving endpoint without ever
+  clipping a legitimate pull.

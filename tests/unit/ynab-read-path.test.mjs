@@ -134,7 +134,7 @@ test('withRateLimitRetry is bounded: it gives up after exactly maxRetries (no un
     () => withRateLimitRetry(fn, { sleep, maxRetries: 3 }),
     (err) => {
       assert.ok(err instanceof RateLimitExhaustedError);
-      assert.equal(err.attempts, 3);
+      assert.equal(err.attempts, 4, 'reports the actual attempts made (maxRetries + 1), not the cap');
       return true;
     },
   );
@@ -143,27 +143,62 @@ test('withRateLimitRetry is bounded: it gives up after exactly maxRetries (no un
 
 // --- collectAllPages: AC #4 pagination, AC #8 bound --------------------------
 
-// A faithful paginated source: the first call carries no cursor; each page
-// points at the next via `next`, the default adapter threads it back as `cursor`.
-function paginatedCall(store) {
-  return async (_resource, params) => store[params.cursor ?? '__first__'];
+// A faithful paginated source matching the REAL vendored bundle's structured
+// list response: rows keyed by the resource name, a `limit` page size (default
+// 50), `has_more` true while rows remain, and `next_offset = offset + limit`.
+// This is the shape `@dizzlkheinz/ynab-mcpb@0.26.10` actually produces — NOT a
+// synthetic cursor shape — so tests built on it prove the default adapter can
+// paginate the real bundle (see docs/ynab-read-path.md §1).
+function bundlePaginatedCall(resource, allRows, pageSize = 50) {
+  return async (_resource, params) => {
+    const offset = params.offset ?? 0;
+    const limit = params.limit ?? pageSize;
+    const page = allRows.slice(offset, offset + limit);
+    const hasMore = offset + limit < allRows.length;
+    return {
+      [resource]: page,
+      total_count: allRows.length,
+      returned_count: page.length,
+      offset,
+      has_more: hasMore,
+      next_offset: hasMore ? offset + limit : undefined,
+    };
+  };
 }
 
-test('collectAllPages fetches every page in full and never truncates', async () => {
-  const store = {
-    __first__: { items: [1, 2], next: 'c1', serverKnowledge: 10 },
-    c1: { items: [3, 4], next: 'c2', serverKnowledge: 20 },
-    c2: { items: [5], serverKnowledge: 30 }, // no `next` → last page
-  };
-  const { items, pages, serverKnowledge } = await collectAllPages(paginatedCall(store), 'transactions');
-  assert.deepEqual(items, [1, 2, 3, 4, 5], 'all three pages concatenated, not just the first');
-  assert.equal(pages, 3);
-  assert.equal(serverKnowledge, 30, 'carries the latest server_knowledge');
+test('collectAllPages walks every page of the REAL bundle shape and never truncates past page 1', async () => {
+  // 125 rows at a 50-row page size ⇒ three pages (50 + 50 + 25). The pre-fix
+  // default adapter (which keyed on a non-existent `res.next`) would have
+  // stopped after page 1 and silently cut this to the first 50 — the exact
+  // failure AC #4 forbids. A weekly review routinely exceeds 50 transactions.
+  const rows = Array.from({ length: 125 }, (_, i) => i + 1);
+  const { items, pages } = await collectAllPages(
+    bundlePaginatedCall('transactions', rows, 50),
+    'transactions',
+  );
+  assert.equal(items.length, 125, 'all 125 rows fetched — not silently cut to the first 50');
+  assert.deepEqual(items, rows, 'every page concatenated in order');
+  assert.equal(pages, 3, '50 + 50 + 25 ⇒ three offset-paged calls');
+});
+
+test('collectAllPages captures server_knowledge when a transport surfaces it (delta forward-hook)', async () => {
+  // The vendored bundle's list output does NOT expose server_knowledge (it is
+  // consumed internally by the bundle's cacheManager); v1 does full pulls and
+  // persists no cursor (docs §3). This asserts only the forward-compat hook: a
+  // transport that DOES surface it gets it recorded for a later delta milestone.
+  const call = async () => ({ transactions: [1, 2], has_more: false, server_knowledge: 42 });
+  const { items, serverKnowledge } = await collectAllPages(call, 'transactions');
+  assert.deepEqual(items, [1, 2]);
+  assert.equal(serverKnowledge, 42);
 });
 
 test('collectAllPages is bounded by maxPages against an endless continuation', async () => {
   let calls = 0;
-  const endless = async () => { calls += 1; return { items: ['x'], next: 'again' }; };
+  // Always signals has_more with an advancing offset — never terminates on its own.
+  const endless = async (_resource, params) => {
+    calls += 1;
+    return { transactions: ['x'], has_more: true, next_offset: (params.offset ?? 0) + 50 };
+  };
   await assert.rejects(
     () => collectAllPages(endless, 'transactions', {}, { maxPages: 5 }),
     (err) => {
@@ -178,7 +213,7 @@ test('collectAllPages is bounded by maxPages against an endless continuation', a
 test('collectAllPages attaches already-collected rows when retries exhaust mid-walk', async () => {
   const { sleep } = recordingSleep();
   const call = async (_resource, params) => {
-    if (params.cursor === undefined) return { items: [1, 2], next: 'c1' };
+    if ((params.offset ?? 0) === 0) return { transactions: [1, 2], has_more: true, next_offset: 50 };
     throw bundleRateLimit(); // the second page never clears the limit
   };
   await assert.rejects(
@@ -196,7 +231,7 @@ test('collectAllPages attaches already-collected rows when retries exhaust mid-w
 
 test('createReadCache fetches a resource once and serves every later read from cache', async () => {
   let calls = 0;
-  const call = async () => { calls += 1; return { items: [{ id: 'a' }] }; };
+  const call = async () => { calls += 1; return { transactions: [{ id: 'a' }], has_more: false }; };
   const cache = createReadCache(call);
 
   const first = await cache.get('transactions');
@@ -208,19 +243,17 @@ test('createReadCache fetches a resource once and serves every later read from c
 });
 
 test('createReadCache caches the FULL paginated set, counting one call per page', async () => {
-  const store = {
-    __first__: { items: ['a', 'b'], next: 'c1' },
-    c1: { items: ['c'] },
-  };
-  const cache = createReadCache(paginatedCall(store));
-  const r = await cache.get('transactions');
-  assert.deepEqual(r.items, ['a', 'b', 'c']);
-  assert.equal(r.pages, 2);
+  // 110 payees at 50/page ⇒ three pages; all 110 must reach the cache.
+  const rows = Array.from({ length: 110 }, (_, i) => `p${i}`);
+  const cache = createReadCache(bundlePaginatedCall('payees', rows, 50));
+  const r = await cache.get('payees');
+  assert.deepEqual(r.items, rows);
+  assert.equal(r.pages, 3);
   assert.equal(r.partial, false);
-  assert.equal(cache.stats().calls, 2, 'two pages → two underlying calls, then memoized');
+  assert.equal(cache.stats().calls, 3, 'three pages → three underlying calls, then memoized');
 
-  await cache.get('transactions'); // served from cache
-  assert.equal(cache.stats().calls, 2, 'a cached read adds no calls');
+  await cache.get('payees'); // served from cache
+  assert.equal(cache.stats().calls, 3, 'a cached read adds no calls');
 });
 
 test('createReadCache degrades to a labelled partial review when 429 retries exhaust', async () => {
@@ -236,6 +269,34 @@ test('createReadCache degrades to a labelled partial review when 429 retries exh
   assert.equal(cache.annotationFor('categories'), null, 'unaffected resources carry no annotation');
   assert.deepEqual(cache.partials(), ['transactions']);
   assert.equal(calls, 4, 'bounded: maxRetries + 1 attempts, then degrade');
+});
+
+test('createReadCache surfaces page-1 rows through the cache as a labelled partial when a later page exhausts', async () => {
+  // The path that matters for "no silently-truncated data": page 1 succeeds, page
+  // 2 exhausts retries. The already-collected rows must reach the cache with
+  // partial:true — not be lost and not masquerade as a complete pull. An always-
+  // throw-from-call-1 test (above) can never exercise this, since partialItems
+  // would be [] by construction.
+  const { sleep } = recordingSleep();
+  let calls = 0;
+  const call = async (_resource, params) => {
+    calls += 1;
+    if ((params.offset ?? 0) === 0) return { transactions: [{ id: 1 }, { id: 2 }], has_more: true, next_offset: 50 };
+    throw httpRateLimit(); // page 2 never clears the limit
+  };
+  const cache = createReadCache(call, { sleep, maxRetries: 2 });
+
+  const r = await cache.get('transactions');
+  assert.equal(r.partial, true, 'flagged partial, not a silent complete pull');
+  assert.deepEqual(r.items, [{ id: 1 }, { id: 2 }], 'page-1 rows survive into the cache, not lost');
+  assert.equal(r.pages, 1, 'one page landed before the limit bit');
+  assert.equal(cache.annotationFor('transactions'), ANNOTATION);
+  assert.deepEqual(cache.partials(), ['transactions']);
+  assert.equal(calls, 4, '1 success + (maxRetries + 1) exhausted attempts on page 2');
+
+  const again = await cache.get('transactions'); // served from cache, no re-fetch
+  assert.equal(again, r);
+  assert.equal(calls, 4, 'a cached partial read adds no calls');
 });
 
 test('createReadCache lets a non-rate-limit error surface (no false degrade)', async () => {
@@ -271,9 +332,13 @@ test('the read path writes nothing to stdout (degrade + paginate paths)', () => 
       const degr = m.createReadCache(async () => { const e = new Error('429'); e.status = 429; throw e; },
         { sleep: () => Promise.resolve(), maxRetries: 2 });
       await degr.get('transactions');
-      // paginate path: two pages walked to completion
-      const store = { __first__: { items: [1], next: 'c1' }, c1: { items: [2] } };
-      const ok = m.createReadCache(async (_r, p) => store[p.cursor ?? '__first__']);
+      // paginate path: two pages of the real bundle shape walked to completion
+      const ok = m.createReadCache(async (_r, p) => {
+        const offset = p.offset ?? 0;
+        return offset === 0
+          ? { categories: [1], has_more: true, next_offset: 50 }
+          : { categories: [2], has_more: false };
+      });
       await ok.get('categories');
       process.stderr.write('ok');
     });
