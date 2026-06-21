@@ -96,6 +96,15 @@ if ! ( cd "$TMP" && npm pack --json "$SPEC" ) > "$TMP/pack.json" 2> "$TMP/npm.er
   die "npm pack failed for $SPEC (does that version exist on the registry?)"
 fi
 
+# npm pack exited 0, but a future npm (or a wrapper) could still emit non-JSON
+# noise on stdout. Validate the shape up front so a parse failure surfaces this
+# actionable message plus the captured output, not a raw jq error mid-pipeline.
+if ! jq -e '.[0].filename' "$TMP/pack.json" >/dev/null 2>&1; then
+  log "--- npm stdout ---"; cat "$TMP/pack.json" >&2 || true
+  log "--- npm stderr ---"; cat "$TMP/npm.err" >&2 || true
+  die "npm pack did not return the expected JSON for $SPEC (npm output above)"
+fi
+
 TARBALL_FILE="$(jq -r '.[0].filename' "$TMP/pack.json")"
 TARBALL_INTEGRITY="$(jq -r '.[0].integrity // ""' "$TMP/pack.json")"
 TARBALL="$TMP/$TARBALL_FILE"
@@ -106,7 +115,11 @@ TARBALL_SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
 # --- Extract + locate the bundle --------------------------------------------
 EXTRACT="$TMP/extract"
 mkdir -p "$EXTRACT"
-tar -xzf "$TARBALL" -C "$EXTRACT"
+# --no-same-owner: never honor uid/gid recorded in a registry tarball (defense
+# if this is ever run as root). Modern bsdtar/GNU tar already strip a leading
+# '/' and refuse '..' components, and the operator reviews the bundle diff
+# before committing — so this is belt-and-suspenders on the supply-chain edge.
+tar -xzf "$TARBALL" -C "$EXTRACT" --no-same-owner
 SRC_BUNDLE="$EXTRACT/$BUNDLE_SRC_PATH"
 [ -f "$SRC_BUNDLE" ] \
   || die "expected bundle at '$BUNDLE_SRC_PATH' inside the tarball, but it is missing — upstream layout may have changed"
