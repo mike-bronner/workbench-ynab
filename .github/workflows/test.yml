@@ -1,0 +1,36 @@
+name: test
+
+# Run the full test suite on every push and pull request (issue #11 review
+# follow-up). `scripts/test.sh` is the single entrypoint (issue #16): it
+# auto-discovers every tests/**/*.test.sh (bash suite) and tests/**/*.test.mjs
+# (Node suite, built-in node:test). Before this workflow those ran only locally,
+# so neither the bash unit tests nor the Node suite gated a PR — only
+# secret-scan.yml did. This closes that gap.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # System `node` only — deliberately NO `npm install`/cache, so no
+      # node_modules lands on the resolution path and the offline-boot proof
+      # (issue #14) stays faithful: it asserts the vendored bundle is
+      # self-contained with NONE present.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      # The one true entrypoint. The bash suite needs bash + jq + shasum and the
+      # Node suite needs node — all present on ubuntu-latest. Exits non-zero if
+      # any test fails, failing the build.
+      - name: Run the test suite
+        run: bash scripts/test.sh
