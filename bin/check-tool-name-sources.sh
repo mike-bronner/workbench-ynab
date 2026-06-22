@@ -15,6 +15,17 @@
 #                                     subset of the SSoT read-tools list the
 #                                     planner stub needs and is a deliberate,
 #                                     documented swap consumer, not scatter.
+#   - assets/write-safety-guardrail.js        the money-gate denylist — by its
+#   - assets/test/write-safety-guardrail.test.js  security nature the guardrail
+#   - skills/write-safety-guardrail.md            must enumerate the exact write
+#                                     verbs it gates (the .js classifier, the
+#                                     test that pins the classification, and the
+#                                     human-readable skill doc). It cannot indirect
+#                                     a security denylist through markdown parsing,
+#                                     and a namespace swap MUST force a review of
+#                                     this gate regardless — so, like the
+#                                     orchestrator frontmatter, it is a deliberate,
+#                                     documented swap consumer, not scatter.
 #
 # Every OTHER surface — any skill, agent, command, hook, bin script, asset,
 # doc, README, or JSON config — is scanned. If a concrete name is hard-coded
@@ -39,9 +50,12 @@ PATTERN='mcp__plugin_workbench-ynab_ynab__ynab_[a-z_]+'
 # entry is a place a swap must touch, so each one is a deliberate, documented
 # exception — not a place to scatter new names. Paths are repo-relative.
 ALLOWLIST=(
-  "skills/protocol/ynab-tools.md"   # the machine-referenced SSoT
-  "docs/mcp-capability-map.md"      # the human-readable contract
-  "agents/ynab-orchestrator.md"     # agent `tools:` frontmatter (mechanical)
+  "skills/protocol/ynab-tools.md"                # the machine-referenced SSoT
+  "docs/mcp-capability-map.md"                   # the human-readable contract
+  "agents/ynab-orchestrator.md"                  # agent `tools:` frontmatter (mechanical)
+  "assets/write-safety-guardrail.js"             # money-gate denylist (must name write verbs)
+  "assets/test/write-safety-guardrail.test.js"   # pins the denylist classification
+  "skills/write-safety-guardrail.md"             # human-readable gate contract
 )
 
 # Scan the whole tree — skills, agents, commands, hooks, bin, assets, docs,
