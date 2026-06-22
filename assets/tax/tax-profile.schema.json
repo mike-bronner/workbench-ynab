@@ -8,6 +8,11 @@
   "required": ["schemaVersion", "filingStatus", "taxYear"],
   "additionalProperties": false,
   "properties": {
+    "$readme": {
+      "description": "Optional human-facing onboarding note carried by the bundled example so a user who copies it sees, in the file itself, where the live instance belongs, that it is never committed, and how to populate it. Declared here so an instance carrying it still satisfies additionalProperties:false; it is a $-prefixed annotation, so the profile loader (M3-3) strips it pre-merge — it never reaches the resolved profile or any tax calculation. Free-form lines of text.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "schemaVersion": {
       "description": "Version of this tax-profile schema the instance targets, so future migrations can detect and upgrade older instances. Accepts a string (e.g. \"1\" or \"1.0.0\") or an integer.",
       "oneOf": [

@@ -245,6 +245,31 @@ test('validateAgainstSchema accepts the bundled example instance', () => {
   assert.equal(valid, true, `example should validate; got: ${JSON.stringify(errors)}`);
 });
 
+// --- M3-5: the example carries an onboarding $readme that the loader strips ---
+// The example doubles as the populate-from template, so it must explain (in the
+// file itself) where the live instance belongs and that it is never committed —
+// AC #8. The note is a $-prefixed annotation: declared in the schema so the
+// example still satisfies additionalProperties:false, then stripped pre-merge so
+// it never reaches the resolved profile or any tax math.
+test('(M3-5) the example carries a non-empty $readme onboarding note', () => {
+  const example = JSON.parse(readFileSync(join(ROOT, 'assets', 'tax', 'tax-profile.example.json'), 'utf8'));
+  assert.ok(Array.isArray(example.$readme) && example.$readme.length > 0, 'example must carry a $readme note');
+  const note = example.$readme.join('\n');
+  assert.match(note, /\.claude\/plugins\/data\/workbench-ynab-claude-workbench/, 'note must say where the live instance belongs');
+  assert.match(note, /never|outside|public/i, 'note must say it is not committed');
+  assert.match(note, /cp /, 'note must show how to copy/populate it');
+});
+
+test('(M3-5) the example $readme is stripped from the resolved profile', () => {
+  const example = readFileSync(join(ROOT, 'assets', 'tax', 'tax-profile.example.json'), 'utf8');
+  const p = join(TMP, 'example-instance.json');
+  writeFileSync(p, example);
+  const r = loadProfile({ profilePath: p });
+  assert.equal(r.ok, true, `example must load cleanly; got: ${JSON.stringify(r.error)}`);
+  assert.equal(Object.prototype.hasOwnProperty.call(r.profile, '$readme'), false, '$readme leaked into the resolved profile');
+  assert.ok(Object.keys(r.provenance).every((k) => !k.includes('$readme')), 'no $readme provenance leaf');
+});
+
 test('validateAgainstSchema rejects an unknown top-level property (additionalProperties:false)', () => {
   const { valid, errors } = validateAgainstSchema({ ...validBase(), bogusField: 1 }, SCHEMA);
   assert.equal(valid, false);

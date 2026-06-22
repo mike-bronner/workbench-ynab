@@ -29,6 +29,12 @@ tests/integration/offline-boot-failure.txt
 .env*
 *.token
 config.local.json
+# The live tax profile is secret-adjacent personal financial data: it lives in
+# the data dir (~/.claude/plugins/data/workbench-ynab-claude-workbench/) outside
+# this PUBLIC repo, never in git. This blocks any tax-profile.json created inside
+# the repo tree by mistake; the anonymized tax-profile.example.json keeps a
+# distinct name and stays tracked.
+tax-profile.json
 # Secret-adjacent shapes a YNAB-handling repo must never accept (see SECURITY.md):
 # private keys, Keychain dumps, and any token-named file.
 *.pem
