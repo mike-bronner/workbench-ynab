@@ -187,15 +187,13 @@ Every command is namespaced under `/workbench-ynab:`. The plugin is mid-build; t
 | `/workbench-ynab:setup` | First-run setup: seed the YNAB token into the Keychain, write config, pre-approve the read-tool glob, offer legacy migration. | Sprint 1 |
 | `/workbench-ynab:ynab-review` | Run a tax-aware review for a tier (weekly / monthly / quarterly-tax / annual); produces the report and the proposed change-set. | Sprint 3 |
 | `/workbench-ynab:ynab-apply` | Review a proposed change-set and, on explicit approval, apply the ledger-only writes (dry-run by default). | Sprint 4 |
-| `/workbench-ynab:migrate` | Retire the legacy hand-run prototype and its scheduled task. | Sprint 5 |
+| `/workbench-ynab:ynab-migrate` | Retire the legacy hand-run prototype: the old Desktop connector, its token, and the prototype scheduled tasks/directories. | Sprint 5 |
 
 ## Versioning
 
 **The plugin and its vendored YNAB MCP bundle are pinned together in git.** The bundle is [`@dizzlkheinz/ynab-mcpb`](https://www.npmjs.com/package/@dizzlkheinz/ynab-mcpb), **version-frozen at `0.26.10`** and vendored as a self-contained `vendor/ynab-mcp/index.cjs` — no `npx`-on-demand, no floating dependency. The pinned version, tarball hash, and provenance are recorded in [`vendor/ynab-mcp/vendored.json`](vendor/ynab-mcp/vendored.json); the bundle is only ever updated via the re-vendor script, never by hand.
 
 Pinning both versions in git means a given `workbench-ynab` commit always runs against the exact MCP bundle it was tested with — boot is offline, frozen, and reproducible.
-
-## Versioning
 
 Two version numbers live in this repo. They track different things, are deliberately **independent**, and are **never co-bumped**.
 
