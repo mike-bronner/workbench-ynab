@@ -152,6 +152,12 @@ matches the npm registry's published provenance:
   signature is a hard stop; a missing one is recorded as a residual supply-chain
   risk in the marker, never skipped silently.
 
+Both checks run only when new bytes are adopted. Re-running `bin/revendor.sh`
+against an already-vendored, unchanged version is a no-op that returns *before*
+the signature gate, so a re-pin does **not** re-verify the registry signature — a
+signature revoked upstream after the original vendor is not re-checked on a re-pin.
+A re-pin is not a re-attestation.
+
 The outcome is recorded in `vendor/ynab-mcp/vendored.json`
 (`tarball_integrity`, `tarball_shasum`, `signature_status`), making the full chain
 auditable from one file: **registry hash → downloaded tarball → extracted CJS →

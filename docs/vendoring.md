@@ -70,7 +70,11 @@ What it does, end to end:
 
 The script is **idempotent**: re-running with a version whose bundle bytes are
 already vendored prints a `No change` line and exits `0` without modifying any
-file.
+file. **Carve-out:** the no-change path returns *before* the signature gate, so
+re-pinning an unchanged version does **not** re-verify the registry signature — a
+signature revoked upstream after the original vendor is not re-checked on a re-pin.
+Force a fresh attestation by re-vendoring changed bytes (a new version or
+republished bundle).
 
 > **The script never commits.** It updates the working tree only. You review the
 > diff and commit manually — the same commit-approval gate that governs every

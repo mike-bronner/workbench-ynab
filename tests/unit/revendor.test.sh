@@ -97,6 +97,9 @@ case "${1:-}" in
   view)
     # `npm view <spec> --json dist.integrity dist.shasum dist.tarball`. Default to
     # the real hashes recorded by pack; MOCK_REG_* override to force a mismatch.
+    # Production depends on --json here (bin/revendor.sh:132); drop it and real npm
+    # emits non-JSON the script's jq chokes on — fail loudly if the contract regresses.
+    [[ " $* " == *" --json "* ]] || { echo "mock npm: 'view' must pass --json, got: $*" >&2; exit 1; }
     integ="${MOCK_REG_INTEGRITY:-$(cat "$STATE/integrity" 2>/dev/null || true)}"
     sha="${MOCK_REG_SHASUM:-$(cat "$STATE/shasum" 2>/dev/null || true)}"
     printf '{"dist.integrity":"%s","dist.shasum":"%s","dist.tarball":"https://registry.npmjs.org/mock/-/mock.tgz"}\n' "$integ" "$sha"
@@ -108,6 +111,9 @@ case "${1:-}" in
     ;;
   audit)
     [ "${2:-}" = "signatures" ] || { echo "mock npm: only 'audit signatures' supported, got: $*" >&2; exit 1; }
+    # Production depends on --json here too (bin/revendor.sh:191); drop it and real
+    # npm emits non-JSON — fail loudly if the contract regresses.
+    [[ " $* " == *" --json "* ]] || { echo "mock npm: 'audit signatures' must pass --json, got: $*" >&2; exit 1; }
     name="${MOCK_PKG_NAME:?mock npm audit needs MOCK_PKG_NAME}"
     case "${MOCK_SIG_STATUS:-verified}" in
       verified) printf '{"invalid":[],"missing":[]}\n' ;;
@@ -198,6 +204,13 @@ test_changed_bundle_updates_marker_and_bundle() {
   # (b2) provenance fields: registry SHA-1 (40-char) + verified signature outcome
   tsha1="$(jq -r '.tarball_shasum' "$marker")"
   assert_eq 40 "${#tsha1}" "marker tarball_shasum must be a 40-char SHA-1"
+  # AC#4's chain-linking field: tarball_integrity must be the EXACT registry SRI —
+  # the one value that links our copy to the registry-published artifact. Compare
+  # to the real SRI the pack mock recorded (which view echoes back as
+  # dist.integrity), not a length/non-empty check, so a regression blanking the
+  # field (--arg tarball_integrity "") can't slip through green.
+  assert_eq "$(cat "$mockbin/state/integrity")" "$(jq -r '.tarball_integrity' "$marker")" \
+    "marker tarball_integrity must equal the registry dist.integrity SRI (AC#4)"
   assert_eq "verified" "$(jq -r '.signature_status' "$marker")" "marker signature_status must be 'verified'"
   assert_eq "npm audit signatures" "$(jq -r '.signature_method' "$marker")" "marker signature_method must be recorded"
   assert_eq "null" "$(jq -r '.signature_note // "null"' "$marker")" "verified status must carry NO residual-risk note"
@@ -347,6 +360,7 @@ test_integrity_shasum_mismatch_aborts_before_extraction() {
 
   assert_eq 1 "$rc" "a shasum that disagrees with the registry must hard-error"
   assert_contains "$out" "SHA-1 shasum mismatch" "error must name the shasum mismatch"
+  assert_contains "$out" "refusing to extract" "error must state extraction was refused (before-extraction semantic, proven by message)"
   assert_eq "$marker_before" "$(hash_of "$marker")" "marker must be untouched on a shasum abort"
   assert_eq "$bundle_before" "$(hash_of "$bundle")" "bundle must be untouched on a shasum abort"
   rm -rf "$sb"

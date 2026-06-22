@@ -165,6 +165,11 @@ SRC_BUNDLE="$EXTRACT/$BUNDLE_SRC_PATH"
 NEW_BUNDLE_SHA="$(shasum -a 256 "$SRC_BUNDLE" | awk '{print $1}')"
 
 # --- Idempotency: same version AND same bundle bytes → nothing to do --------
+# Carve-out: this early return is BEFORE the signature gate below, so a no-change
+# re-pin does NOT re-verify the registry signature — a signature revoked upstream
+# after the original vendor is not re-checked here. Re-vendoring changed bytes (a
+# new version or republished bytes) always runs the full gate. Documented in
+# docs/vendoring.md and SECURITY.md so the behavior is auditable.
 if [ "$VERSION" = "$PINNED_VERSION" ] && [ "$NEW_BUNDLE_SHA" = "$OLD_BUNDLE_SHA" ]; then
   printf 'No change: %s is already vendored (bundle %s).\n' "$SPEC" "$NEW_BUNDLE_SHA"
   printf 'Nothing was modified.\n'
