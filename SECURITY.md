@@ -137,6 +137,27 @@ drifted or hand-edited bundle fails the build automatically — the integrity ga
 is enforced, not merely available. The bundle is updated **only** via the
 re-vendor tooling — never by hand-editing `vendor/ynab-mcp/index.cjs`.
 
+### Upstream provenance
+
+`verify-bundle.sh` proves the committed copy hasn't **drifted**; it does not prove
+our copy descends from a **trustworthy** upstream. That link is established at
+vendoring time by `bin/revendor.sh`, which refuses to extract a tarball until it
+matches the npm registry's published provenance:
+
+- **Integrity** — the downloaded tarball's computed SHA-512 SRI must match the
+  registry's `dist.integrity` **and** its SHA-1 must match `dist.shasum`, checked
+  *before extraction*. A mismatch aborts the re-vendor.
+- **Signature** — the registry's cryptographic signature on the version is
+  verified with npm's own published keys (`npm audit signatures`). An invalid
+  signature is a hard stop; a missing one is recorded as a residual supply-chain
+  risk in the marker, never skipped silently.
+
+The outcome is recorded in `vendor/ynab-mcp/vendored.json`
+(`tarball_integrity`, `tarball_shasum`, `signature_status`), making the full chain
+auditable from one file: **registry hash → downloaded tarball → extracted CJS →
+committed copy**. The exact commands and pass/fail criteria live in
+[`docs/vendoring.md`](docs/vendoring.md#verifying-upstream-provenance).
+
 ## Reporting a vulnerability
 
 **Do not open a public GitHub issue for a security vulnerability.** Instead, use
