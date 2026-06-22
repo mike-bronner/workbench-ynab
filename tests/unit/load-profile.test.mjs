@@ -256,7 +256,11 @@ test('(M3-5) the example carries a non-empty $readme onboarding note', () => {
   assert.ok(Array.isArray(example.$readme) && example.$readme.length > 0, 'example must carry a $readme note');
   const note = example.$readme.join('\n');
   assert.match(note, /\.claude\/plugins\/data\/workbench-ynab-claude-workbench/, 'note must say where the live instance belongs');
-  assert.match(note, /never|outside|public/i, 'note must say it is not committed');
+  // Pin the never-committed claim distinctly. The location assertion above already
+  // owns "where it belongs", so this must match the commit-status clause itself —
+  // not a placement word like "outside" that survives even if the "never committed
+  // (this repo is PUBLIC)" sentence were deleted (AC #8(b)).
+  assert.match(note, /never committed|not committed|never in git/i, 'note must say it is never committed');
   assert.match(note, /cp /, 'note must show how to copy/populate it');
 });
 
@@ -267,7 +271,7 @@ test('(M3-5) the example $readme is stripped from the resolved profile', () => {
   const r = loadProfile({ profilePath: p });
   assert.equal(r.ok, true, `example must load cleanly; got: ${JSON.stringify(r.error)}`);
   assert.equal(Object.prototype.hasOwnProperty.call(r.profile, '$readme'), false, '$readme leaked into the resolved profile');
-  assert.ok(Object.keys(r.provenance).every((k) => !k.includes('$readme')), 'no $readme provenance leaf');
+  assert.ok(Object.keys(r.provenance).every((k) => !k.includes('$')), 'no $-annotation provenance leaf');
 });
 
 test('validateAgainstSchema rejects an unknown top-level property (additionalProperties:false)', () => {
@@ -422,7 +426,7 @@ test('(blocker) $-prefixed keys in overrides never leak into the frozen profile'
   writeFileSync(
     p,
     '{"schemaVersion":"1","filingStatus":"single","taxYear":2025,' +
-      '"overrides":{"$pwn":"leak","customBucket":{"$note":"x","real":1}}}',
+      '"overrides":{"$pwn":"leak","customBucket":{"$note":"x","$readme":["y"],"real":1}}}',
   );
   const r = loadProfile({ profilePath: p });
   assert.equal(r.ok, true);
