@@ -183,13 +183,20 @@ EXISTING='{}'
 [ -f "$CONFIG_FILE" ] && EXISTING="$(cat "$CONFIG_FILE")"
 printf '%s\n' "$EXISTING" \
   | jq --argjson new "$NEW_JSON" '. * $new' \
-  > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+  > "$CONFIG_FILE.tmp"
 
-# Sanity: the token must NEVER be in config.json.
-if jq -e 'getpath(paths) | strings | test("^[0-9a-f]{64}$")' "$CONFIG_FILE" >/dev/null 2>&1; then
+# Sanity: the token must NEVER be in config.json. Scan the STAGED file *before*
+# publishing it, so a token-shaped value never reaches the real path. Aggregate
+# every string test with `any` — `jq -e` keys its exit code off only the LAST
+# streamed value, so a bare `getpath(paths) | strings | test(…)` silently misses
+# a token anywhere but the final string position. On a hit, drop the staged file
+# and never `mv` it into place.
+if jq -e '[getpath(paths) | strings | test("^[0-9a-f]{64}$")] | any' "$CONFIG_FILE.tmp" >/dev/null 2>&1; then
+  rm -f "$CONFIG_FILE.tmp"
   echo "❌ Refusing to keep a token-shaped value in config.json — the token belongs in the Keychain only." >&2
   exit 1
 fi
+mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 echo "✅ Wrote $CONFIG_FILE"
 jq . "$CONFIG_FILE"
 ```
