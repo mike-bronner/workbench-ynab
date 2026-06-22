@@ -171,6 +171,30 @@
           "description": "Path to the frozen HTML report template. When null, the plugin's bundled template under assets/ is used. The bundled template is frozen in Sprint 3 (issue #42)."
         }
       }
+    },
+    "schedules": {
+      "type": "object",
+      "description": "Scheduled-task cadences for the plugin's background tasks. Read by the setup step (or a /workbench-ynab:setup re-run) to deploy and sync tasks via the scheduled-tasks MCP — cadence is config-driven, never hardcoded in a skill or task deployment. Omit the whole block to accept the defaults.",
+      "additionalProperties": false,
+      "properties": {
+        "monitor": {
+          "type": "object",
+          "description": "Proactive between-run monitoring poll (M6). Runs more frequently than the weekly review and is a distinct scheduled task (ynab-monitor).",
+          "additionalProperties": false,
+          "properties": {
+            "cron": {
+              "type": "string",
+              "default": "0 8 * * *",
+              "description": "Cron expression for the monitoring poll. Defaults to daily at 08:00 (\"0 8 * * *\") when the block or field is absent."
+            },
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether the ynab-monitor scheduled task is deployed. Defaults to true. Set false and re-run setup to remove or disable the task; the weekly-review (ynab-review) task is unaffected."
+            }
+          }
+        }
+      }
     }
   }
 }

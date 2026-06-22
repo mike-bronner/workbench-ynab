@@ -188,6 +188,7 @@ Every command is namespaced under `/workbench-ynab:`. The plugin is mid-build; t
 | `/workbench-ynab:ynab-review` | Run a tax-aware review for a tier (weekly / monthly / quarterly-tax / annual); produces the report and the proposed change-set. | Sprint 3 |
 | `/workbench-ynab:ynab-apply` | Review a proposed change-set and, on explicit approval, apply the ledger-only writes (dry-run by default). | Sprint 4 |
 | `/workbench-ynab:migrate` | Retire the legacy hand-run prototype and its scheduled task. | Sprint 5 |
+| `/workbench-ynab:ynab-monitor` | Run one proactive between-run monitoring pass: advance the monitor state store from fresh YNAB data, exit silently when nothing changed. Scaffold only — no alerts/detectors yet. | Sprint 6 (v-Next) |
 
 ## Versioning
 

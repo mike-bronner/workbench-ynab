@@ -42,5 +42,11 @@
   "report": {
     "output_dir": "~/Documents/YNAB Reports",
     "template_path": null
+  },
+  "schedules": {
+    "monitor": {
+      "cron": "0 8 * * *",
+      "enabled": true
+    }
   }
 }
