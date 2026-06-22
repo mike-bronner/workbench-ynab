@@ -79,4 +79,47 @@ test_no_inlined_concrete_tool_name() {
   fi
 }
 
+# CRITICAL invariant (issue #15, Step 5): pre-approval covers READ tools only —
+# the write family-wildcard and every concrete write name are excluded. This is
+# the human-facing half: the command must say reads-only and note that writes
+# stay gated until Sprint 4. Deleting the Step 5 block makes this fail (the
+# phrases vanish), closing the "delete it and the suite still passes" gap.
+test_step5_documents_write_exclusion() {
+  local body; body="$(cat "$CMD")"
+  assert_contains "$body" "read tools only" "Step 5 scopes pre-approval to reads"
+  assert_contains "$body" "Sprint 4" "Step 5 notes write tools stay gated until Sprint 4"
+}
+
+# CRITICAL invariant (issue #15, Step 5): the enforcement half. No write tool may
+# ever be ADDED to permissions.allow — neither a concrete write name nor the
+# write family-wildcard may appear on an allow-mutating line. The wildcard may be
+# MENTIONED elsewhere to forbid it; it must never be approved. The approval loop
+# must source the names it adds from the SSoT read-tool list (READ_TOOLS).
+test_step5_never_approves_a_write_tool() {
+  local allow_lines; allow_lines="$(grep -F 'permissions.allow' "$CMD" || true)"
+  if printf '%s\n' "$allow_lines" | grep -qE 'mcp__plugin_workbench-ynab_ynab__ynab_[a-z_]+'; then
+    fail "a permissions.allow line hard-codes a concrete tool name — reads come from the SSoT, writes are never pre-approved"
+  fi
+  if printf '%s\n' "$allow_lines" | grep -qF 'mcp__plugin_workbench-ynab_ynab__ynab_*'; then
+    fail "the write family-wildcard appears on a permissions.allow line — it would sweep in ledger-mutating writes"
+  fi
+  assert_contains "$(cat "$CMD")" "READ_TOOLS" \
+    "Step 5 approval loop sources the names it adds from the SSoT read-tool list"
+}
+
+# Pin the fixed Step 4 token-leak guard so its correct form can't silently
+# regress (the two defects Holmes caught on PR #127):
+#   1. the scan AGGREGATES every string test with `| any` — a bare per-string
+#      `test(…)` makes `jq -e` reflect only the LAST value, silently missing a
+#      token in any non-final position;
+#   2. it scans the STAGED `.tmp` and drops it (`rm -f`) on a hit, so a
+#      token-bearing config is never `mv`'d into the published path.
+test_step4_token_guard_is_aggregate_and_pre_publish() {
+  local body; body="$(cat "$CMD")"
+  assert_contains "$body" 'strings | test("^[0-9a-f]{64}$")] | any' \
+    "Step 4 guard aggregates the per-string tests with | any (the ] proves the array wrap)"
+  assert_contains "$body" 'rm -f "$CONFIG_FILE.tmp"' \
+    "Step 4 guard drops the staged .tmp on a hit, before any mv into place"
+}
+
 run_tests
