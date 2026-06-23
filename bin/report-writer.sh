@@ -131,7 +131,15 @@ while [ "$#" -gt 0 ]; do
         *=*) : ;;
         *)   usage_err "--slot expects <name>=<value>, got: $2" ;;
       esac
-      slot_names+=("${2%%=*}")     # name = before the FIRST '='
+      slot_name="${2%%=*}"         # name = before the FIRST '='
+      # Validate the name at PARSE time (allowed: lowercase letters, digits,
+      # hyphen) so a glob metachar (e.g. kpi-*) can never reach the literal
+      # ${html//"$needle"/…} substitution below — safety no longer depends on
+      # the missing/unknown check ordering.
+      case "$slot_name" in
+        ""|*[!a-z0-9-]*) usage_err "invalid --slot name '$slot_name' (allowed: lowercase letters, digits, hyphen)" ;;
+      esac
+      slot_names+=("$slot_name")
       slot_values+=("${2#*=}")     # value = everything after it (HTML may contain '=')
       shift 2
       ;;
@@ -168,7 +176,15 @@ out_dir="$cli_output_dir"
 [ -z "$out_dir" ] && out_dir="$(_cfg '.report.output_dir')"
 [ -z "$out_dir" ] && out_dir="$DEFAULT_OUTPUT_DIR"
 out_dir="$(expand_path "$out_dir")"
-out_dir="${out_dir%/}"          # drop one trailing slash so the join never doubles it
+# A path that expands to empty (e.g. .report.output_dir referencing an unset
+# variable) would otherwise make out_path "/YNAB-…html" and write to the
+# filesystem root — refuse it, the symmetric guard to the template's [ -f ] check.
+[ -n "$out_dir" ] || usage_err "output dir resolved to empty after expansion — check .report.output_dir"
+# Drop ALL trailing slashes (keeping a bare root "/") so the filename join never
+# doubles them, even for a multi-slash input like "/path//".
+while [ "$out_dir" != "/" ] && [ "${out_dir%/}" != "$out_dir" ]; do
+  out_dir="${out_dir%/}"
+done
 
 # --- build the output path: YNAB-{Tier}-Review-YYYY-MM-DD.html --------------
 out_path="${out_dir}/YNAB-${tier}-Review-${date}.html"
@@ -220,15 +236,23 @@ for (( i = 0; i < ${#slot_names[@]}; i++ )); do
   [ "$found" -eq 0 ] && unknown+=("$n")
 done
 
-if [ "${#missing[@]}" -gt 0 ]; then
-  err "refusing to write a partial report — these required slots are missing or empty:"
-  for (( i = 0; i < ${#missing[@]}; i++ )); do err "  • ${missing[$i]}"; done
-  err "supply each via --slot <name>=<html>, or --slot <name>='no findings' to leave it intentionally empty."
-  exit 1
-fi
-if [ "${#unknown[@]}" -gt 0 ]; then
-  err "unknown slot name(s) not declared by the template:"
-  for (( i = 0; i < ${#unknown[@]}; i++ )); do err "  • ${unknown[$i]}"; done
+# Report missing AND unknown together: a typo'd --slot name shows up as BOTH a
+# now-missing real slot and an unknown name, so surfacing only "missing" would
+# hide the typo. Missing slots are the harder failure (the report would be
+# incomplete) and set the exit code; unknown names are reported as the likely cause.
+if [ "${#missing[@]}" -gt 0 ] || [ "${#unknown[@]}" -gt 0 ]; then
+  if [ "${#missing[@]}" -gt 0 ]; then
+    err "refusing to write a partial report — these required slots are missing or empty:"
+    for (( i = 0; i < ${#missing[@]}; i++ )); do err "  • ${missing[$i]}"; done
+  fi
+  if [ "${#unknown[@]}" -gt 0 ]; then
+    err "unknown slot name(s) not declared by the template (typo of a required slot?):"
+    for (( i = 0; i < ${#unknown[@]}; i++ )); do err "  • ${unknown[$i]}"; done
+  fi
+  if [ "${#missing[@]}" -gt 0 ]; then
+    err "supply each missing slot via --slot <name>=<html>, or --slot <name>='no findings' to leave it intentionally empty."
+    exit 1
+  fi
   exit 2
 fi
 
@@ -250,6 +274,10 @@ html="${html//\{\{report_date\}\}/$date}"
 html="${html//\{\{output_path\}\}/$out_path}"
 
 # --- write + emit the path --------------------------------------------------
-mkdir -p "$out_dir"
-printf '%s\n' "$html" > "$out_path"
+# Gate BOTH writes: a helper whose contract is "no partial/empty reports" must
+# never print a success path for a file it failed to create. Without `set -e`,
+# an unchecked mkdir/redirect failure would still fall through to the final
+# printf and report success (exit 0 + path) for a file that does not exist.
+mkdir -p "$out_dir" || { err "could not create output directory: $out_dir"; exit 1; }
+printf '%s\n' "$html" > "$out_path" || { err "could not write report: $out_path"; exit 1; }
 printf '%s\n' "$out_path"

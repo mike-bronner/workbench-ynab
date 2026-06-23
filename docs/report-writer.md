@@ -59,15 +59,20 @@ report-writer.sh \
 
 - **`--slot name=value`** is split on the **first** `=`, so a fragment value may
   itself contain `=` (HTML attributes are fine). One `--slot` per block slot in
-  [`assets/report/SLOTS.md`](../assets/report/SLOTS.md).
+  [`assets/report/SLOTS.md`](../assets/report/SLOTS.md). The **name** is validated
+  at parse time — only lowercase letters, digits, and hyphens — so a glob
+  metachar can never reach the literal substitution.
 - The three **scalar slots** are filled by the writer, not the caller: `{{tier}}`
   and `{{report_date}}` from the flags, and `{{output_path}}` from the path the
   writer itself decides (never hardcoded in the template).
 - **`~` and `$VAR` / `${VAR}`** in the configured/flag path are expanded (no
-  `eval`; command and arithmetic substitution are never executed). A **trailing
-  slash** on the directory is tolerated.
+  `eval`; command and arithmetic substitution are never executed). Any number of
+  **trailing slashes** on the directory is tolerated. A path that expands to
+  **empty** (e.g. `.report.output_dir` referencing an unset variable) is
+  **refused** — the writer never writes to the filesystem root.
 - The directory is created with **`mkdir -p`** before writing (no error if it
-  already exists).
+  already exists), and both the `mkdir` and the write are checked — a failure
+  exits non-zero and prints **no** success path.
 
 On success the writer prints the **absolute path** of the written file to
 stdout — a single line, directly usable as `report_path="$(report-writer.sh …)"`.
@@ -84,6 +89,9 @@ hardcoded list here.
 If a required slot is **unsupplied or supplied empty** (without the `no findings`
 sentinel), the writer prints the offending slot names to stderr and **exits
 non-zero without writing any file**. A partial report can never reach the user.
+Any **unknown** slot names are reported **alongside** the missing ones, so a
+typo (which shows up as both a missing real slot and an unknown name) is always
+visible rather than masquerading as a plain "missing slot".
 
 ## Exit codes
 
@@ -91,7 +99,7 @@ non-zero without writing any file**. A partial report can never reach the user.
 |---|---|
 | `0` | Report written; the absolute path is on stdout. |
 | `1` | A required slot was missing or empty — **no file written**. |
-| `2` | Usage error: bad flag, bad `--tier`, bad `--date`, an unknown slot name, or a missing template. |
+| `2` | Usage error: bad flag, bad `--tier`, bad `--date`, an unknown or invalid slot name, an output dir that resolves to empty, or a missing template. |
 
 ## Portability
 

@@ -113,6 +113,10 @@ test_empty_value_is_treated_as_missing() {
             --slot 'footer-persona=' 2>&1 )" || rc=$?
   assert_eq "1" "$rc" "empty slot value (no sentinel) is rejected"
   assert_contains "$err" "footer-persona" "error names the empty slot"
+  # "no partial files" must hold for an empty value too — assert nothing written.
+  [ -e "$SANDBOX/empties/YNAB-Weekly-Review-2026-06-22.html" ] \
+    && fail "writer wrote a file despite an empty (un-sentineled) slot"
+  return 0
 }
 
 # `no findings` is the explicit "intentionally empty" sentinel: it satisfies the
@@ -194,6 +198,51 @@ test_real_template_all_slots() {
   case "$body" in *"<!-- SLOT:"*) fail "a real-template SLOT comment was left unfilled" ;; esac
   case "$body" in *"{{tier}}"*|*"{{report_date}}"*|*"{{output_path}}"*) fail "a real-template scalar slot survived" ;; esac
   assert_contains "$body" "Annual YNAB Review" "real-template header tier filled"
+}
+
+# A typo'd required-slot name must surface as an UNKNOWN name, not silently hide
+# behind the real slot's "missing" report — else the caller never sees the typo.
+test_slot_typo_surfaces_unknown_name() {
+  local dir="$SANDBOX/typo" rc=0 err
+  # kpi-dashboard MISSPELLED kpi-dashboad: the real slot is now unfilled, and the
+  # typo'd name is unknown to the template. (Neither name is a substring of the
+  # other, so each assertion below is unambiguous.)
+  err="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" bash "$WRITER" \
+            --template "$FIXTURE_TEMPLATE" --output-dir "$dir" \
+            --tier Weekly --date 2026-06-22 \
+            --slot 'kpi-dashboad=<div>x</div>' \
+            --slot 'section-1-classification=<div>y</div>' \
+            --slot 'footer-persona=Hobbes' 2>&1 )" || rc=$?
+  assert_eq "1" "$rc" "a missing real slot still sets exit 1 even with a typo present"
+  assert_contains "$err" "kpi-dashboad" "error surfaces the unknown (typo'd) slot name"
+  assert_contains "$err" "kpi-dashboard" "error still names the genuinely-missing slot"
+  [ -e "$dir/YNAB-Weekly-Review-2026-06-22.html" ] \
+    && fail "writer wrote a file despite a typo'd slot"
+  return 0
+}
+
+# An invalid --slot name (glob metachar / uppercase) is rejected at PARSE time
+# (exit 2) so it can never reach the literal substitution needle.
+test_invalid_slot_name_rejected_at_parse() {
+  local rc=0 err
+  err="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" bash "$WRITER" \
+            --template "$FIXTURE_TEMPLATE" --output-dir "$SANDBOX/badname" \
+            --tier Weekly --date 2026-06-22 \
+            --slot 'kpi-*=<div>x</div>' 2>&1 )" || rc=$?
+  assert_eq "2" "$rc" "glob-metachar slot name → usage error (exit 2)"
+  assert_contains "$err" "invalid --slot name" "error explains the bad slot name"
+}
+
+# A configured output_dir that expands to empty (e.g. an unset $VAR) is refused
+# rather than silently writing to the filesystem root.
+test_empty_output_dir_is_rejected() {
+  local cfg="$SANDBOX/empty-dir.json" rc=0 err
+  cat > "$cfg" <<'JSON'
+{ "report": { "output_dir": "$YNAB_NOPE_UNSET_VAR" } }
+JSON
+  err="$( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 2>&1 )" || rc=$?
+  assert_eq "2" "$rc" "output dir resolving to empty → usage error (exit 2)"
+  assert_contains "$err" "output dir resolved to empty" "error explains the empty output dir"
 }
 
 run_tests
