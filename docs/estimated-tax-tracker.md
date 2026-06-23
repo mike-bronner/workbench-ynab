@@ -109,6 +109,11 @@ dollar of net. It is a conservative working estimate, not a filed return.
   that quarter — including the Jan-15 rollover that attributes to the prior tax
   year's Q4, which the income windows alone would miss), **deduped by
   `ynab_transaction_id`** so re-running never double-counts.
+- **Payments are bounded to their own tax year.** Each detected payment is tagged
+  with the `tax_year` it belongs to (a Jan 1–15 payment rolls back to the prior
+  year's Q4), and a reconcile run files **only** the payments matching that run's
+  year. So a year's transaction pull spilling across the calendar boundary never
+  contaminates one tax year with the next year's (or prior year's) payments.
 
 ## The `## YTD Tax Summary` export
 

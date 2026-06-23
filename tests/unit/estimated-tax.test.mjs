@@ -202,12 +202,13 @@ test('detectPayments shapes payment records and attributes them by due date', ()
   const got = detectPayments(txns, MATCHERS, DUE_DATES);
   assert.equal(got.length, 3);
   const p1 = got.find((p) => p.ynab_transaction_id === 'p1');
-  assert.deepEqual(p1, { date: '2025-04-15', amount_usd: 300, ynab_transaction_id: 'p1', quarter: 1 });
+  assert.deepEqual(p1, { date: '2025-04-15', amount_usd: 300, ynab_transaction_id: 'p1', quarter: 1, tax_year: 2025 });
   const p2 = got.find((p) => p.ynab_transaction_id === 'p2');
   assert.equal(p2.quarter, 1);
   assert.equal(p2.amount_usd, 250);
   const p4 = got.find((p) => p.ynab_transaction_id === 'p4');
   assert.equal(p4.quarter, 4); // the Jan-15 rollover, not a phantom Q1
+  assert.equal(p4.tax_year, 2025); // a 2026-01-15 payment belongs to the PRIOR tax year
   assert.equal(p4.amount_usd, 400);
 });
 
@@ -268,9 +269,10 @@ test('upsertQuarterEstimate is idempotent: a second run overwrites the estimate 
   const state = emptyTracker();
   const est1 = quarterlyEstimate(computeEstimate({ grossIncome: 40000, deductibleExpenses: 10000, seRate: 0.153, brackets: MFJ_2025 }), null);
   upsertQuarterEstimate(state, { year: 2025, quarter: 1, estimate: est1 });
-  // Record a payment, then re-run the estimate for the same quarter.
+  // Record a payment, then re-run the estimate for the same quarter. The second
+  // upsert's internal recomputeRemaining is what makes remaining_due reflect the
+  // payment below — no separate recompute step is needed.
   state.years['2025']['1'].payments.push({ date: '2025-04-15', amount_usd: 1000, ynab_transaction_id: 'pay-1' });
-  reconcileRemaining(state); // local helper recomputes remaining so the assertion below is meaningful
 
   const est2 = quarterlyEstimate(computeEstimate({ grossIncome: 60000, deductibleExpenses: 10000, seRate: 0.153, brackets: MFJ_2025 }), null);
   upsertQuarterEstimate(state, { year: 2025, quarter: 1, estimate: est2 });
@@ -282,17 +284,6 @@ test('upsertQuarterEstimate is idempotent: a second run overwrites the estimate 
   assert.equal(q1.payments[0].ynab_transaction_id, 'pay-1');
   assert.equal(q1.remaining_due, Math.round((est2.quarterLiability - 1000) * 100) / 100);
 });
-
-// tiny local helper: recompute remaining for every quarter (mirrors the module's
-// internal recompute, exercised indirectly via reconcilePayments elsewhere).
-function reconcileRemaining(state) {
-  for (const y of Object.values(state.years)) {
-    for (const q of Object.values(y)) {
-      const paid = q.payments.reduce((s, p) => s + p.amount_usd, 0);
-      q.remaining_due = Math.max(0, Math.round((q.estimated_liability - paid) * 100) / 100);
-    }
-  }
-}
 
 test('reconcilePayments records detected payments per quarter, dedupes by id, and recomputes remaining_due', () => {
   const state = emptyTracker();
@@ -337,6 +328,60 @@ test('reconcilePayments lands a Jan-15-next-year payment in the prior year\'s Q4
   assert.equal(state.years['2025']['4'].payments.length, 1); // filed in Q4, not a phantom Q1
   assert.equal(state.years['2025']['1'], undefined); // Q1 never touched
   assert.equal(state.years['2025']['4'].remaining_due, Math.round((q4Liability - 1500) * 100) / 100);
+});
+
+test('reconcilePayments never contaminates a tax year with another year\'s payment', () => {
+  // A user runs /ynab-tax for tax year 2026 in late January 2026. Their pull
+  // (since=2026-01-01, no upper bound) includes a 2026-01-13 payment that is
+  // actually their 2025-Q4 estimated tax (due Jan 15 2026). It must NOT be filed
+  // into 2026 — it belongs to 2025-Q4.
+  const detected = detectPayments(
+    [{ id: 'q4-2025', date: '2026-01-13', payee_name: 'EFTPS', amount: -1500000 }],
+    MATCHERS, DUE_DATES,
+  );
+  assert.equal(detected[0].quarter, 4);
+  assert.equal(detected[0].tax_year, 2025); // attributed to the PRIOR tax year
+
+  // The 2026 run skips it entirely — no phantom 2026 entry is even created.
+  const into2026 = emptyTracker();
+  const r2026 = reconcilePayments(into2026, { year: 2026, payments: detected });
+  assert.equal(r2026.added, 0);
+  assert.equal(into2026.years['2026'], undefined); // not contaminated into 2026
+
+  // The 2025 run records it correctly in 2025-Q4.
+  const into2025 = emptyTracker();
+  const r2025 = reconcilePayments(into2025, { year: 2025, payments: detected });
+  assert.equal(r2025.added, 1);
+  assert.equal(into2025.years['2025']['4'].payments.length, 1);
+  assert.equal(into2025.years['2025']['4'].payments[0].ynab_transaction_id, 'q4-2025');
+
+  // Symmetric guard: a genuinely-2026 payment (Apr 15 2026 → 2026 Q1) must not
+  // be pulled into a 2025 run.
+  const nextYear = detectPayments(
+    [{ id: 'q1-2026', date: '2026-04-15', payee_name: 'EFTPS', amount: -500000 }],
+    MATCHERS, DUE_DATES,
+  );
+  assert.equal(nextYear[0].tax_year, 2026);
+  const r2025b = reconcilePayments(emptyTracker(), { year: 2025, payments: nextYear });
+  assert.equal(r2025b.added, 0);
+});
+
+test('remaining_due floors at $0 when payments exceed the quarter estimate', () => {
+  const state = emptyTracker();
+  upsertQuarterEstimate(state, {
+    year: 2025, quarter: 1,
+    estimate: quarterlyEstimate(computeEstimate({ grossIncome: 10000, deductibleExpenses: 0, seRate: 0.153, brackets: MFJ_2025 }), null),
+  });
+  const liability = state.years['2025']['1'].estimated_liability;
+  assert.ok(liability > 0 && liability < 99999); // sanity: the payment below dwarfs it
+  // Reconcile a payment far larger than the quarter's liability.
+  const detected = detectPayments(
+    [{ id: 'over', date: '2025-02-10', payee_name: 'EFTPS', amount: -99999000 }], // $99,999 outflow
+    MATCHERS, DUE_DATES,
+  );
+  reconcilePayments(state, { year: 2025, payments: detected });
+  assert.equal(state.years['2025']['1'].payments.length, 1);
+  assert.equal(state.years['2025']['1'].remaining_due, 0); // clamped to 0, never negative
 });
 
 test('a corrupt tracker file throws rather than silently discarding payment history', () => {

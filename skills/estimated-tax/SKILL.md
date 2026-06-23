@@ -85,9 +85,12 @@ milliunit amount against a profile or tracker number.
    configured category/account) and attributes each to the quarter it pays toward
    by the **due-date schedule** (a payment on or before a quarter's due date
    belongs to that quarter, including the Jan-15 rollover to the prior tax year's
-   Q4 — not the income window). `reconcilePayments(state, { year, payments })`
-   records them, **deduped by `ynab_transaction_id`**, and recomputes
-   `remaining_due`.
+   Q4 — not the income window). Each detected payment also carries its own
+   `tax_year`, so a Jan 1–15 payment is tagged as the **prior** year's Q4.
+   `reconcilePayments(state, { year, payments })` then files **only** the payments
+   whose `tax_year` matches `year`, **deduped by `ynab_transaction_id`**, and
+   recomputes `remaining_due` — so the unbounded `since`-only pull (step 3) never
+   contaminates one tax year with the next year's payments.
 
 6. **Upsert idempotently and save.**
    `upsertQuarterEstimate(state, { year, quarter, estimate })` overwrites that
