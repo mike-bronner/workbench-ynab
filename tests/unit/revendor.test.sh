@@ -21,9 +21,9 @@
 #     - an INVALID registry signature is a hard stop before the bundle is written.
 #   * npm non-JSON stdout — pack exits 0 but emits noise; the script must hard-error
 #     with an actionable message, not a raw jq parse failure.
-#   * Prereq failure — with `npm` absent from $PATH the script must hard-error
-#     (non-zero) and name the missing prerequisite, rather than failing obscurely
-#     half-way through.
+#   * Prereq failure — with a required tool (`npm`, or the provenance gate's
+#     `openssl`) absent from $PATH the script must hard-error (non-zero) and name
+#     the missing prerequisite, rather than failing obscurely half-way through.
 #
 # The mock `npm` covers the four subcommands the script now drives — `pack --json`
 # (packs MOCK_BUNDLE_SRC and records the tarball's REAL hashes so `view` can echo
@@ -100,13 +100,26 @@ case "${1:-}" in
     # Production depends on --json here (bin/revendor.sh:132); drop it and real npm
     # emits non-JSON the script's jq chokes on — fail loudly if the contract regresses.
     [[ " $* " == *" --json "* ]] || { echo "mock npm: 'view' must pass --json, got: $*" >&2; exit 1; }
+    # Production reads all three of these fields (bin/revendor.sh:132,136-138); drop
+    # any one from the real call and the registry cross-check loses a term — fail
+    # loudly so the contract is pinned, not just the --json flag.
+    for f in dist.integrity dist.shasum dist.tarball; do
+      [[ " $* " == *" $f "* ]] || { echo "mock npm: 'view' must request $f, got: $*" >&2; exit 1; }
+    done
     integ="${MOCK_REG_INTEGRITY:-$(cat "$STATE/integrity" 2>/dev/null || true)}"
     sha="${MOCK_REG_SHASUM:-$(cat "$STATE/shasum" 2>/dev/null || true)}"
     printf '{"dist.integrity":"%s","dist.shasum":"%s","dist.tarball":"https://registry.npmjs.org/mock/-/mock.tgz"}\n' "$integ" "$sha"
     ;;
   install)
-    # The script installs into an isolated temp dir purely so `audit signatures`
-    # has a tree to read; the mock need not actually install anything.
+    # The script installs the package-under-audit into an isolated temp dir purely
+    # so `audit signatures` has a tree to read; the mock need not actually install
+    # anything. But --ignore-scripts is the script's single most security-load-bearing
+    # flag: without it, `npm install` of a possibly-compromised package runs its
+    # install hooks with full privileges during the very audit meant to catch
+    # tampering (the isolated $SIGDIR scopes WHERE files land, not WHAT code runs).
+    # Drop it from the real call (bin/revendor.sh:192) and the suite must go red —
+    # so the mock fails loudly if the contract regresses.
+    [[ " $* " == *" --ignore-scripts "* ]] || { echo "mock npm: 'install' must pass --ignore-scripts, got: $*" >&2; exit 1; }
     exit 0
     ;;
   audit)
@@ -210,9 +223,13 @@ test_changed_bundle_updates_marker_and_bundle() {
   assert_eq "$new_sha" "$(jq -r '.bundle_sha256' "$marker")" "marker bundle_sha256 must match the new bytes"
   tsha="$(jq -r '.tarball_sha256' "$marker")"
   assert_eq 64 "${#tsha}" "marker tarball_sha256 must be a 64-char SHA-256"
-  # (b2) provenance fields: registry SHA-1 (40-char) + verified signature outcome
+  # (b2) provenance fields: registry SHA-1 + verified signature outcome. Assert the
+  # EXACT registry dist.shasum the pack mock recorded (view echoes it back), not a
+  # 40-char length check — a wrong-but-40-char SHA-1 would pass a length probe but
+  # fail this. Mirrors the tarball_integrity value assertion below.
   tsha1="$(jq -r '.tarball_shasum' "$marker")"
-  assert_eq 40 "${#tsha1}" "marker tarball_shasum must be a 40-char SHA-1"
+  assert_eq "$(cat "$mockbin/state/shasum")" "$tsha1" \
+    "marker tarball_shasum must equal the registry dist.shasum SHA-1"
   # AC#4's chain-linking field: tarball_integrity must be the EXACT registry SRI —
   # the one value that links our copy to the registry-published artifact. Compare
   # to the real SRI the pack mock recorded (which view echoes back as
@@ -319,6 +336,33 @@ NODE
 
   assert_eq 1 "$rc" "missing npm should exit non-zero"
   assert_contains "$out" "npm" "error must name the missing prerequisite"
+  rm -rf "$sb"
+}
+
+# With openssl missing from $PATH (but every earlier prereq present) the script
+# must hard-error at the openssl require and name it — the provenance gate's
+# SHA-512 SRI can't be computed without it (bin/revendor.sh:71,144). Parallels
+# test_prereq_missing_npm_errors for the prereq the provenance gate (#5) added.
+test_prereq_missing_openssl_errors() {
+  local sb noopenssl out rc t
+  sb="$(make_sandbox)"
+  noopenssl="$sb/noopenssl"
+  mkdir -p "$noopenssl"
+  # Stub every prereq the script checks BEFORE openssl (node, npm, jq, shasum, tar)
+  # so the require chain reaches — and dies at — the openssl check. They are never
+  # executed: the script exits at `require openssl` before using any of them.
+  for t in node npm jq shasum tar; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$noopenssl/$t"
+    chmod +x "$noopenssl/$t"
+  done
+
+  set +e
+  out="$(env PATH="$noopenssl" "$BASH_BIN" "$sb/bin/revendor.sh" 2>&1)"
+  rc=$?
+  set -e
+
+  assert_eq 1 "$rc" "missing openssl should exit non-zero"
+  assert_contains "$out" "openssl" "error must name the missing prerequisite"
   rm -rf "$sb"
 }
 
