@@ -39,7 +39,18 @@ mcp__plugin_workbench-ynab_ynab__ynab_list_transactions
 mcp__plugin_workbench-ynab_ynab__ynab_list_payees
 mcp__plugin_workbench-ynab_ynab__ynab_get_month
 mcp__plugin_workbench-ynab_ynab__ynab_export_transactions
+mcp__plugin_workbench-ynab_ynab__ynab_get_transaction
+mcp__plugin_workbench-ynab_ynab__ynab_compare_transactions
 ```
+
+`ynab_get_transaction` and `ynab_compare_transactions` are reads added for the
+Sprint 4 delete-duplicate write path (M4-8): the apply executor re-reads the
+victim transaction with `ynab_get_transaction` for drift detection before any
+delete, and the dry-run preview may corroborate the duplicate pairing with
+`ynab_compare_transactions`. Both are read-only and were verified as registered
+tool ids in the vendored bundle. They are **not** wired into the read-only
+orchestrator's `tools:` list (that stub carries only the planner's five reads);
+they are invoked from the approval-gated apply path, not the orchestrator.
 
 ## Write tools (ledger-only — gated, approved in Sprint 4)
 
