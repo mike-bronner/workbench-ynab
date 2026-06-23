@@ -15,9 +15,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 
 import {
   scheduleCNet,
@@ -249,6 +249,12 @@ test('loadTracker returns a fresh tracker when absent; saveTracker creates the f
   saveTracker(fresh, { trackerPath });
 
   assert.equal(existsSync(trackerPath), true);
+  // Personal financial data: the file must be owner-only (0600) and live in an
+  // owner-only dir (0700), never world-readable on a shared box. Pin both so a
+  // future refactor that drops the mode bits fails loudly instead of silently
+  // exposing every user's income + payment history.
+  assert.equal(statSync(trackerPath).mode & 0o777, 0o600);
+  assert.equal(statSync(dirname(trackerPath)).mode & 0o777, 0o700);
   const onDisk = JSON.parse(readFileSync(trackerPath, 'utf8'));
   const q1 = onDisk.years['2025']['1'];
   // Required schema shape per the issue AC.
@@ -343,6 +349,17 @@ test('a well-formed-but-wrong-shape tracker file throws instead of overwriting i
   const trackerPath = join(TMP, 'wrong-shape.json');
   writeFileSync(trackerPath, JSON.stringify({ schemaVersion: 1 }), 'utf8'); // valid JSON, no `years`
   assert.throws(() => loadTracker({ trackerPath }), /unexpected shape/);
+});
+
+test('saveTracker unlinks the orphaned temp file when the rename fails', () => {
+  // Point the tracker path AT an existing directory so renameSync(tmp, path)
+  // is forced to throw (a file can't be renamed over a directory). This drives
+  // the cleanup path that removes the half-written .tmp, so a partial copy of
+  // the personal financial data is never left lying around after a failed save.
+  const trackerPath = join(TMP, 'rename-fails-here');
+  mkdirSync(trackerPath, { recursive: true });
+  assert.throws(() => saveTracker(emptyTracker(), { trackerPath }));
+  assert.equal(existsSync(`${trackerPath}.tmp`), false); // orphaned temp removed
 });
 
 test('upsertQuarterEstimate rejects a raw computeEstimate() (no quarterLiability) loudly', () => {
