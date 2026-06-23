@@ -78,8 +78,28 @@ const markClearedOp = (txnIds = ['txn-1', 'txn-2']) => ({
   risk: 'low',
 });
 
-/** live state for a mark_cleared op: transactions at a given cleared status. */
-const liveTxns = (txnIds, status = 'uncleared') => ({ transactions: txnIds.map((id) => ({ id, cleared: status })) });
+// The non-cleared fields a live YNAB transaction carries. A mark_cleared patch must
+// touch ONLY `cleared`, so the field-isolation tests assert every one of these is
+// absent from the dispatched payload — present on the fixture, they make the
+// isolation assertions catch a real spread regression (not pass by construction).
+const EXTRA_TXN_FIELDS = Object.freeze({
+  amount: -42000,
+  date: '2026-06-01',
+  memo: 'bank feed import',
+  payee_id: 'payee-9',
+  category_id: 'cat-7',
+  flag_color: 'red',
+  approved: true,
+});
+
+/**
+ * live state for a mark_cleared op: transactions at a given cleared status, each
+ * carrying the full set of non-cleared fields a real YNAB txn has — so a handler
+ * that spread live fields into the patch would leak them and fail the isolation tests.
+ */
+const liveTxns = (txnIds, status = 'uncleared') => ({
+  transactions: txnIds.map((id) => ({ id, cleared: status, ...EXTRA_TXN_FIELDS })),
+});
 
 // --- sub-action classification ---------------------------------------------
 
@@ -147,8 +167,15 @@ test('(AC3) mark_cleared real apply (batch) sets ONLY the cleared field on each 
   const [toolName, payload] = apply.calls[0];
   assert.equal(toolName, TOOL_MAP.update_transactions);
   // The payload carries ONLY id + cleared per transaction — no other field can leak through.
+  // The live txns carry amount/date/memo/payee_id/… (EXTRA_TXN_FIELDS); a handler that
+  // spread live state would leak them, so these assertions catch that regression.
   assert.deepEqual(payload, { transactions: [{ id: 'txn-1', cleared: 'cleared' }, { id: 'txn-2', cleared: 'cleared' }] });
-  for (const t of payload.transactions) assert.deepEqual(Object.keys(t).sort(), ['cleared', 'id']);
+  for (const t of payload.transactions) {
+    assert.deepEqual(Object.keys(t).sort(), ['cleared', 'id']);
+    for (const leaked of Object.keys(EXTRA_TXN_FIELDS)) {
+      assert.ok(!(leaked in t), `live field "${leaked}" leaked into the mark_cleared patch`);
+    }
+  }
 });
 
 test('(AC3) mark_cleared real apply (single) uses the singular tool and a minimal patch', async () => {
@@ -165,6 +192,10 @@ test('(AC3) mark_cleared real apply (single) uses the singular tool and a minima
   const [toolName, payload] = apply.calls[0];
   assert.equal(toolName, TOOL_MAP.update_transaction);
   assert.deepEqual(payload, { transaction_id: 'txn-1', cleared: 'cleared' });
+  // field isolation: none of the live txn's other fields leak into the singular patch.
+  for (const leaked of Object.keys(EXTRA_TXN_FIELDS)) {
+    assert.ok(!(leaked in payload), `live field "${leaked}" leaked into the mark_cleared patch`);
+  }
 });
 
 // --- (AC4) drift-stale skip -------------------------------------------------
@@ -183,6 +214,24 @@ test('(AC4) mark_cleared is skipped-stale when a target transaction drifted from
   assert.equal(res.status, STATUS.SKIPPED_STALE);
   assert.equal(res.detail.reason, 'stale');
   assert.equal(apply.calls.length, 0); // real apply skips the stale op
+});
+
+test('(AC4) mark_cleared with no before.cleared baseline fails closed — skipped-stale, never applied', async () => {
+  const op = markClearedOp(['txn-1']);
+  op.before = {}; // schema-valid (reconcileOp.before has no required) but no baseline to drift against
+  const apply = spy();
+  // The live txn is already `reconciled`; with no baseline, a fail-OPEN handler would
+  // overwrite it back to `cleared`. Fail-closed: skip, never dispatch.
+  const res = await processReconcileOp(op, {
+    activeBudgetId: BUDGET,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: spy(() => ({ transactions: [{ id: 'txn-1', cleared: 'reconciled' }] })),
+    applyOp: apply,
+  });
+  assert.equal(res.status, STATUS.SKIPPED_STALE);
+  assert.equal(res.detail.reason, 'stale');
+  assert.equal(apply.calls.length, 0); // never overwrites a transaction with no baseline to compare
 });
 
 test('(AC4) reconcile_account is skipped-stale when the account cleared balance drifted; dry-run surfaces it', async () => {
@@ -219,9 +268,10 @@ test('(AC5) reconcile_account blocks when live cleared balance ≠ asserted bala
   assert.equal(res.detail.asserted_balance, 1300000);
   assert.equal(res.detail.live_cleared_balance, 1200000);
   assert.equal(res.detail.discrepancy_milliunits, -100000);
-  // discrepancy displayed in currency units (milliunits ÷ 1000)
+  // discrepancy AND both balances displayed in currency units (milliunits ÷ 1000)
   assert.equal(res.detail.discrepancy_display, -100);
   assert.equal(res.detail.asserted_balance_display, 1300);
+  assert.equal(res.detail.live_cleared_balance_display, 1200); // catches a ÷1000 conversion regression
   assert.equal(apply.calls.length, 0); // ynab_reconcile_account never invoked
 });
 

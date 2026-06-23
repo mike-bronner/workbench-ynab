@@ -207,14 +207,21 @@ async function loadDeferredSchemas(toolSearch, options = {}) {
  *  - reconcile_account: account-level `before` ({cleared_balance, …}) vs live —
  *    reuse the executor's subset `isStale`.
  *  - mark_cleared: stale if any target transaction's live `cleared` differs from
- *    the `before.cleared` baseline. Fail-closed on a missing/malformed live txn.
+ *    the `before.cleared` baseline. Fail-closed on a missing baseline (no
+ *    `before.cleared`) or a missing/malformed live txn.
  */
 function isReconcileStale(op, live, subAction) {
   if (subAction === SUB_ACTIONS.RECONCILE_ACCOUNT) {
     return isStale(op.before, live);
   }
   const baseline = op.before && typeof op.before === 'object' ? op.before.cleared : undefined;
-  if (baseline === undefined) return false; // no baseline to compare → nothing to drift on
+  // No `before.cleared` baseline → we cannot prove the live state still matches what
+  // the human approved against, so we must not real-apply. The schema makes
+  // `before.cleared` optional (changeset-schema.json reconcileOp.before has no
+  // `required`), so a schema-valid op can reach here with `before: {}`; fail CLOSED
+  // (treat as stale) to stay consistent with the unresolved-target path below — never
+  // overwrite a transaction's cleared status with no baseline to drift against.
+  if (baseline === undefined) return true;
   const byId = liveTxnMap(live);
   return op.transaction_ids.some((id) => {
     const t = byId.get(id);
