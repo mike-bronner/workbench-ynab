@@ -102,10 +102,18 @@ re-applies an already-applied op** (the change-set `id` is stable precisely to m
 apply idempotent on resume — contract §1).
 
 ```bash
-# Applied op-ids = audit records where the apply was real (dry_run=false) and
-# succeeded. Scan the current month and any month a run could span.
-APPLIED_IDS="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/audit-log.sh" last 1000 2>/dev/null \
-  | jq -r 'select(.dry_run == false and .result_status == "success") | .operation_id')"
+# Applied op-ids = audit records for THIS proposal where the apply was real
+# (dry_run=false) and the executor reported `applied` — its ONLY success status
+# (assets/apply-executor.js STATUS.APPLIED; the rest are skipped-stale / blocked /
+# error, so a "success" match would catch nothing). The proposal's `source` (its
+# provenance run id) is the stable key every audit record for this proposal carries
+# as run_id (the executor maps run_id := changeset.source), and `audit-log.sh run`
+# scans EVERY monthly file — so a partial apply that straddled a month boundary
+# (e.g. Jun 30 → Jul 1) is still seen. The `last` path reads only the current UTC
+# month and would silently miss the prior month's applied ops.
+RUN_ID="$(jq -r '.source' "$PROPOSAL")"
+APPLIED_IDS="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/audit-log.sh" run "$RUN_ID" 2>/dev/null \
+  | jq -r 'select(.dry_run == false and .result_status == "applied") | .operation_id')"
 ```
 
 Partition the proposal's operations into **already-applied** (id ∈ `$APPLIED_IDS`)
@@ -184,7 +192,7 @@ const dry = await applyChangeset(batchChangeset, {
   applyOp,                      // namespaced YNAB write ports (unused in dry-run)
   audit,                        // bin/audit-log.sh append — dry-runs are audited too
 });
-// dry.results: [{ op_id, status, dry_run, detail: { diff: { before, after } } }, ...]
+// dry.results: [{ op_id, status, dry_run, detail: { simulated: true, diff: { before, after } } }, ...]
 ```
 
 ### 3c. Render the per-op diff table
@@ -208,10 +216,36 @@ executor's `status`:
 
 ## Step 4 — Three-options decision protocol (per batch)
 
-Run the M4-2 guardrail over the **whole batch first** (Step 6 below) so any blocked op
-is surfaced *before* the human is offered a choice. Then present **exactly three
-options** with a recommendation, and let the human decide — the command executes the
-chosen option; no write happens before a choice is made:
+### Step 4.0 — Guardrail gate (fail-closed; runs before the choice)
+
+The M4-2 write-safety guardrail is **fail-closed** and runs **before** the human is
+offered the choice below — and before any apply (Step 5). Run the **whole batch**
+through it first, so any blocked op is surfaced *before* a choice is offered:
+
+```js
+const { evaluateChangeset } = require('<plugin-root>/assets/write-safety-guardrail');
+const verdict = evaluateChangeset(batchChangeset, { activeBudgetId: ACTIVE_BUDGET_ID });
+// verdict.verdict === 'pass' | 'block';  verdict.blocks === [ <block verdict>, ... ]
+```
+
+- If `verdict.verdict === 'block'`, **surface each blocked op with its full verdict**
+  (`op_id`, `op_type`, `rule`, `reason`) so the human sees exactly what was refused and
+  why, and **abort the apply for the blocked op(s)** — a batch with any block is **not**
+  offered for approval as-is. Money-movement (a transfer signal, a proposed payee
+  repoint, or a denied create/transfer tool) and any non-ledger operation are hard
+  blocks: writes are **ledger-only** (categorize / allocate / dedupe / reconcile) and
+  **never move real money**.
+- **The command never calls the executor with `dry_run=false` past a guardrail block.**
+  The executor enforces the same gate independently (it guardrails the batch and runs
+  `evaluateTool` on every tool before dispatch, aborting the whole batch on any block),
+  so the safety promise holds even if this surface is bypassed — but this command
+  surfaces the verdict to the human rather than letting them approve into an abort.
+
+### Step 4.1 — Present the three options
+
+With the batch cleared by the guardrail (Step 4.0), present **exactly three options**
+with a recommendation, and let the human decide — the command executes the chosen
+option; no write happens before a choice is made:
 
 ```jsonc
 AskUserQuestion({
@@ -293,34 +327,11 @@ bash "${CLAUDE_PLUGIN_ROOT}/bin/audit-log.sh" last <N>   # the N ops just applie
 
 Show, per op: `applied` / `skipped-stale` / `error`, with before → after (÷1000).
 
-## Step 6 — Guardrail gate (before every apply)
-
-The M4-2 write-safety guardrail is **fail-closed** and runs **before** any apply — and
-before the human is offered the Step 4 choice. Run the full batch through it:
-
-```js
-const { evaluateChangeset } = require('<plugin-root>/assets/write-safety-guardrail');
-const verdict = evaluateChangeset(batchChangeset, { activeBudgetId: ACTIVE_BUDGET_ID });
-// verdict.verdict === 'pass' | 'block';  verdict.blocks === [ <block verdict>, ... ]
-```
-
-- If `verdict.verdict === 'block'`, **surface each blocked op with its full verdict**
-  (`op_id`, `op_type`, `rule`, `reason`) so the human sees exactly what was refused and
-  why, and **abort the apply for the blocked op(s)** — a batch with any block is **not**
-  offered for approval as-is. Money-movement (a transfer signal, a proposed payee
-  repoint, or a denied create/transfer tool) and any non-ledger operation are hard
-  blocks: writes are **ledger-only** (categorize / allocate / dedupe / reconcile) and
-  **never move real money**.
-- **The command never calls the executor with `dry_run=false` past a guardrail block.**
-  The executor enforces the same gate independently (it guardrails the batch and runs
-  `evaluateTool` on every tool before dispatch, aborting the whole batch on any block),
-  so the safety promise holds even if this surface is bypassed — but this command
-  surfaces the verdict to the human rather than letting them approve into an abort.
-
 ## Loop or finish
 
 After resolving a batch (applied / subset / rejected), **loop to the next batch** and
-repeat Steps 3–6. When every batch is resolved, exit.
+repeat Steps 3–5 (the guardrail gate runs first, as Step 4.0). When every batch is
+resolved, exit.
 
 ## Final summary
 

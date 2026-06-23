@@ -69,11 +69,13 @@ test_idempotency_via_audit_log() {
   assert_contains "$body" "already applied" "skipped-as-already-applied summary is shown"
 }
 
-# Step 2 — groups into typed batches (the four ledger-only op types named).
+# Step 2 — groups into typed batches (the four ledger-only op types named,
+# including the destructive delete_duplicate / dedupe — the safety-relevant one).
 test_groups_into_typed_batches() {
   local body; body="$(cat "$CMD")"
   assert_contains "$body" "categorize" "names the categorize batch"
   assert_contains "$body" "allocate" "names the allocate batch"
+  assert_contains "$body" "delete_duplicate" "names the dedupe (delete_duplicate) batch — the destructive op type"
   assert_contains "$body" "reconcile" "names the reconcile batch"
   assert_contains "$body" "one batch at a time" "presents batches one at a time, not a flat list"
 }
@@ -112,15 +114,21 @@ test_stale_ops_excluded_from_apply_as_is() {
 }
 
 # Step 5 — applies the approved ops with the executor's only dry_run=false call,
-# then shows the audit-log summary.
+# then reads the audit-log summary back. The "only dry_run=false call" and the
+# audit-log readback are pinned to load-bearing phrases (a bare "only" is
+# tautological — the word appears in many unrelated contexts).
 test_apply_is_the_only_dry_run_false_call() {
   local body; body="$(cat "$CMD")"
   assert_contains "$body" "dryRun: false" "the apply step sets dry_run=false"
-  assert_contains "$body" "only" "the command documents this as the only write path"
+  assert_contains "$body" "the only \`dry_run=false\` call" \
+    "the apply step is pinned as the only dry_run=false call in the plugin"
   assert_contains "$body" "approved ops only" "applies only the approved ops, not the whole proposal"
+  assert_contains "$body" 'audit-log.sh" last' \
+    "Step 5 reads the audit-log summary back via 'audit-log.sh last' after applying"
 }
 
-# Step 6 — guardrail gate runs before any apply and surfaces blocked ops.
+# Step 4.0 — guardrail gate runs before any apply (and before the choice) and
+# surfaces blocked ops.
 test_guardrail_gate_before_apply() {
   local body; body="$(cat "$CMD")"
   assert_contains "$body" "evaluateChangeset" "runs the M4-2 guardrail over the batch"
@@ -128,11 +136,14 @@ test_guardrail_gate_before_apply() {
     "never applies past a guardrail block"
 }
 
-# Config-split contract is explicitly documented in the body.
+# Config-split contract is explicitly documented in the body. The MCP-never-reads
+# invariant is pinned to its load-bearing phrase (a bare "never" is tautological —
+# the word appears ~20× in unrelated contexts).
 test_documents_config_split() {
   local body; body="$(cat "$CMD")"
   assert_contains "$body" "Config split" "config-split contract is documented"
-  assert_contains "$body" "never" "the MCP never reads config.json"
+  assert_contains "$body" "never reads \`config.json\`" \
+    "the config-split contract pins that the vendored MCP never reads config.json"
 }
 
 # It sources tool names from the SSoT rather than inlining them.
@@ -163,11 +174,14 @@ test_no_inlined_concrete_tool_name() {
   fi
 }
 
-# Numbered-step structure mirrors commands/setup.md (multiple '## Step' sections).
+# Numbered-step structure mirrors commands/setup.md. Pinned to the real count —
+# the command has six top-level '## Step' sections (1, 1b, 2, 3, 4, 5; the
+# guardrail gate is a 4.0 sub-step). A loose '>= 4' would let a third of the steps
+# vanish undetected.
 test_structure_mirrors_setup() {
   local steps; steps="$(grep -cE '^## Step ' "$CMD")"
-  if [ "$steps" -lt 4 ]; then
-    fail "expected the numbered-step structure of setup.md (>=4 '## Step' sections), found $steps"
+  if [ "$steps" -lt 6 ]; then
+    fail "expected the numbered-step structure of setup.md (>=6 '## Step' sections: 1, 1b, 2, 3, 4, 5), found $steps"
   fi
 }
 
