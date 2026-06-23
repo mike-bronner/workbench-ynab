@@ -237,6 +237,33 @@ test('accessors: business entities, schedule line maps, thresholds, quarterly da
   assert.equal(r.getThreshold('seTaxRate'), 0.153);
 });
 
+test('accessors (issue #82): income-tax brackets, estimated-payment matchers, period passthrough', () => {
+  // Defaults-only: the bundled US ruleset supplies brackets, due-date period
+  // boundaries, and the generic estimated-payment payee keywords.
+  const r = loadProfile({ profilePath: ABSENT });
+  const brackets = r.getIncomeTaxBrackets(2025, 'mfj');
+  assert.ok(Array.isArray(brackets) && brackets.length > 0);
+  assert.equal(brackets[0].rate, 0.10);
+  assert.equal(brackets.at(-1).upTo, undefined); // top bracket is unbounded
+  assert.equal(r.getIncomeTaxBrackets(1900, 'mfj'), undefined); // unknown year
+
+  // No-arg fallback to the profile's own year + filing status — needs a USER
+  // profile (the bundled defaults carry no taxYear / filingStatus, those are
+  // per-user required fields), so write one.
+  const up = loadProfile({ profilePath: writeProfile({ ...validBase(), filingStatus: 'mfj', taxYear: 2025 }) });
+  assert.deepEqual(up.getIncomeTaxBrackets(), up.getIncomeTaxBrackets(2025, 'mfj'));
+
+  const matchers = r.getEstimatedTaxPaymentMatchers();
+  assert.ok(matchers.payeeKeywords.includes('irs'));
+  // Always the four arrays, even when the user configured none.
+  assert.deepEqual(Object.keys(matchers).sort(), ['accounts', 'categoryGroups', 'categoryNames', 'payeeKeywords']);
+
+  // getQuarterlyDueDates passes the uneven income-attribution boundaries through.
+  const q2 = r.getQuarterlyDueDates(2025).find((d) => d.quarter === 2);
+  assert.equal(q2.periodStartMonth, 4);
+  assert.equal(q2.periodEndMonth, 5);
+});
+
 // --- validator vouches for the canonical example ---------------------------
 
 test('validateAgainstSchema accepts the bundled example instance', () => {
