@@ -119,6 +119,15 @@ case "${1:-}" in
       verified) printf '{"invalid":[],"missing":[]}\n' ;;
       missing)  printf '{"invalid":[],"missing":[{"name":"%s","version":"0.0.0"}]}\n' "$name" ;;
       invalid)  printf '{"invalid":[{"name":"%s","version":"0.0.0"}],"missing":[]}\n' "$name" ;;
+      # Malformed / unrecognized shapes — the fail-closed schema guard must reject
+      # EVERY one of these (never stamp "verified"):
+      #   notjson     — npm emitted non-JSON noise (old npm, a wrapper, a crash).
+      #   nullshape   — keys present but null, the has()-only pre-check's blind spot.
+      #   newcategory — a NEW failure array (e.g. "revoked") a future npm might add,
+      #                 which a catch-all `else` would wave through to "verified".
+      notjson)     printf 'npm warn: this is not the JSON you are looking for\n' ;;
+      nullshape)   printf '{"invalid":null,"missing":null}\n' ;;
+      newcategory) printf '{"invalid":[],"missing":[],"revoked":[{"name":"%s","version":"0.0.0"}]}\n' "$name" ;;
       *) echo "mock npm: bad MOCK_SIG_STATUS '${MOCK_SIG_STATUS:-}'" >&2; exit 1 ;;
     esac
     ;;
@@ -422,5 +431,51 @@ test_signature_invalid_aborts_before_write() {
   assert_eq "$bundle_before" "$(hash_of "$bundle")" "bundle must be untouched on an invalid-signature abort"
   rm -rf "$sb"
 }
+
+# Fail-closed signature gate: the gate must NEVER stamp "verified" on an audit
+# shape it doesn't fully recognize. Shared driver — runs the write path (new
+# version + new bytes, so the signature gate is actually reached) with a given
+# malformed MOCK_SIG_STATUS and asserts the script aborts (rc 1) having written
+# NOTHING: index.cjs and the marker stay byte-identical to before. Helpers aren't
+# named test_* so run_tests won't pick this up directly.
+assert_sig_shape_aborts() {
+  local mock_status="$1" sb mockbin marker bundle newsrc name new_version marker_before bundle_before out rc
+  sb="$(make_sandbox)"
+  mockbin="$(make_mockbin "$sb")"
+  marker="$sb/vendor/ynab-mcp/vendored.json"
+  bundle="$sb/vendor/ynab-mcp/index.cjs"
+  name="$(jq -r '.name' "$marker")"
+  new_version="9.9.9-$mock_status"
+  newsrc="$sb/new-index.cjs"
+  printf '%s-bytes %s\n' "$mock_status" "$(date +%s)-$RANDOM" > "$newsrc"
+  marker_before="$(hash_of "$marker")"
+  bundle_before="$(hash_of "$bundle")"
+
+  set +e
+  out="$(env PATH="$mockbin:$PATH" MOCK_BUNDLE_SRC="$newsrc" EXPECTED_SPEC="$name@$new_version" \
+    MOCK_PKG_NAME="$name" MOCK_SIG_STATUS="$mock_status" \
+    "$BASH_BIN" "$sb/bin/revendor.sh" "$new_version" 2>&1)"
+  rc=$?
+  set -e
+
+  assert_eq 1 "$rc" "MOCK_SIG_STATUS=$mock_status: an unrecognized audit shape must hard-error"
+  assert_contains "$out" "signature verification did not run" "must abort via the fail-closed guard, not stamp a status"
+  assert_eq "$marker_before" "$(hash_of "$marker")" "marker must be untouched when the audit shape is rejected"
+  assert_eq "$bundle_before" "$(hash_of "$bundle")" "bundle must be untouched when the audit shape is rejected"
+  rm -rf "$sb"
+}
+
+# Non-JSON audit output → the gate's parse-guard aborts, writing nothing.
+test_signature_non_json_aborts_before_write() { assert_sig_shape_aborts notjson; }
+
+# {"invalid":null,"missing":null} cleared the OLD has()-only pre-check yet both
+# length probes returned 0 → a FALSE "verified". The array-type guard must reject
+# it. (Regression test for the fail-open fix.)
+test_signature_null_shape_aborts_before_write() { assert_sig_shape_aborts nullshape; }
+
+# A NEW failure category (e.g. "revoked") listing our package must NOT fall
+# through to "verified" — the unknown-key guard fails closed. (Regression test
+# for the fail-open fix.)
+test_signature_unknown_category_aborts_before_write() { assert_sig_shape_aborts newcategory; }
 
 run_tests

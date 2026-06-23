@@ -56,7 +56,12 @@ What it does, end to end:
    signatures`), in an isolated temp install (never the repo). An **invalid**
    signature is a hard stop (possible tampering); a **missing** signature is
    recorded in the marker as a residual supply-chain risk, never skipped
-   silently.
+   silently. The gate is **fail-closed**: `verified` is recorded only when the
+   audit output is a shape it fully recognizes (an object with `invalid` and
+   `missing` arrays and no other keys). Anything else — non-JSON noise, null
+   fields, or a *new* failure category a future npm might add — aborts the run
+   rather than passing, so an unexpected shape can never be mistaken for a clean
+   signature.
 5. **Extract** — copies `dist/bundle/index.cjs` from the unpacked tarball over
    `vendor/ynab-mcp/index.cjs`.
 6. **Re-hash + rewrite the marker** — recomputes the SHA-256 of both the
@@ -159,6 +164,12 @@ Expected output for a signed package:
   (`found no dependencies to audit…`, or the package appears under `missing`).
   This is **not** a silent skip: record `"signature_status": "unavailable"` plus
   a `"signature_note"` documenting the residual supply-chain risk in the marker.
+- **unrecognized output** — if `npm audit signatures --json` emits anything the
+  gate can't fully parse (non-JSON noise, `null` in place of the `invalid` /
+  `missing` arrays, or a new failure category beyond those two), the script
+  **aborts fail-closed** rather than recording `verified`. Re-run after
+  confirming your npm is current; if the shape genuinely changed upstream, update
+  `bin/revendor.sh`'s schema guard before trusting the result.
 
 ### Step 4 — record the outcome in the marker
 

@@ -193,13 +193,41 @@ if ! ( cd "$SIGDIR" && npm install --ignore-scripts --no-audit --no-fund "$SPEC"
   cat "$TMP/sig-install.log" >&2 || true
   die "isolated install for signature verification failed for $SPEC"
 fi
-AUDIT="$( cd "$SIGDIR" && npm audit signatures --json 2>/dev/null )" || true
-if ! jq -e 'has("invalid") and has("missing")' <<<"$AUDIT" >/dev/null 2>&1; then
-  die "could not parse 'npm audit signatures' output for $SPEC — signature verification did not run"
+# Keep the audit's stderr (mirroring the install step's sig-install.log) so a
+# non-signature failure — old npm, network, a registry hiccup — is shown with
+# npm's own diagnostics, not swallowed behind the generic guard below.
+AUDIT="$( cd "$SIGDIR" && npm audit signatures --json 2>"$TMP/sig-audit.log" )" || true
+# Fail-CLOSED schema guard. `npm audit signatures --json` reports findings under
+# exactly two arrays — `invalid` and `missing`; a package absent from both is a
+# pass. We trust that "verified by elimination" ONLY when the output is a shape
+# we fully recognize: it is an object, BOTH fields are arrays (not null/scalar),
+# and there is NO unrecognized top-level key. This is what makes "verified"
+# require positive evidence instead of being a blind catch-all `else`:
+#   * {"invalid":null,"missing":null} — the keys exist but aren't arrays, so the
+#     old has()-only check passed it while both length probes returned 0 → a
+#     FALSE "verified". The array-type test rejects it.
+#   * {"invalid":[],"missing":[],"revoked":[…]} — a NEW failure category a future
+#     npm might add would otherwise fall straight through to "verified". The
+#     unknown-key test rejects it.
+# For a gate whose premise is zero-trust toward a possibly-compromised registry,
+# the safe default on an unexpected shape is to STOP, not to pass.
+if ! jq -e '
+      type == "object"
+      and (.invalid | type) == "array"
+      and (.missing | type) == "array"
+      and ([keys[] | select(. != "invalid" and . != "missing")] | length) == 0
+    ' <<<"$AUDIT" >/dev/null 2>&1; then
+  cat "$TMP/sig-audit.log" >&2 || true
+  die "could not parse or recognize 'npm audit signatures' output for $SPEC — signature verification did not run"
 fi
-if [ "$(jq --arg n "$NAME" '[.invalid[]? | select(.name==$n)] | length' <<<"$AUDIT")" -gt 0 ]; then
+# Lift the counts into plain variables BEFORE the if. A `$(jq …)` evaluated
+# inside an `if`-condition runs with `set -e` suspended, so a jq failure there
+# would be silently treated as a count rather than aborting the run.
+SIG_INVALID="$(jq --arg n "$NAME" '[.invalid[]? | select(.name==$n)] | length' <<<"$AUDIT")"
+SIG_MISSING="$(jq --arg n "$NAME" '[.missing[]? | select(.name==$n)] | length' <<<"$AUDIT")"
+if [ "$SIG_INVALID" -gt 0 ]; then
   die "registry signature INVALID for $SPEC — possible tampering; refusing to vendor"
-elif [ "$(jq --arg n "$NAME" '[.missing[]? | select(.name==$n)] | length' <<<"$AUDIT")" -gt 0 ]; then
+elif [ "$SIG_MISSING" -gt 0 ]; then
   SIG_STATUS="unavailable"
   SIG_NOTE="npm registry publishes no signature for $SPEC; provenance rests on the integrity-hash chain only — residual supply-chain risk."
   log "  ⚠ no registry signature for $SPEC — recorded as a residual supply-chain risk"
