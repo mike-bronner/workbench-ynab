@@ -162,15 +162,19 @@ test('(3) dryRunAllocate surfaces the over-allocation warning from the month rea
 
   assert.equal(out.over_allocated, true);
   assert.equal(out.warnings.length, 1);
-  assert.deepEqual(
-    {
-      budget_id: out.warnings[0].budget_id,
-      month: out.warnings[0].month,
-      ready_to_assign: out.warnings[0].ready_to_assign,
-      projected_ready_to_assign: out.warnings[0].projected_ready_to_assign,
-    },
-    { budget_id: op.budget_id, month: op.month, ready_to_assign: 200000, projected_ready_to_assign: -50000 },
-  );
+  // Assert the FULL warning object — including total_delta and the exact message —
+  // so a break anywhere in the assessOverAllocation → warnings[] plumbing is caught,
+  // not just the numeric fields.
+  assert.deepEqual(out.warnings[0], {
+    budget_id: op.budget_id,
+    month: op.month,
+    ready_to_assign: 200000,
+    total_delta: 250000,
+    projected_ready_to_assign: -50000,
+    message:
+      '⚠️ Over-allocation: this batch budgets a net $250.00 but only $200.00 is ' +
+      'Ready to Assign — Ready to Assign would fall to -$50.00.',
+  });
   // Advisory only — the op is still reported (nothing is blocked or dropped).
   assert.equal(out.operations.length, 1);
 });
@@ -240,6 +244,27 @@ test('(4) a net de-funding batch never over-allocates (raises RTA)', () => {
   assert.equal(out.over_allocated, false);
 });
 
+test('(4) dryRunAllocate carries a negative after.budgeted through the dry-run envelope', async () => {
+  // dryRunAllocate computes before/after/delta inline (independent of buildApplyArgs
+  // and renderDiff), so a de-funding op must be proven through THIS path too (AC #8).
+  const op = allocateOp();
+  op.before.budgeted = 250000;
+  op.after.budgeted = -50000; // de-fund below zero — delta -300000
+  const getMonth = spy(() => ({
+    to_be_budgeted: 1000000,
+    categories: [{ id: op.category_id, name: 'Groceries', budgeted: 250000 }],
+  }));
+  const out = await allocate.dryRunAllocate([op], { getMonth });
+
+  assert.equal(out.operations.length, 1);
+  assert.equal(out.operations[0].after, -50000);
+  assert.equal(out.operations[0].delta, -300000);
+  assert.equal(out.operations[0].diff, 'Groceries — 2026-06-01: $250.00 → -$50.00 (-$300.00)');
+  // A net de-funding raises RTA, so it never over-allocates.
+  assert.equal(out.over_allocated, false);
+  assert.equal(out.warnings.length, 0);
+});
+
 // --- (5) missing required fields rejected without an API call ----------------
 
 test('(5) buildApplyArgs throws on a malformed op and never produces apply args', () => {
@@ -260,18 +285,47 @@ test('(5) buildApplyArgs throws on a malformed op and never produces apply args'
   assert.throws(() => allocate.buildApplyArgs(badMonth), /YYYY-MM-01/);
 });
 
-test('(5) a malformed op never reaches applyOp — buildApplyArgs throws before any dispatch', async () => {
-  // Simulate the runtime wiring: applyOp shapes its args from buildApplyArgs. A
-  // malformed op throws there, so the (mock) mutating tool is never invoked.
-  const applyOp = spy(() => ({ ok: true }));
+test('(5) impossible months (month component out of 01–12) are rejected before any tool', () => {
+  // The tightened pattern `^\d{4}-(0[1-9]|1[0-2])-01$` rejects an impossible month
+  // component locally with the descriptive error, instead of letting it slip past to
+  // the YNAB API as an opaque failure (AC #2).
+  for (const month of ['2026-13-01', '2026-00-01', '2026-99-01']) {
+    const { valid, errors } = allocate.validateAllocateOp({ ...allocateOp(), month });
+    assert.equal(valid, false, `${month} should be rejected`);
+    assert.ok(errors.some((e) => /YYYY-MM-01/.test(e)));
+    const bad = allocateOp();
+    bad.month = month;
+    assert.throws(() => allocate.buildApplyArgs(bad), /YYYY-MM-01/);
+  }
+  // A real first-of-month at the boundaries (01 and 12) still passes.
+  for (const month of ['2026-01-01', '2026-12-01']) {
+    const ok = allocate.validateAllocateOp({ ...allocateOp(), month });
+    assert.equal(ok.valid, true, `${month} should be accepted`);
+  }
+});
+
+test('(5) a malformed op never reaches the YNAB API — the dispatcher builds args internally', async () => {
+  // Model the real runtime wiring (allocate-handler.js:52-53): the executor's
+  // applyOp port resolves args from buildApplyArgs *inside* itself, then calls the
+  // mutating tool (mcp). Building args internally is what makes this non-tautological:
+  // a malformed op throws inside applyOp BEFORE mcp is reached, so a regression that
+  // bypassed buildApplyArgs and dispatched the raw op would surface as a non-zero
+  // mcp call count here.
+  const mcp = spy(() => ({ ok: true }));
+  const applyOp = async (toolName, op) =>
+    mcp(toolName, op.type === 'allocate' ? allocate.buildApplyArgs(op) : op);
+
   const bad = allocateOp();
   delete bad.budget_id;
 
-  await assert.rejects(async () => {
-    const args = allocate.buildApplyArgs(bad); // throws here
-    return applyOp(UPDATE_CATEGORY, args);
-  }, /budget_id is required/);
-  assert.equal(applyOp.calls.length, 0);
+  await assert.rejects(() => applyOp(UPDATE_CATEGORY, bad), /budget_id is required/);
+  assert.equal(mcp.calls.length, 0); // the mutating tool was never invoked
+
+  // Sanity check the same wiring DOES reach the tool for a valid op — proving the
+  // zero-count above is the malformed op being rejected, not a dead dispatcher.
+  await applyOp(UPDATE_CATEGORY, allocateOp());
+  assert.equal(mcp.calls.length, 1);
+  assert.deepEqual(mcp.calls[0], [UPDATE_CATEGORY, allocate.buildApplyArgs(allocateOp())]);
 });
 
 test('validateAllocateOp reports every missing field with a descriptive error', () => {

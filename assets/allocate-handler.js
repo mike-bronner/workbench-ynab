@@ -126,7 +126,7 @@ function validateAllocateOp(op) {
       errors.push(`${field} is required and must be a non-empty string`);
     }
   }
-  if (typeof op.month === 'string' && !/^\d{4}-\d{2}-01$/.test(op.month)) {
+  if (typeof op.month === 'string' && !/^\d{4}-(0[1-9]|1[0-2])-01$/.test(op.month)) {
     errors.push(`month must be a YNAB first-of-month date (YYYY-MM-01); got ${JSON.stringify(op.month)}`);
   }
   for (const side of ['before', 'after']) {
