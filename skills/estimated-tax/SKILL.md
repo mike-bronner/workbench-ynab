@@ -82,9 +82,12 @@ milliunit amount against a profile or tracker number.
 5. **Detect & reconcile estimated-tax payments.**
    `detectPayments(transactions, getEstimatedTaxPaymentMatchers(), profile.quarterlyEstimatedDueDates)`
    finds outflows that look like estimated-tax payments (IRS/EFTPS payee or a
-   configured category/account) and attributes each to the quarter its date
-   falls in. `reconcilePayments(state, { year, payments })` records them, **deduped
-   by `ynab_transaction_id`**, and recomputes `remaining_due`.
+   configured category/account) and attributes each to the quarter it pays toward
+   by the **due-date schedule** (a payment on or before a quarter's due date
+   belongs to that quarter, including the Jan-15 rollover to the prior tax year's
+   Q4 — not the income window). `reconcilePayments(state, { year, payments })`
+   records them, **deduped by `ynab_transaction_id`**, and recomputes
+   `remaining_due`.
 
 6. **Upsert idempotently and save.**
    `upsertQuarterEstimate(state, { year, quarter, estimate })` overwrites that
@@ -99,12 +102,13 @@ milliunit amount against a profile or tracker number.
 
 ## The "## YTD Tax Summary" export contract
 
-`renderYtdSummary` reads **only** the state file — no YNAB query, no tax math. The
-weekly-review skill ([`skills/review/ynab-review.md`](../review/ynab-review.md))
-embeds the current YTD numbers by calling `renderYtdSummary` against the saved
-tracker, so it never recomputes the estimate (the token-waste the brief called
-out). Run `/ynab-tax` to refresh the tracker; the review reads whatever is
-current.
+`renderYtdSummary` reads **only** the state file — no YNAB query, no tax math. It
+is the read-only export the weekly-review skill
+([`skills/review/ynab-review.md`](../review/ynab-review.md)) can embed by calling
+`renderYtdSummary` against the saved tracker, so that once that wiring lands (the
+report-side change is deferred M2/M3 work) the review need not recompute the
+estimate (the token-waste the brief called out). Run `/ynab-tax` to refresh the
+tracker; the review reads whatever is current.
 
 ## Tracker state shape
 

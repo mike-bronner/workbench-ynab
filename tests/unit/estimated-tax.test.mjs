@@ -26,6 +26,7 @@ import {
   computeEstimate,
   quarterlyEstimate,
   quarterForDate,
+  quarterForPaymentDate,
   summarizeBusinessActivity,
   isEstimatedTaxPayment,
   detectPayments,
@@ -130,6 +131,23 @@ test('quarterForDate falls back to month mapping when boundaries are absent', ()
   assert.equal(quarterForDate('2025-12-10', bare), 4);
 });
 
+test('quarterForPaymentDate attributes payments by the DUE-DATE schedule, not the income window', () => {
+  // A payment belongs to the quarter whose due date it is paying toward — the
+  // first due date on or after the payment date, ending each quarter's window.
+  assert.equal(quarterForPaymentDate('2025-02-10', DUE_DATES), 1); // before/at Apr 15 → Q1
+  assert.equal(quarterForPaymentDate('2025-04-15', DUE_DATES), 1); // ON Q1's due date → Q1 (NOT Q2's income window)
+  assert.equal(quarterForPaymentDate('2025-04-16', DUE_DATES), 2); // just past Apr 15 → Q2
+  assert.equal(quarterForPaymentDate('2025-06-15', DUE_DATES), 2); // ON Q2's due date → Q2
+  assert.equal(quarterForPaymentDate('2025-09-15', DUE_DATES), 3); // ON Q3's due date → Q3
+  assert.equal(quarterForPaymentDate('2025-11-30', DUE_DATES), 4); // after Sep 15, before Jan 15 → Q4
+  // The blocker case: Q4's payment is due Jan 15 of the NEXT year and must roll
+  // back to that prior tax year's Q4 — the income windows miss this entirely.
+  assert.equal(quarterForPaymentDate('2026-01-15', DUE_DATES), 4);
+  assert.equal(quarterForPaymentDate('2026-01-10', DUE_DATES), 4); // early-Jan, still before Jan 15 → Q4
+  assert.equal(quarterForPaymentDate('not-a-date', DUE_DATES), null);
+  assert.equal(quarterForPaymentDate('2025-04-15', []), null); // no schedule → null
+});
+
 // --- Business activity summarization (reuses the mapping engine) -------------
 
 const summarizeProfile = {
@@ -173,20 +191,37 @@ test('isEstimatedTaxPayment matches outflows by payee keyword or category; never
   assert.equal(isEstimatedTaxPayment({ payee_name: 'Grocery Store', amount: -5000 }, MATCHERS), false);
 });
 
-test('detectPayments shapes payment records and attributes them to a quarter', () => {
+test('detectPayments shapes payment records and attributes them by due date', () => {
   const txns = [
-    { id: 'p1', date: '2025-04-15', payee_name: 'IRS USA TAX PYMT', amount: -300000 }, // Q2 period? 04-15 → Q2
-    { id: 'p2', date: '2025-02-10', payee_name: 'EFTPS', amount: -250000 }, // Q1
+    { id: 'p1', date: '2025-04-15', payee_name: 'IRS USA TAX PYMT', amount: -300000 }, // 04-15 is Q1's DUE date → Q1
+    { id: 'p2', date: '2025-02-10', payee_name: 'EFTPS', amount: -250000 }, // before Apr 15 → Q1
+    { id: 'p4', date: '2026-01-15', payee_name: 'EFTPS', amount: -400000 }, // Jan 15 next year → prior-year Q4
     { id: 'skip', date: '2025-02-11', payee_name: 'Grocery', amount: -5000 },
     { id: '', date: '2025-02-12', payee_name: 'IRS', amount: -100000 }, // no id → skipped
   ];
   const got = detectPayments(txns, MATCHERS, DUE_DATES);
-  assert.equal(got.length, 2);
+  assert.equal(got.length, 3);
   const p1 = got.find((p) => p.ynab_transaction_id === 'p1');
-  assert.deepEqual(p1, { date: '2025-04-15', amount_usd: 300, ynab_transaction_id: 'p1', quarter: 2 });
+  assert.deepEqual(p1, { date: '2025-04-15', amount_usd: 300, ynab_transaction_id: 'p1', quarter: 1 });
   const p2 = got.find((p) => p.ynab_transaction_id === 'p2');
   assert.equal(p2.quarter, 1);
   assert.equal(p2.amount_usd, 250);
+  const p4 = got.find((p) => p.ynab_transaction_id === 'p4');
+  assert.equal(p4.quarter, 4); // the Jan-15 rollover, not a phantom Q1
+  assert.equal(p4.amount_usd, 400);
+});
+
+test('detectPayments matches the categoryGroups and accounts arms too', () => {
+  const matchers = { payeeKeywords: [], categoryNames: [], categoryGroups: ['Taxes'], accounts: ['IRS Withholding'] };
+  const txns = [
+    { id: 'g1', date: '2025-04-15', payee_name: 'Anybody', category_group_name: 'Taxes', amount: -200000 },
+    { id: 'a1', date: '2025-06-15', payee_name: 'Anybody', account_name: 'IRS Withholding', amount: -150000 },
+    { id: 'n1', date: '2025-06-15', payee_name: 'Anybody', category_group_name: 'Groceries', amount: -50000 }, // no arm matches
+  ];
+  const got = detectPayments(txns, matchers, DUE_DATES);
+  assert.deepEqual(got.map((p) => p.ynab_transaction_id).sort(), ['a1', 'g1']);
+  assert.equal(got.find((p) => p.ynab_transaction_id === 'g1').quarter, 1); // Apr 15 → Q1
+  assert.equal(got.find((p) => p.ynab_transaction_id === 'a1').quarter, 2); // Jun 15 → Q2
 });
 
 // --- Tracker state ----------------------------------------------------------
@@ -268,18 +303,53 @@ test('reconcilePayments records detected payments per quarter, dedupes by id, an
   const first = reconcilePayments(state, { year: 2025, payments: detected });
   assert.equal(first.added, 1);
   assert.equal(state.years['2025']['1'].payments.length, 1);
-  assert.equal(state.years['2025']['1'].remaining_due, Math.round((liability - 1500) * 100) / 100);
+  const remainingAfterFirst = Math.round((liability - 1500) * 100) / 100;
+  assert.equal(state.years['2025']['1'].remaining_due, remainingAfterFirst);
 
-  // Re-running with the same transaction adds nothing (idempotent dedupe).
+  // Re-running with the same transaction adds nothing and leaves remaining_due
+  // untouched (idempotent dedupe — never double-counts the payment).
   const second = reconcilePayments(state, { year: 2025, payments: detectPayments(txns, MATCHERS, DUE_DATES) });
   assert.equal(second.added, 0);
   assert.equal(state.years['2025']['1'].payments.length, 1);
+  assert.equal(state.years['2025']['1'].remaining_due, remainingAfterFirst);
+});
+
+test('reconcilePayments lands a Jan-15-next-year payment in the prior year\'s Q4', () => {
+  const state = emptyTracker();
+  upsertQuarterEstimate(state, {
+    year: 2025, quarter: 4,
+    estimate: quarterlyEstimate(
+      computeEstimate({ grossIncome: 40000, deductibleExpenses: 10000, seRate: 0.153, brackets: MFJ_2025 }),
+      { totalLiability: 5000 },
+    ),
+  });
+  const q4Liability = state.years['2025']['4'].estimated_liability;
+  // The Q4 payment is made on its IRS due date, Jan 15 of the FOLLOWING year.
+  const detected = detectPayments([{ id: 'q4pay', date: '2026-01-15', payee_name: 'EFTPS', amount: -1500000 }], MATCHERS, DUE_DATES);
+  const res = reconcilePayments(state, { year: 2025, payments: detected });
+  assert.equal(res.added, 1);
+  assert.equal(state.years['2025']['4'].payments.length, 1); // filed in Q4, not a phantom Q1
+  assert.equal(state.years['2025']['1'], undefined); // Q1 never touched
+  assert.equal(state.years['2025']['4'].remaining_due, Math.round((q4Liability - 1500) * 100) / 100);
 });
 
 test('a corrupt tracker file throws rather than silently discarding payment history', () => {
   const trackerPath = join(TMP, 'corrupt.json');
   writeFileSync(trackerPath, '{ not valid json', 'utf8');
   assert.throws(() => loadTracker({ trackerPath }), /invalid JSON/);
+});
+
+test('a well-formed-but-wrong-shape tracker file throws instead of overwriting it', () => {
+  const trackerPath = join(TMP, 'wrong-shape.json');
+  writeFileSync(trackerPath, JSON.stringify({ schemaVersion: 1 }), 'utf8'); // valid JSON, no `years`
+  assert.throws(() => loadTracker({ trackerPath }), /unexpected shape/);
+});
+
+test('upsertQuarterEstimate rejects a raw computeEstimate() (no quarterLiability) loudly', () => {
+  const state = emptyTracker();
+  const raw = computeEstimate({ grossIncome: 40000, deductibleExpenses: 10000, seRate: 0.153, brackets: MFJ_2025 });
+  assert.ok(!('quarterLiability' in raw)); // the misuse: full-YTD snapshot, not a quarter figure
+  assert.throws(() => upsertQuarterEstimate(state, { year: 2025, quarter: 1, estimate: raw }), /quarterLiability/);
 });
 
 // --- YTD summary render (read-only) ------------------------------------------
@@ -296,6 +366,7 @@ test('renderYtdSummary reads numbers straight from state with no recomputation',
   assert.match(md, /## YTD Tax Summary \(2025\)/);
   assert.match(md, /\| Q1 \|/);
   assert.match(md, /\$1000\.00/); // the recorded payment
+  assert.match(md, /\| Q2 \| — \| — \| — \|/); // a quarter with no data renders an all-dash row
   assert.match(md, /\*\*YTD\*\*/);
   assert.match(md, /not tax advice/i);
 });

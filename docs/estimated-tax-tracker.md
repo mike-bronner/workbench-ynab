@@ -55,9 +55,9 @@ One object per tax year; each year holds the Q1–Q4 entries:
         "computed_inputs": {                   // the snapshot that produced the estimate
           "grossIncome": 40000, "deductibleExpenses": 10000,
           "scheduleCNet": 30000, "seTaxRate": 0.153, "seTax": 4590,
-          "halfSeDeduction": 2295, "incomeTaxBase": 27705, "incomeTax": 3036.6,
-          "totalLiability": 7626.6,
-          "priorCumulativeLiability": 0, "quarterLiability": 7626.6,
+          "halfSeDeduction": 2295, "incomeTaxBase": 27705, "incomeTax": 2847.6,
+          "totalLiability": 7437.6,
+          "priorCumulativeLiability": 0, "quarterLiability": 7437.6,
           "taxYear": 2025, "filingStatus": "mfj"
         }
       }
@@ -104,13 +104,17 @@ dollar of net. It is a conservative working estimate, not a filed return.
 - **Estimated-tax payments already in YNAB are auto-detected** from the profile's
   `estimatedTaxPayments` matchers (an outflow whose payee contains a configured
   keyword — IRS / EFTPS by default — or whose category / group / account matches
-  a configured name) and reconciled into the quarter their date falls in,
-  **deduped by `ynab_transaction_id`** so re-running never double-counts.
+  a configured name) and reconciled into the quarter they pay toward by the
+  **due-date schedule** (a payment on or before a quarter's due date belongs to
+  that quarter — including the Jan-15 rollover that attributes to the prior tax
+  year's Q4, which the income windows alone would miss), **deduped by
+  `ynab_transaction_id`** so re-running never double-counts.
 
 ## The `## YTD Tax Summary` export
 
 `renderYtdSummary(state, { year })` returns a markdown table read **purely from
-the state file** — no YNAB query, no tax math. The weekly-review skill embeds the
-current YTD numbers by reference, so it never recomputes the estimate (the token
-waste the brief flagged). Run `/ynab-tax` to refresh the tracker; the review
+the state file** — no YNAB query, no tax math. It is the read-only export the
+weekly-review skill can embed by reference so that, once wired in (that report
+change is deferred M2/M3 work), the review need never recompute the estimate (the
+token waste the brief flagged). Run `/ynab-tax` to refresh the tracker; the review
 reads whatever is current.
