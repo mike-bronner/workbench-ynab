@@ -85,6 +85,18 @@ test('(2) renderDiff uses a resolved category name when supplied', () => {
   );
 });
 
+test('(2) renderDiff renders a zero-delta no-op without a + sign', () => {
+  // delta === 0 takes the non-strict branch (`delta > 0` is false), so the
+  // delta is rendered as a bare "$0.00" — no "+" prefix.
+  const op = allocateOp();
+  op.before.budgeted = 250000;
+  op.after.budgeted = 250000; // no change
+  assert.equal(
+    allocate.renderDiff(op, 'Groceries'),
+    'Groceries — 2026-06-01: $250.00 → $250.00 ($0.00)',
+  );
+});
+
 test('(2) dryRunAllocate issues no write and returns a per-op diff', async () => {
   const op = allocateOp();
   const getMonth = spy(() => ({
@@ -119,12 +131,28 @@ test('(3) assessOverAllocation warns when the batch would push RTA negative', ()
   assert.equal(tight.over_allocated, true);
   assert.equal(tight.total_delta, 250000);
   assert.equal(tight.projected_ready_to_assign, -50000);
-  assert.ok(/over-allocation/i.test(tight.message));
+  // Pin the full message, not just a keyword — a regression in the embedded
+  // currency figures would otherwise ship undetected.
+  assert.equal(
+    tight.message,
+    '⚠️ Over-allocation: this batch budgets a net $250.00 but only $200.00 is ' +
+      'Ready to Assign — Ready to Assign would fall to -$50.00.',
+  );
 
   const room = allocate.assessOverAllocation([op], 300000);
   assert.equal(room.over_allocated, false);
   assert.equal(room.projected_ready_to_assign, 50000);
   assert.equal(room.message, null);
+});
+
+test('(3) assessOverAllocation does not warn when RTA is spent to exactly zero', () => {
+  // Boundary: `projected < 0` is strict, so projected === 0 must NOT warn —
+  // budgeting RTA down to exactly zero is allowed, not an over-allocation.
+  const op = allocateOp(); // delta = +250000
+  const exact = allocate.assessOverAllocation([op], 250000); // readyToAssign === totalDelta
+  assert.equal(exact.projected_ready_to_assign, 0);
+  assert.equal(exact.over_allocated, false);
+  assert.equal(exact.message, null);
 });
 
 test('(3) dryRunAllocate surfaces the over-allocation warning from the month read', async () => {
@@ -171,6 +199,19 @@ test('(3) dryRunAllocate groups by month and warns per month, reading get_month 
   assert.equal(out.operations.length, 2);
   assert.equal(out.warnings.length, 1);
   assert.equal(out.warnings[0].month, '2026-06-01');
+});
+
+test('(3) dryRunAllocate skips the over-allocation check when the month read has no RTA', async () => {
+  // get_month returns no usable `to_be_budgeted` → rta === null → the advisory
+  // warning is suppressed (never invent a figure, never block on a missing read),
+  // but the op is still rendered and reported.
+  const op = allocateOp();
+  const getMonth = spy(() => ({ categories: [] })); // no to_be_budgeted
+  const out = await allocate.dryRunAllocate([op], { getMonth });
+
+  assert.equal(out.warnings.length, 0);
+  assert.equal(out.over_allocated, false);
+  assert.equal(out.operations.length, 1); // op still reported despite the skipped check
 });
 
 // --- (4) negative budgeted (de-funding) -------------------------------------
