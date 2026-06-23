@@ -115,6 +115,24 @@ test('a non-object op fails closed', () => {
   assert.equal(validateTwinEvidence([]).valid, false);
 });
 
+test('an op whose victim IS its surviving twin is rejected (would delete the only copy)', () => {
+  const op = validOp();
+  op.twin.id = op.transaction_id; // survivor === victim — the highest-blast-radius collision
+  const v = validateTwinEvidence(op);
+  assert.equal(v.valid, false);
+  assert.equal(v.error.rule, 'twin_is_victim');
+  assert.equal(v.error.op_id, op.id);
+  assert.deepEqual(v.error.missing, []);
+});
+
+test('a twin amount of 0 is accepted (a real $0.00 transaction is valid evidence)', () => {
+  // Regression anchor: 0 is a valid integer milliunit amount. A future `if (!twin.amount)`
+  // shortcut would silently reject it — this pins the integer-type check as correct.
+  const op = validOp();
+  op.twin.amount = 0;
+  assert.equal(validateTwinEvidence(op).valid, true);
+});
+
 // --- requiresStrongConfirmation / destructiveOps ----------------------------
 
 test('every destructive op requires strong confirmation; non-destructive does not', () => {
@@ -164,6 +182,20 @@ test('renderDeletePreview omits the balance projection when no balance is suppli
   const preview = renderDeletePreview(validOp());
   assert.equal(preview.cleared_balance.before, null);
   assert.equal(preview.cleared_balance.after, null);
+});
+
+test('a cleared victim with no numeric amount yields a null projection, never a NaN throw', () => {
+  // The helper is exported, so a caller can reach it with an incomplete `before`.
+  // Without the guard, clearedBalanceBefore − undefined === NaN → formatDollars throws.
+  const op = validOp();
+  delete op.before.amount;
+  let preview;
+  assert.doesNotThrow(() => { preview = renderDeletePreview(op, { clearedBalanceBefore: 1200000 }); });
+  assert.equal(preview.cleared_balance.counts_toward_cleared, true);
+  assert.equal(preview.cleared_balance.before, '$1,200.00');
+  assert.equal(preview.cleared_balance.after_milliunits, null);
+  assert.equal(preview.cleared_balance.after, null);
+  assert.equal(preview.victim.amount, null); // display field already guarded the same way
 });
 
 // --- shapeVictimSnapshot ----------------------------------------------------

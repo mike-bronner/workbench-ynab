@@ -107,6 +107,34 @@ test('a partially-malformed twin (missing one field) is also rejected before any
   assert.equal(apply.calls.length, 0);
 });
 
+test('a delete op whose victim IS the surviving twin is rejected before any MCP call (never deletes the only copy)', async () => {
+  const cs = loadFixture('delete-duplicate.example.json');
+  // The highest-blast-radius failure: name the survivor as the victim. Field
+  // presence is complete, so only the cross-field guard can stop it.
+  cs.operations[0].twin.id = cs.operations[0].transaction_id;
+  const read = noDrift();
+  const apply = spy();
+  const audit = auditSpy();
+
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: read,
+    applyOp: apply,
+    audit,
+  });
+
+  assert.equal(out.ok, false);
+  assert.equal(out.aborted, true);
+  assert.equal(out.reason, 'twin_evidence_missing');
+  assert.equal(out.twinErrors[0].rule, 'twin_is_victim');
+  assert.deepEqual(out.results, []);
+  // Nothing was touched — not the read, not the delete, not the audit.
+  assert.equal(read.calls.length, 0);
+  assert.equal(apply.calls.length, 0);
+  assert.equal(audit.calls.length, 0);
+});
+
 // --- AC: drift = abort for that op -----------------------------------------
 
 test('a delete_duplicate op whose victim has drifted is marked stale and skipped, not applied', async () => {
@@ -132,6 +160,12 @@ test('a delete_duplicate op whose victim has drifted is marked stale and skipped
   // The victim was re-read, but never deleted — drift never forces a delete.
   assert.equal(read.calls.length, 1);
   assert.equal(apply.calls.length, 0);
+  // Skipping is not silent: the stale op still leaves a paper trail. Exactly one
+  // audit record was written, stamping the skipped-stale status (and no pending_delete
+  // record, since no delete preceded — the wrapped applyOp never ran).
+  assert.equal(audit.calls.length, 1);
+  assert.equal(audit.calls[0][0].result.status, STATUS.SKIPPED_STALE);
+  assert.equal(audit.calls.some((c) => c[0].result.status === 'pending_delete'), false);
 });
 
 // --- dry-run preview path: nothing mutated ---------------------------------

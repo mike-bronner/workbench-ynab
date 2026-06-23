@@ -90,8 +90,11 @@ function formatDollars(milliunits) {
  * Validate the surviving-twin evidence on a single delete op. Fail-closed: returns
  * a structured error unless the op carries a `twin` object with a non-empty `id`,
  * an integer `amount`, a non-empty `date`, and a present `payee_name` (string or
- * null — a real YNAB transaction may have no payee). Runs before any read or delete,
- * so a delete op that cannot prove which record survives never reaches an MCP call.
+ * null — a real YNAB transaction may have no payee), AND the victim it deletes
+ * (`transaction_id`) is not that surviving twin (`twin.id`) — a victim===survivor
+ * collision is rejected (`twin_is_victim`) so a delete can never remove the only
+ * copy. Runs before any read or delete, so a delete op that cannot prove which
+ * record survives — or that would delete the survivor — never reaches an MCP call.
  * @param {object} op a delete_duplicate operation.
  * @returns {{valid:true}|{valid:false, error:{op_id:string|null, rule:string, reason:string, missing:string[]}}}
  */
@@ -111,6 +114,15 @@ function validateTwinEvidence(op) {
   if (typeof twin.date !== 'string' || twin.date.length === 0) missing.push('date');
   if (missing.length > 0) {
     return { valid: false, error: { op_id: opId, rule: 'twin_evidence_missing', reason: `delete_duplicate op is missing or has malformed surviving-twin evidence: ${missing.join(', ')}.`, missing } };
+  }
+  // Fail-closed cross-field check: the victim being deleted (op.transaction_id) must
+  // NOT be the surviving twin (twin.id). A change-set where they're equal passes
+  // field-presence validation, the guardrail, and the drift check, then deletes the
+  // ONLY copy of the transaction — the precise highest-blast-radius failure this
+  // destructive path exists to prevent. twin.id is already proven a non-empty string
+  // above, so this only fires on a genuine collision. Reject before any read or delete.
+  if (op.transaction_id === twin.id) {
+    return { valid: false, error: { op_id: opId, rule: 'twin_is_victim', reason: 'delete_duplicate op names its surviving twin as the victim (transaction_id === twin.id); deleting it would remove the only copy of the transaction.', missing: [] } };
   }
   return { valid: true };
 }
@@ -145,14 +157,32 @@ function shapeVictimSnapshot(transaction, keys = VICTIM_SNAPSHOT_FIELDS) {
  * @returns {object} a structured preview the M4-5 command displays.
  */
 function renderDeletePreview(op, context = {}) {
+  // COMPARE-TRANSACTIONS CORROBORATION — deliberately NOT called here (AC #9).
+  // The AC lets this path call ynab_compare_transactions during the dry-run to
+  // corroborate the duplicate pairing, OR skip it with the decision documented in
+  // the handler. We skip: the surviving-twin evidence carried on the op — validated
+  // fail-closed by validateTwinEvidence before any read or delete — is the actual
+  // *requirement* and is sufficient to render the pair side by side below. A
+  // compare_transactions read would only re-confirm what the op already proves, at
+  // the cost of an extra deferred-schema MCP round-trip on the preview path.
+  // Corroboration is a nicety; the twin evidence is the requirement. If a future
+  // change wants the extra confirmation, the compare tool is wired via
+  // skills/protocol/ynab-tools.md (never inlined here) and would be invoked right
+  // here, before assembling the preview.
   const before = (op && op.before) || {};
   const twin = (op && op.twin) || {};
   const clearedBalanceBefore = context.clearedBalanceBefore;
   const hasBalance = typeof clearedBalanceBefore === 'number' && Number.isInteger(clearedBalanceBefore);
   const countsTowardCleared = before.cleared === 'cleared' || before.cleared === 'reconciled';
-  const clearedBalanceAfter = hasBalance
-    ? (countsTowardCleared ? clearedBalanceBefore - before.amount : clearedBalanceBefore)
-    : null;
+  // Mirror the `typeof before.amount === 'number'` guard used on the display field
+  // below: a victim with no numeric amount must yield a null projection, never an
+  // arithmetic NaN that formatDollars would then throw on (the helper is exported,
+  // so a caller can reach it with an incomplete `before`).
+  const clearedBalanceAfter = !hasBalance
+    ? null
+    : countsTowardCleared
+      ? (typeof before.amount === 'number' ? clearedBalanceBefore - before.amount : null)
+      : clearedBalanceBefore;
 
   return {
     op_id: op && op.id != null ? op.id : null,
