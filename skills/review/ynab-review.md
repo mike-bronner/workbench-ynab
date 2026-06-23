@@ -13,6 +13,11 @@ description: The universal, read-only YNAB financial-review protocol. Runs the f
 > guardrail — **not** this skill. If you ever feel the need to mutate YNAB,
 > stop: that is out of scope here, full stop.
 >
+> **Emitting a proposal is not a YNAB write.** The post-processing step in §9
+> serializes the review's findings into a change-set *proposal file* on local
+> disk for `/ynab-apply` to read later. That is a local file write, calls **no**
+> YNAB tool, and never moves money — the read-only-toward-YNAB invariant holds.
+>
 > **Not tax advice.** This protocol organizes financial data and surfaces
 > tax-relevant signals to help you and your tax professional. It is not a
 > substitute for professional tax advice. Never present a classification or a
@@ -324,9 +329,77 @@ warm, plain-spoken, action-oriented, no jargon-as-drama.
 
 ---
 
+## 9. Change-set proposal emission (write-back hand-off)
+
+After the 12-section analysis is complete and **before the review exits**, run one
+post-processing step: serialize the review's concrete proposals into a validated
+**change-set** (the M4-1 schema) so `/ynab-apply` (M4-5) has something to act on.
+This is a **local file write only** — it calls no YNAB tool and never moves money;
+the review stays read-only toward YNAB (see the banner above). The deterministic
+work lives in [`../../assets/changeset-emitter.js`](../../assets/changeset-emitter.js);
+this skill only collects the findings and invokes it.
+
+### Map findings → operations (ids already resolved)
+
+You already read `list_transactions` / `list_categories` / `list_accounts` /
+`get_month` during the analysis, so you hold the **resolved YNAB ids**. Carry them
+into the findings — the proposal must contain resolved ids, never name-only
+references, so the apply handlers (M4-6..M4-9) never re-resolve. Group the
+findings into four buckets:
+
+| Bucket | Sourced from | Op the emitter builds | Must carry |
+|---|---|---|---|
+| `categorize` | §1 Transaction Classification + §4 Uncategorized | `categorize` | resolved `transaction_id`, target `category_id`, `before`/`after` category names, and a **tax-aware `rationale`** (keep Schedule C / A / SE / 1 reasoning in the string). |
+| `allocate` | §6 Budget Health funding suggestions | `allocate` | resolved `category_id`, `month` (`YYYY-MM-01`), `before`/`after` `budgeted` in **milliunits**. |
+| `delete_duplicate` | §2 Duplicate Detection | `delete_duplicate` | resolved `transaction_id` + the twin-evidence snapshot (`amount`, `date`, `payee_name`, `category_name`, `import_id`) the M4-8 write path requires. |
+| `reconcile` | §5 Stale Uncleared + §8 Reconciliation Status | `reconcile` | resolved `account_id`, optional `transaction_ids[]`, and the cleared/reconciled `before`/`after` state. |
+
+All monetary fields are **milliunits** (integers) — pass YNAB's raw values
+straight through; never pre-divide.
+
+### Invoke the emitter
+
+Resolve the proposals directory from the **data-dir config** (never hard-code it):
+it is a sibling of the config file the loader owns.
+
+```bash
+source "${CLAUDE_PLUGIN_ROOT}/bin/config.sh"
+_require_config || exit 1
+PROPOSALS_DIR="$(dirname "$YNAB_CONFIG_FILE")/proposals"
+```
+
+Write the grouped findings to a temporary JSON file (a `meta` block carries the
+budget id/name and the review run id as `source`), then run the emitter CLI with
+the report date (`plan.report.period` → `YYYY-MM-DD`):
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/assets/changeset-emitter.js" \
+  --findings "$FINDINGS_JSON" --out-dir "$PROPOSALS_DIR" --date "$REPORT_DATE"
+```
+
+The emitter does the safety-critical work for you, in order: **schema-validate**
+the assembled change-set → **assert `money_movement: false`** → run every op
+through the **M4-2 guardrail in check-only mode**, **dropping** any op it would
+block (with a per-op note) → **write** the survivors to
+`<PROPOSALS_DIR>/changeset-<REPORT_DATE>.json`. A schema failure, a money_movement
+failure, or an all-ops-blocked result writes **no file** and is reported in the
+result JSON (`written: false` + `reason` + `notes`). Exit `0` means a proposal was
+written (the path is `result.path`); non-zero means none was — read `notes`.
+
+### Surface the outcome in the report and dispatch summary
+
+The user must know whether to run `/ynab-apply`. Render a closing line into
+`SLOT:section-11-recommendations` (and echo it in the dispatch summary):
+
+- **Written** → `✅ Change-set proposal written to <path> — run /ynab-apply to review and apply N proposed change(s).` Note any dropped ops.
+- **Not written** → `ℹ️ No change-set proposal produced (<reason>).` — e.g. nothing actionable, or every op was guardrail-blocked.
+
+---
+
 ## Hard rules
 
 1. **Read-only, always.** Read tools only; never a write verb; never move money.
+   Emitting the §9 proposal is a **local file write**, not a YNAB mutation.
    Write-back is the Sprint-4 approval-gated path, not this skill.
 2. **No fabrication.** Never invent a number, balance, transaction, or tax
    figure. Missing data → say so and add a note; a guess is flagged as a guess.
