@@ -29,6 +29,7 @@ const {
   requiresStrongConfirmation,
   destructiveOps,
   buildToolMap,
+  makeAuditingDeleteApplyOp,
   DELETE_TOOL,
   OP_TYPE,
   TWIN_REQUIRED_FIELDS,
@@ -191,4 +192,27 @@ test('buildToolMap registers delete_duplicate → the namespaced delete tool', (
   assert.equal(OP_TYPE, 'delete_duplicate');
   assert.ok(DELETE_TOOL.endsWith('_delete_transaction'));
   assert.deepEqual(buildToolMap(), { delete_duplicate: DELETE_TOOL });
+});
+
+// --- makeAuditingDeleteApplyOp (dryRun propagation, not a hardcoded literal) -
+
+test('the pre-delete audit record carries the actual dryRun flag', async () => {
+  const records = [];
+  const audit = async (rec) => { records.push(rec); };
+  const applyOp = async () => ({ ok: true });
+
+  // The flag is propagated verbatim — a true value must NOT be overwritten by a
+  // hardcoded false (the regression this guards: a misleading record claiming a
+  // real delete during a dry-run if the construction guard ever loosens).
+  const wrapped = makeAuditingDeleteApplyOp({ applyOp, audit, changeset: { schema_version: 1 }, dryRun: true });
+  await wrapped(DELETE_TOOL, validOp());
+  assert.equal(records.length, 1);
+  assert.equal(records[0].dryRun, true);
+  assert.equal(records[0].result.status, 'pending_delete');
+
+  // Omitting dryRun defaults to false — the real-apply construction path today.
+  records.length = 0;
+  const wrappedDefault = makeAuditingDeleteApplyOp({ applyOp, audit, changeset: { schema_version: 1 } });
+  await wrappedDefault(DELETE_TOOL, validOp());
+  assert.equal(records[0].dryRun, false);
 });

@@ -220,10 +220,15 @@ function buildToolMap() {
  * tool runs — not after. The executor records the post-delete result separately, so
  * a destructive op leaves a two-phase trail: intent (with the complete victim state)
  * before, outcome after. Non-delete ops pass straight through untouched.
- * @param {{applyOp:Function, audit:Function, changeset:object}} deps
+ * @param {{applyOp:Function, audit:Function, changeset:object, dryRun?:boolean}} deps
+ *   `dryRun` is stamped onto the pre-delete audit record so it always reflects the
+ *   actual run mode. Today the wrapper is only constructed on the real-apply path
+ *   (dryRun:false in applyDeleteDuplicates), but propagating the flag instead of a
+ *   literal keeps the record truthful if that construction guard ever loosens —
+ *   never a misleading record claiming a real delete during a dry-run.
  * @returns {(toolName:string, op:object)=>Promise<unknown>}
  */
-function makeAuditingDeleteApplyOp({ applyOp, audit, changeset }) {
+function makeAuditingDeleteApplyOp({ applyOp, audit, changeset, dryRun = false }) {
   return async (toolName, op) => {
     if (op && op.type === OP_TYPE && typeof audit === 'function') {
       await audit({
@@ -234,7 +239,7 @@ function makeAuditingDeleteApplyOp({ applyOp, audit, changeset }) {
           schema_version: changeset && changeset.schema_version != null ? changeset.schema_version : null,
           run_id: changeset && changeset.source != null ? changeset.source : null,
         },
-        dryRun: false,
+        dryRun,
       });
     }
     return applyOp(toolName, op);
@@ -290,7 +295,7 @@ async function applyDeleteDuplicates(changeset, options = {}) {
   const { applyChangeset } = require('./apply-executor');
 
   const wrappedApplyOp = (!dryRun && typeof applyOp === 'function')
-    ? makeAuditingDeleteApplyOp({ applyOp, audit, changeset })
+    ? makeAuditingDeleteApplyOp({ applyOp, audit, changeset, dryRun })
     : applyOp;
 
   return applyChangeset(changeset, {
