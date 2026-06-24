@@ -234,7 +234,91 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 31
+          },
+          "periodStartMonth": {
+            "description": "Calendar month (1-12) the income-attribution period for this quarter STARTS on. The federal estimated-tax quarters are UNEVEN (Q1 = Jan-Mar, Q2 = Apr-May, Q3 = Jun-Aug, Q4 = Sep-Dec); storing the boundaries as data makes them adjustable for IRS calendar shifts instead of hardcoding them in the engine. Optional, but required as a set with periodStartDay/periodEndMonth/periodEndDay for income attribution.",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 12
+          },
+          "periodStartDay": {
+            "description": "Calendar day of month (1-31) the income-attribution period for this quarter STARTS on.",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 31
+          },
+          "periodEndMonth": {
+            "description": "Calendar month (1-12) the income-attribution period for this quarter ENDS on (inclusive). Q4 ends in December of the tax year, NOT January of the following year (the Jan 15 figure above is the due date, not the period end).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 12
+          },
+          "periodEndDay": {
+            "description": "Calendar day of month (1-31) the income-attribution period for this quarter ENDS on (inclusive).",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 31
           }
+        }
+      }
+    },
+    "incomeTaxBracketsByYear": {
+      "description": "Federal income-tax MARGINAL brackets keyed by filing-status string, then by four-digit tax-year string. The estimated-tax engine (issue #82) applies these to the Schedule C net (after the half-SE-tax deduction) to estimate income tax on side-hustle earnings. No rate, threshold, or user specific is hardcoded in the engine: this is the single source of truth, overridable per year/status. Rates are fractions (0.22 = 22 percent), not dollars or percentages.",
+      "type": "object",
+      "propertyNames": { "enum": ["single", "mfj", "mfs", "hoh", "qw"] },
+      "additionalProperties": {
+        "type": "object",
+        "description": "Year-keyed map of marginal-bracket arrays for one filing status.",
+        "propertyNames": { "pattern": "^[0-9]{4}$" },
+        "additionalProperties": {
+          "type": "array",
+          "description": "Marginal brackets ordered ascending by income. The top (highest) bracket OMITS upTo to mean unbounded.",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["rate"],
+            "additionalProperties": false,
+            "properties": {
+              "upTo": {
+                "description": "Inclusive upper bound of taxable income for this bracket, in dollars, not YNAB milliunits (divide YNAB milliunits by 1000 to get dollars). OMIT on the top bracket to mean unbounded.",
+                "type": "number",
+                "minimum": 0
+              },
+              "rate": {
+                "description": "Marginal rate applied to the income slice in this bracket, as a fraction (0.22 = 22 percent). Not a dollar amount and not a percentage.",
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "estimatedTaxPayments": {
+      "description": "Detection matchers for estimated-tax payments ALREADY recorded in YNAB. The estimated-tax engine (issue #82) flags an OUTFLOW transaction as an estimated-tax payment when its payee contains any payeeKeywords entry (case-insensitive substring) OR its YNAB category / category-group / account name matches any name listed here (case-insensitive). Owner-specific category and account names live ONLY in the user's profile instance, never in the bundled defaults.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "payeeKeywords": {
+          "description": "Case-insensitive substrings; a transaction whose payee contains any of these is treated as an estimated-tax payment.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "categoryNames": {
+          "description": "YNAB category names (case-insensitive exact) whose outflow transactions are estimated-tax payments.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "categoryGroups": {
+          "description": "YNAB category-group names (case-insensitive exact) whose outflow transactions are estimated-tax payments.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "accounts": {
+          "description": "YNAB account names (case-insensitive exact) whose outflow transactions are estimated-tax payments.",
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
         }
       }
     },

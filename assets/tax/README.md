@@ -116,8 +116,13 @@ amount under each filing status; no code change.
 | `itemized` | object | Schedule A: `medical`, `salt` (with `saltCap`), `interest`, `charitable`. |
 | `adjustments` | object | Schedule 1: `seTaxHalfDeduction`, `studentLoanInterest`, `iraContributions`. |
 | `thresholds` | object | `medicalAgiPercent` (0.075), `seTaxRate` (0.153), `saltCap` (10000). |
-| `quarterlyEstimatedDueDates[]` | array | `{ quarter, month, day }` parts; Q4 falls in January of the following year. |
+| `quarterlyEstimatedDueDates[]` | array | `{ quarter, month, day }` due-date parts (Q4 falls in January of the following year) plus optional `period*` income-attribution boundaries (Q1 Jan–Mar, Q2 Apr–May, Q3 Jun–Aug, Q4 Sep–Dec). |
+| `incomeTaxBracketsByYear` | object | `filingStatus → year → [{ upTo?, rate }]` marginal brackets; the top bracket omits `upTo`. Used by the estimated-tax tracker (#82). |
+| `estimatedTaxPayments` | object | Detection matchers (`payeeKeywords`, `categoryNames`, `categoryGroups`, `accounts`) for estimated-tax payments already recorded in YNAB (#82). |
 | `overrides` | object | User-override layer merged over the default ruleset by M3-3. |
+
+The **estimated-tax tracker** that consumes the last three fields is documented
+in [`docs/estimated-tax-tracker.md`](../../docs/estimated-tax-tracker.md).
 
 The schema is the authoritative reference — see
 [`tax-profile.schema.json`](./tax-profile.schema.json) for every field's

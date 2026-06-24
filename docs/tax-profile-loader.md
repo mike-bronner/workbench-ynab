@@ -140,7 +140,9 @@ if (!r.ok) {
   r.getThreshold(name);                        // e.g. 'seTaxRate'
   r.getBusinessEntities();                     // always an array
   r.getScheduleLineMap(entityId);              // an entity's map, or undefined
-  r.getQuarterlyDueDates(year);                // [{ quarter, month, day, year, date }]
+  r.getQuarterlyDueDates(year);                // [{ quarter, month, day, year, date, period* }]
+  r.getIncomeTaxBrackets(year, filingStatus);  // marginal brackets, or undefined (#82)
+  r.getEstimatedTaxPaymentMatchers();          // { payeeKeywords, categoryNames, categoryGroups, accounts } (#82)
 }
 ```
 
