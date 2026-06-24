@@ -1,4 +1,11 @@
 {
+  "$readme": [
+    "This is the TEMPLATE, not a live profile. Every value below is a placeholder — never a real name, institution, account, or budget.",
+    "Your live profile belongs OUTSIDE this repo at ~/.claude/plugins/data/workbench-ynab-claude-workbench/tax-profile.json so it survives plugin updates and is never committed (this repo is PUBLIC).",
+    "To create it: mkdir -p ~/.claude/plugins/data/workbench-ynab-claude-workbench && cp assets/tax/tax-profile.example.json ~/.claude/plugins/data/workbench-ynab-claude-workbench/tax-profile.json — then replace these placeholders with your real numbers.",
+    "Do NOT put your YNAB Personal Access Token here. It lives in the macOS Keychain (service ynab-mcp) only; the launcher injects it. Tax config and the token are never co-located.",
+    "This $readme key is a $-prefixed annotation: the profile loader strips it before merging, so it never reaches any tax calculation."
+  ],
   "schemaVersion": "1",
   "filingStatus": "mfj",
   "taxYear": 2025,
