@@ -2,10 +2,13 @@
   "name": "@dizzlkheinz/ynab-mcpb",
   "version": "0.26.10",
   "tarball_sha256": "f41e18ab4c9a26e998fdacb29ec1b212195be766dd1f65b40f9ed016a3409ac3",
+  "tarball_shasum": "331850bd58f096bfeb024ae4cc9a238a881d7cc1",
   "bundle_sha256": "65cf53b8cac59930e326389f5187ff4649f6f7ad8a34049624994789ebcaedb5",
   "date_vendored": "2026-06-19T19:48:18Z",
   "tarball_url": "https://registry.npmjs.org/@dizzlkheinz/ynab-mcpb/-/ynab-mcpb-0.26.10.tgz",
   "tarball_integrity": "sha512-pkUQFtVRPhAjfK0APDCdA6wY3y8mAsBc60pn/KQAgAPgN6iWBD27NmxIa3wym6pitiMUl1Ib7h82a4znlJn4KQ==",
+  "signature_status": "verified",
+  "signature_method": "npm audit signatures",
   "bundle_source_path": "package/dist/bundle/index.cjs",
   "vendored_path": "vendor/ynab-mcp/index.cjs",
   "self_contained": true
