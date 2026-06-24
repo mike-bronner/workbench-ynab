@@ -189,6 +189,13 @@ Report output configuration.
 "report": { "output_dir": "~/Documents/YNAB Reports", "template_path": null }
 ```
 
+`output_dir` lives **outside the repo** (this whole `config.json` does — see the
+data-dir path above) and therefore **survives plugin updates**: it is the single,
+update-stable source of truth for where reports are saved. The report writer
+([`bin/report-writer.sh`](report-writer.md)) reads it through `bin/config.sh` with
+the `// empty` idiom and falls back to `~/Documents/Claude/Reports` when it is
+absent or empty.
+
 ---
 
 ## Validating a config

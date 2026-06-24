@@ -57,7 +57,7 @@ parameter expansion, exactly as `mcp-memory.sh` does:
 
 ```bash
 output_dir="$(_cfg '.report.output_dir')"
-output_dir="${output_dir:-$HOME/Documents/YNAB Reports}"   # caller's default
+output_dir="${output_dir:-$HOME/Documents/Claude/Reports}"   # caller's default
 ```
 
 ## Missing-config behaviour: `_require_config`
@@ -114,7 +114,7 @@ persona="${persona:-$DEFAULT_PERSONA}"
 
 # report (required) — output dir with the caller's default
 report_dir="$(_cfg '.report.output_dir')"
-report_dir="${report_dir:-$HOME/Documents/YNAB Reports}"
+report_dir="${report_dir:-$HOME/Documents/Claude/Reports}"
 template="$(_cfg '.report.template_path')"   # empty → use the bundled template
 ```
 
