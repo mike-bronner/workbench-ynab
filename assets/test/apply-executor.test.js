@@ -459,6 +459,12 @@ const applyFailingOn = (failId, err) => spy((toolName, op) => {
   return { ok: true };
 });
 
+/** readLiveState that throws `err` for one op id and echoes `before` (no drift) otherwise. */
+const readFailingOn = (failId, err) => spy((op) => {
+  if (op.id === failId) throw err;
+  return clone(op.before);
+});
+
 test('preflight auth failure aborts before any mutation — zero ops, no audit records', async () => {
   const cs = loadFixture('combined.example.json');
   const apply = spy();
@@ -568,6 +574,53 @@ test('mid-batch 403 stops the batch and records insufficient_scope', async () =>
   assert.equal(audit.calls.length, 1);
 });
 
+test('mid-batch 401 on the READ phase also aborts the batch (phase-agnostic fail-closed)', async () => {
+  const cs = loadFixture('combined.example.json');
+  const failId = cs.operations[1].id; // fail the SECOND op's read → the first still applies
+  const apply = spy(() => ({ ok: true }));
+  const audit = auditSpy();
+
+  const out = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: readFailingOn(failId, httpError(401, 'unauthorized')),
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit,
+  });
+
+  // The abort check keys on error_class, NOT the phase — a 401 surfacing on the
+  // re-read stops the batch just like one on the mutation (a dead token is caught
+  // one op earlier). A regression scoping the abort to phase==='apply' fails here.
+  assert.equal(out.ok, false);
+  assert.equal(out.aborted, true);
+  assert.equal(out.reason, OUTCOME.AUTH_ABORT);
+  assert.equal(out.stopped_at_index, 1);
+  assert.equal(out.authFailure.phase, 'read');
+  assert.equal(out.authFailure.error_class, 'auth_revoked');
+  assert.equal(out.authFailure.applied_state, 'not_applied');
+
+  // Op 0 applied; op 1 errored on the READ; op 2 was NEVER processed.
+  assert.equal(out.results.length, 2);
+  assert.equal(out.results[0].status, STATUS.APPLIED);
+  assert.equal(out.results[1].status, STATUS.ERROR);
+  assert.equal(out.results[1].detail.phase, 'read');
+  assert.equal(out.results[1].detail.error_class, 'auth_revoked');
+  assert.equal(out.results[1].detail.applied_state, 'not_applied');
+
+  // Op 1's read threw BEFORE its mutation, so applyOp ran for op 0 only — never op 1 or op 2.
+  assert.equal(apply.calls.length, 1);
+  assert.equal(apply.calls[0][1].id, cs.operations[0].id);
+
+  // Both processed ops were audited (the failed op before the break); its record carries the class.
+  assert.equal(audit.calls.length, 2);
+  const failedRec = audit.calls[1][0];
+  assert.equal(failedRec.result.status, STATUS.ERROR);
+  assert.equal(failedRec.result.error_class, 'auth_revoked');
+  assert.equal(failedRec.result.applied_state, 'not_applied');
+});
+
 test('a single-op 422 skips that op and CONTINUES the rest (data-error policy)', async () => {
   const cs = loadFixture('combined.example.json');
   const failId = cs.operations[1].id;
@@ -602,14 +655,16 @@ test('a single-op 422 skips that op and CONTINUES the rest (data-error policy)',
 test('a network timeout on a mutation records applied_state=unknown and continues', async () => {
   const cs = loadFixture('combined.example.json');
   const failId = cs.operations[1].id;
+  const apply = applyFailingOn(failId, new Error('network timeout during mutation'));
+  const audit = auditSpy();
   const out = await applyChangeset(cs, {
     activeBudgetId: cs.budget_id,
     dryRun: false,
     toolMap: TOOL_MAP,
     readLiveState: noDrift(),
-    applyOp: applyFailingOn(failId, new Error('network timeout during mutation')),
+    applyOp: apply,
     authPreflight: okPreflight(),
-    audit: auditSpy(),
+    audit,
   });
 
   assert.equal(out.reason, OUTCOME.APPLY_COMPLETE); // indeterminate ≠ auth → not an abort
@@ -617,6 +672,14 @@ test('a network timeout on a mutation records applied_state=unknown and continue
   assert.equal(failed.status, STATUS.ERROR);
   assert.equal(failed.detail.applied_state, 'unknown'); // may have landed server-side
   assert.equal(failed.detail.error_class, 'unknown');
+  // Continuation (mirrors the 422 test): every OTHER op still applied and the batch
+  // ran to completion — apply + audit fired once per op — so a regression that
+  // stopped the batch on an indeterminate error is caught directly here.
+  for (const r of out.results) {
+    if (r.op_id !== failId) assert.equal(r.status, STATUS.APPLIED);
+  }
+  assert.equal(apply.calls.length, cs.operations.length);
+  assert.equal(audit.calls.length, cs.operations.length);
 });
 
 test('a normal applied op audits error_class=null and applied_state=null', async () => {
