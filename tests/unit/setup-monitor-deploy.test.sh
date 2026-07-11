@@ -68,6 +68,41 @@ test_enabled_false_removes_task() {
     "setup removes the task via delete_scheduled_task when disabled"
 }
 
+# AC #12 EXECUTION — the disable gate doesn't just EXIST, it actually RESOLVES.
+# The greps above prove the delete branch is present in prose; this extracts the
+# REAL jq gate program from the command file and RUNS it against four configs.
+# A `jq '… // true …'` gate silently coerces enabled:false → "true" (the `//`
+# alternative operator falls through on false as well as null), leaving the
+# delete branch permanently dead code — a regression no prose grep can see, and
+# the exact bug this test exists to catch. It pipes each fixture through the
+# extracted program (no temp files, no cleanup trap — a RETURN trap whose rm
+# succeeds would reset $? and mask a real failure), so it stays coupled to
+# whatever expression setup.md actually ships.
+test_enabled_gate_resolves_false_when_disabled() {
+  command -v jq >/dev/null 2>&1 || { printf '  (skipped: jq unavailable)\n'; return 0; }
+  local gate_line prog
+  gate_line="$(grep -E 'MON_ENABLED="\$\(jq' "$CMD" | head -1)"
+  [ -n "$gate_line" ] || fail "no MON_ENABLED jq gate line found in $CMD"
+  # Pull the jq program out from between `jq -r '` and its closing quote. The
+  # program uses only double quotes internally, so [^']* captures all of it.
+  prog="$(printf '%s\n' "$gate_line" | sed -E "s/.*jq -r '([^']*)'.*/\1/")"
+  [ "$prog" != "$gate_line" ] || fail "could not extract the jq gate program from: $gate_line"
+
+  local out
+  # enabled:false MUST resolve to "false" so Step 7.4's delete branch is reachable.
+  out="$(printf '{"schedules":{"monitor":{"enabled":false}}}' | jq -r "$prog")"
+  assert_eq "false" "$out" "enabled:false must disable the monitor task"
+  # enabled:true resolves to "true".
+  out="$(printf '{"schedules":{"monitor":{"enabled":true}}}' | jq -r "$prog")"
+  assert_eq "true" "$out" "enabled:true keeps the monitor enabled"
+  # An empty monitor block defaults to enabled ("true").
+  out="$(printf '{"schedules":{"monitor":{}}}' | jq -r "$prog")"
+  assert_eq "true" "$out" "an empty monitor block defaults to enabled"
+  # A wholly absent schedules block defaults to enabled ("true").
+  out="$(printf '{}' | jq -r "$prog")"
+  assert_eq "true" "$out" "an absent schedules block defaults to enabled"
+}
+
 # AC #12 SAFETY — the weekly-review task is never a target of a mutating
 # scheduled-task call. Every create/update/delete line must carry ONLY the
 # ynab-monitor id, never ynab-review.

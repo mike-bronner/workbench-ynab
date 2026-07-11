@@ -320,9 +320,18 @@ say `⚠ Skipping ynab-monitor deployment (scheduled-tasks MCP not reachable) �
    field is absent: `cron = "0 8 * * *"` (daily 08:00), `enabled = true`:
 
    ```bash
-   MON_ENABLED="$(jq -r '.schedules.monitor.enabled // true' "$CONFIG_FILE" 2>/dev/null)"
+   MON_ENABLED="$(jq -r 'if .schedules.monitor.enabled == false then "false" else "true" end' "$CONFIG_FILE" 2>/dev/null)"
    MON_CRON="$(jq -r '.schedules.monitor.cron // "0 8 * * *"' "$CONFIG_FILE" 2>/dev/null)"
    ```
+
+   The `enabled` gate must **not** use `jq`'s `//` operator: `//` is the
+   *alternative* operator, falling through on `null` **and on `false`**, so
+   `.schedules.monitor.enabled // true` collapses a literal `false` back to
+   `true` and the disable branch (Step 7.4) becomes dead code. Comparing
+   `== false` directly is what keeps that branch reachable, and it still
+   defaults absent/null to enabled (`null == false` is `false` → `"true"`),
+   mirroring the repo's own `rule.enabled !== false` idiom
+   (`lib/tax/classifyTransaction.mjs`). Only a literal `false` disables.
 
 2. **Resolve the task prompt** from the template at
    `${CLAUDE_PLUGIN_ROOT}/assets/prompt-templates/ynab-monitor.prompt.md` (read it
@@ -351,8 +360,10 @@ say `⚠ Skipping ynab-monitor deployment (scheduled-tasks MCP not reachable) �
 
 4. **When `MON_ENABLED` is `false` — remove or disable.** If a task with id
    `ynab-monitor` exists, call `mcp__scheduled-tasks__delete_scheduled_task` with
-   `taskId: ynab-monitor` (or disable it if delete is unavailable). If none
-   exists, do nothing. Report `✅ ynab-monitor task removed (schedules.monitor.enabled: false)`.
+   `taskId: ynab-monitor` (or disable it if delete is unavailable) and report
+   `✅ ynab-monitor task removed (schedules.monitor.enabled: false)`. If none
+   exists, do nothing and report `✅ ynab-monitor not scheduled (schedules.monitor.enabled: false)` —
+   never claim "removed" when nothing was deleted.
 
 5. **Never touch the weekly review.** `ynab-monitor` is a **distinct** task id;
    this step never creates, updates, or deletes the `ynab-review` task (or any
