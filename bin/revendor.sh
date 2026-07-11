@@ -133,6 +133,17 @@ if ! REG_META="$(npm view "$SPEC" --json dist.integrity dist.shasum dist.tarball
   cat "$TMP/view.err" >&2 || true
   die "npm view failed for $SPEC — cannot fetch the registry integrity metadata to verify against"
 fi
+# Fail-CLOSED schema guard, mirroring the npm pack (above) and npm audit (below)
+# guards: npm view exited 0, but a future npm — or a wrapper — could still emit
+# non-JSON noise on stdout. `npm view --json <field>…` returns a JSON OBJECT keyed
+# by the requested fields; validate that shape up front so a malformed payload
+# surfaces this actionable message plus the captured output, not a raw jq error
+# when the registry fields are indexed below.
+if ! jq -e 'type == "object"' <<<"$REG_META" >/dev/null 2>&1; then
+  log "--- npm stdout ---"; printf '%s\n' "$REG_META" >&2 || true
+  log "--- npm stderr ---"; cat "$TMP/view.err" >&2 || true
+  die "npm view did not return the expected JSON for $SPEC (npm output above)"
+fi
 REG_INTEGRITY="$(jq -r '."dist.integrity" // ""' <<<"$REG_META")"
 REG_SHASUM="$(jq -r '."dist.shasum" // ""' <<<"$REG_META")"
 REG_TARBALL="$(jq -r '."dist.tarball" // ""' <<<"$REG_META")"

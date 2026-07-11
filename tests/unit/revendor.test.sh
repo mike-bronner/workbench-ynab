@@ -19,8 +19,8 @@
 #     - a MISSING registry signature is recorded as a residual supply-chain risk
 #       (signature_status=unavailable + signature_note), never skipped silently;
 #     - an INVALID registry signature is a hard stop before the bundle is written.
-#   * npm non-JSON stdout — pack exits 0 but emits noise; the script must hard-error
-#     with an actionable message, not a raw jq parse failure.
+#   * npm non-JSON stdout — `pack` (and `npm view`) exit 0 but emit noise; the script
+#     must hard-error with an actionable message, not a raw jq parse failure.
 #   * Prereq failure — with a required tool (`npm`, or the provenance gate's
 #     `openssl`) absent from $PATH the script must hard-error (non-zero) and name
 #     the missing prerequisite, rather than failing obscurely half-way through.
@@ -28,7 +28,8 @@
 # The mock `npm` covers the four subcommands the script now drives — `pack --json`
 # (packs MOCK_BUNDLE_SRC and records the tarball's REAL hashes so `view` can echo
 # registry-matching values), `view … --json` (returns dist.integrity/shasum/tarball,
-# overridable via MOCK_REG_* to force a mismatch), `install` (no-op), and
+# overridable via MOCK_REG_* to force a mismatch, or MOCK_VIEW_NONJSON to emit
+# non-JSON noise), `install` (no-op), and
 # `audit signatures --json` (MOCK_SIG_STATUS ∈ verified|missing|invalid). A stub
 # `node` exists only so the prereq check's `command -v node` passes. Real
 # jq/shasum/tar/openssl come from $PATH. Zero third-party deps — pure bash + the
@@ -100,12 +101,19 @@ case "${1:-}" in
     # Production depends on --json here (bin/revendor.sh:132); drop it and real npm
     # emits non-JSON the script's jq chokes on — fail loudly if the contract regresses.
     [[ " $* " == *" --json "* ]] || { echo "mock npm: 'view' must pass --json, got: $*" >&2; exit 1; }
-    # Production reads all three of these fields (bin/revendor.sh:132,136-138); drop
+    # Production reads all three of these fields (bin/revendor.sh:132,147-149); drop
     # any one from the real call and the registry cross-check loses a term — fail
     # loudly so the contract is pinned, not just the --json flag.
     for f in dist.integrity dist.shasum dist.tarball; do
       [[ " $* " == *" $f "* ]] || { echo "mock npm: 'view' must request $f, got: $*" >&2; exit 1; }
     done
+    # Force a non-JSON payload on a clean exit 0 to exercise the script's view
+    # shape-guard: a future npm/wrapper emitting noise must hard-error with an
+    # actionable message, not a raw jq crash when the fields are indexed.
+    if [ -n "${MOCK_VIEW_NONJSON:-}" ]; then
+      printf 'npm warn: this is not the JSON you are looking for\n'
+      exit 0
+    fi
     integ="${MOCK_REG_INTEGRITY:-$(cat "$STATE/integrity" 2>/dev/null || true)}"
     sha="${MOCK_REG_SHASUM:-$(cat "$STATE/shasum" 2>/dev/null || true)}"
     printf '{"dist.integrity":"%s","dist.shasum":"%s","dist.tarball":"https://registry.npmjs.org/mock/-/mock.tgz"}\n' "$integ" "$sha"
@@ -117,14 +125,14 @@ case "${1:-}" in
     # flag: without it, `npm install` of a possibly-compromised package runs its
     # install hooks with full privileges during the very audit meant to catch
     # tampering (the isolated $SIGDIR scopes WHERE files land, not WHAT code runs).
-    # Drop it from the real call (bin/revendor.sh:192) and the suite must go red —
+    # Drop it from the real call (bin/revendor.sh:203) and the suite must go red —
     # so the mock fails loudly if the contract regresses.
     [[ " $* " == *" --ignore-scripts "* ]] || { echo "mock npm: 'install' must pass --ignore-scripts, got: $*" >&2; exit 1; }
     exit 0
     ;;
   audit)
     [ "${2:-}" = "signatures" ] || { echo "mock npm: only 'audit signatures' supported, got: $*" >&2; exit 1; }
-    # Production depends on --json here too (bin/revendor.sh:191); drop it and real
+    # Production depends on --json here too (bin/revendor.sh:210); drop it and real
     # npm emits non-JSON — fail loudly if the contract regresses.
     [[ " $* " == *" --json "* ]] || { echo "mock npm: 'audit signatures' must pass --json, got: $*" >&2; exit 1; }
     name="${MOCK_PKG_NAME:?mock npm audit needs MOCK_PKG_NAME}"
@@ -168,7 +176,7 @@ test_idempotent_no_change() {
   bundle="$sb/vendor/ynab-mcp/index.cjs"
   marker_before="$(hash_of "$marker")"
   bundle_before="$(hash_of "$bundle")"
-  # No version arg → the script defaults to the pinned version (bin/revendor.sh:76).
+  # No version arg → the script defaults to the pinned version (bin/revendor.sh:86).
   spec="$(jq -r '.name' "$marker")@$(jq -r '.version' "$marker")"
 
   set +e
@@ -252,10 +260,10 @@ test_changed_bundle_updates_marker_and_bundle() {
   rm -rf "$sb"
 }
 
-# The headline invariant (bin/revendor.sh:23-25): identity is the artifact HASH,
+# The headline invariant (bin/revendor.sh:32-34): identity is the artifact HASH,
 # not the version string. Same PINNED version BUT different bundle bytes must
 # still write — the one case that proves the hash half of the idempotency guard
-# (bin/revendor.sh:117) matters. A regression dropping the bundle-hash term would
+# (bin/revendor.sh:184) matters. A regression dropping the bundle-hash term would
 # pass both the no-change and changed-version tests silently; this catches it.
 test_same_version_different_bytes_writes() {
   local sb mockbin marker bundle newsrc name pinned new_sha out rc
@@ -288,7 +296,7 @@ test_same_version_different_bytes_writes() {
 
 # Hardening: if npm pack exits 0 but emits non-JSON noise on stdout, the script
 # must surface the actionable "did not return the expected JSON" message (and the
-# captured output), not a raw jq parse error mid-pipeline (bin/revendor.sh:99-105).
+# captured output), not a raw jq parse error mid-pipeline (bin/revendor.sh:109-116).
 test_npm_non_json_stdout_errors() {
   local sb dir out rc
   sb="$(make_sandbox)"
@@ -317,6 +325,33 @@ NODE
   rm -rf "$sb"
 }
 
+# Parity hardening for the registry-metadata fetch: if `npm view` exits 0 but emits
+# non-JSON noise on stdout, the fail-closed shape guard must surface the actionable
+# "did not return the expected JSON" message BEFORE the registry fields are indexed
+# (bin/revendor.sh:142-146) — not a raw jq crash — and touch nothing. MOCK_VIEW_NONJSON
+# forces that payload. Mirrors test_npm_non_json_stdout_errors (the pack path).
+test_npm_view_non_json_aborts() {
+  local sb mockbin marker bundle marker_before bundle_before out rc
+  sb="$(make_sandbox)"
+  mockbin="$(make_mockbin "$sb")"
+  marker="$sb/vendor/ynab-mcp/vendored.json"
+  bundle="$sb/vendor/ynab-mcp/index.cjs"
+  marker_before="$(hash_of "$marker")"
+  bundle_before="$(hash_of "$bundle")"
+
+  set +e
+  out="$(env PATH="$mockbin:$PATH" MOCK_BUNDLE_SRC="$bundle" MOCK_VIEW_NONJSON=1 \
+    "$BASH_BIN" "$sb/bin/revendor.sh" 2>&1)"
+  rc=$?
+  set -e
+
+  assert_eq 1 "$rc" "non-JSON npm view stdout must hard-error"
+  assert_contains "$out" "expected JSON" "error must name the JSON-shape failure"
+  assert_eq "$marker_before" "$(hash_of "$marker")" "marker must be untouched when view output is rejected"
+  assert_eq "$bundle_before" "$(hash_of "$bundle")" "bundle must be untouched when view output is rejected"
+  rm -rf "$sb"
+}
+
 # With npm missing from $PATH the script must hard-error and name the prereq.
 test_prereq_missing_npm_errors() {
   local sb nodeonly out rc
@@ -341,7 +376,7 @@ NODE
 
 # With openssl missing from $PATH (but every earlier prereq present) the script
 # must hard-error at the openssl require and name it — the provenance gate's
-# SHA-512 SRI can't be computed without it (bin/revendor.sh:71,144). Parallels
+# SHA-512 SRI can't be computed without it (bin/revendor.sh:71,155). Parallels
 # test_prereq_missing_npm_errors for the prereq the provenance gate (#5) added.
 test_prereq_missing_openssl_errors() {
   local sb noopenssl out rc t
