@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -88,6 +88,23 @@ test('readState heals forward on a corrupt file: unparseable → existed:false +
   for (const f of REQUIRED_FIELDS) {
     assert.ok(Object.prototype.hasOwnProperty.call(state, f), `healed state missing required field: ${f}`);
   }
+});
+
+test('readState normalizes a valid-JSON-but-partial/legacy file to the full required shape', () => {
+  // Heal-forward is tested for absent + totally-unparseable files; this covers
+  // the per-field coercion in between — a parseable file missing keys (or with a
+  // wrong-typed one) must come back as existed:true with EXACTLY the required
+  // fields, so a second run updates in place instead of duplicating/orphaning
+  // (AC #15b). A legacy stringified cursor coerces back to the null default.
+  const statePath = freshPath();
+  writeFileSync(statePath, JSON.stringify({ serverKnowledge: '7', accounts: { 'acct-1': { cleared: 5, uncleared: 0 } } }), 'utf8');
+  const { state, existed } = readState({ statePath });
+  assert.equal(existed, true, 'a valid partial file is a real prior run, not a first run');
+  assert.deepEqual(Object.keys(state).sort(), [...REQUIRED_FIELDS].sort(), 'normalized to exactly the required fields');
+  assert.equal(state.lastPollTimestamp, null, 'missing field falls back to default');
+  assert.deepEqual(state.accounts, { 'acct-1': { cleared: 5, uncleared: 0 } }, 'present field is preserved');
+  assert.equal(state.serverKnowledge, null, 'a non-integer (legacy string) cursor coerces to the null default');
+  assert.deepEqual(state.firedAlerts, {}, 'missing ledger falls back to the empty default');
 });
 
 // --- (b) second run reads + updates without duplicating fields --------------
@@ -174,6 +191,31 @@ test('(c) no-op pass: lastPollTimestamp advances on disk', () => {
   assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).lastPollTimestamp, '2026-06-21T08:00:00Z');
 });
 
+// The two no-op assertions above only cover inputs where BOTH sub-conditions of
+// `changed = !balancesEqual(...) || recentTransactionCount > 0` agree. These
+// isolate each OR-branch so a `||`→`&&` regression — which would silence the
+// monitor on a balance move with no new txns (or vice-versa) — is caught.
+
+test('changed: balances differ with ZERO new transactions → changed:true (balance branch)', () => {
+  const prior = { ...defaultState(), accounts: { 'acct-1': { cleared: 100000, uncleared: 0 } } };
+  const { changed } = computeNextState(prior, {
+    timestamp: '2026-06-21T08:00:00Z',
+    accounts: { 'acct-1': { cleared: 125000, uncleared: 0 } }, // balance moved
+    recentTransactionCount: 0, // ...but no new transactions in the window
+  });
+  assert.equal(changed, true, 'a balance change alone must report changed');
+});
+
+test('changed: identical balances with NEW transactions → changed:true (transaction branch)', () => {
+  const accounts = { 'acct-1': { cleared: 100000, uncleared: 0 } };
+  const { changed } = computeNextState({ ...defaultState(), accounts }, {
+    timestamp: '2026-06-21T08:00:00Z',
+    accounts, // balances unchanged
+    recentTransactionCount: 4, // ...but new transactions arrived
+  });
+  assert.equal(changed, true, 'new transactions alone must report changed');
+});
+
 // --- serverKnowledge cursor persistence -------------------------------------
 
 test('serverKnowledge: a returned cursor is persisted; absence keeps the prior cursor', () => {
@@ -210,6 +252,30 @@ test('balances are stored as integer milliunits; milliunitsToDollars divides by 
   assert.ok(Number.isInteger(state.accounts['acct-1'].uncleared));
   assert.equal(milliunitsToDollars(123456), 123.456);
   assert.equal(milliunitsToDollars(-7890), -7.89);
+});
+
+// --- writeState hardening: owner-only modes + failed-rename cleanup ---------
+
+test('writeState writes owner-only: the state file is 0600 and its leaf data dir 0700', () => {
+  // monitor-state.json stores real account balances (milliunits) — the same
+  // sensitivity class as the tax tracker — so pin both mode bits. A refactor that
+  // drops them then fails loudly instead of silently world-exposing balances.
+  const dir = join(TMP, `secure-${seq++}`);
+  const statePath = join(dir, 'monitor-state.json');
+  writeState(defaultState(), { statePath });
+  assert.equal(statSync(statePath).mode & 0o777, 0o600);
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+});
+
+test('writeState unlinks the orphaned temp file when the rename fails', () => {
+  // Point the state path AT an existing directory so renameSync(tmp, path) is
+  // forced to throw (a file can't be renamed over a directory). This drives the
+  // cleanup path that removes the half-written .tmp, so a partial copy of the
+  // balance data is never left lying around after a failed write.
+  const statePath = join(TMP, `rename-fails-${seq++}`);
+  mkdirSync(statePath, { recursive: true });
+  assert.throws(() => writeState(defaultState(), { statePath }));
+  assert.equal(existsSync(`${statePath}.tmp`), false, 'orphaned temp file was removed');
 });
 
 // --- path resolution seam ---------------------------------------------------
