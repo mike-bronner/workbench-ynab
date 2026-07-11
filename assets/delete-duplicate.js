@@ -90,11 +90,12 @@ function formatDollars(milliunits) {
  * Validate the surviving-twin evidence on a single delete op. Fail-closed: returns
  * a structured error unless the op carries a `twin` object with a non-empty `id`,
  * an integer `amount`, a non-empty `date`, and a present `payee_name` (string or
- * null — a real YNAB transaction may have no payee), AND the victim it deletes
- * (`transaction_id`) is not that surviving twin (`twin.id`) — a victim===survivor
- * collision is rejected (`twin_is_victim`) so a delete can never remove the only
- * copy. Runs before any read or delete, so a delete op that cannot prove which
- * record survives — or that would delete the survivor — never reaches an MCP call.
+ * null — a real YNAB transaction may have no payee), AND names a valid victim
+ * (`transaction_id`, a non-empty string — `victim_id_missing` otherwise) that is not
+ * that surviving twin (`twin.id`) — a victim===survivor collision is rejected
+ * (`twin_is_victim`) so a delete can never remove the only copy. Runs before any read
+ * or delete, so a delete op that cannot prove which record survives — that names no
+ * target — or that would delete the survivor — never reaches an MCP call.
  * @param {object} op a delete_duplicate operation.
  * @returns {{valid:true}|{valid:false, error:{op_id:string|null, rule:string, reason:string, missing:string[]}}}
  */
@@ -115,12 +116,21 @@ function validateTwinEvidence(op) {
   if (missing.length > 0) {
     return { valid: false, error: { op_id: opId, rule: 'twin_evidence_missing', reason: `delete_duplicate op is missing or has malformed surviving-twin evidence: ${missing.join(', ')}.`, missing } };
   }
+  // Fail-closed presence/type check on the victim being deleted. The collision guard
+  // below is `op.transaction_id === twin.id`; an ABSENT victim id (undefined) is NOT
+  // equal to the proven non-empty twin.id, so it would slip past that check — yet this
+  // function is exported as a standalone safety primitive that runs BEFORE the schema
+  // in the pre-flight. Require the victim id to be a non-empty string first, so a
+  // delete op that cannot even name its target never reaches an MCP call.
+  if (typeof op.transaction_id !== 'string' || op.transaction_id.length === 0) {
+    return { valid: false, error: { op_id: opId, rule: 'victim_id_missing', reason: 'delete_duplicate op has no valid transaction_id (the victim to delete); it cannot identify its target or be checked against the surviving twin.', missing: ['transaction_id'] } };
+  }
   // Fail-closed cross-field check: the victim being deleted (op.transaction_id) must
   // NOT be the surviving twin (twin.id). A change-set where they're equal passes
   // field-presence validation, the guardrail, and the drift check, then deletes the
   // ONLY copy of the transaction — the precise highest-blast-radius failure this
-  // destructive path exists to prevent. twin.id is already proven a non-empty string
-  // above, so this only fires on a genuine collision. Reject before any read or delete.
+  // destructive path exists to prevent. Both ids are proven non-empty strings above,
+  // so this only fires on a genuine collision. Reject before any read or delete.
   if (op.transaction_id === twin.id) {
     return { valid: false, error: { op_id: opId, rule: 'twin_is_victim', reason: 'delete_duplicate op names its surviving twin as the victim (transaction_id === twin.id); deleting it would remove the only copy of the transaction.', missing: [] } };
   }

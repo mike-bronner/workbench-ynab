@@ -135,6 +135,42 @@ test('a delete op whose victim IS the surviving twin is rejected before any MCP 
   assert.equal(audit.calls.length, 0);
 });
 
+test('every failing delete op accumulates — a multi-op change-set reports all twin errors, not just the first', async () => {
+  // The fixtures are single-op, so the accumulate-vs-short-circuit loop in
+  // applyDeleteDuplicates was previously unverified. Build a two-op change-set where
+  // BOTH deletes fail twin evidence (for different reasons) and assert both surface.
+  const base = loadFixture('delete-duplicate.example.json');
+  const op2 = clone(base.operations[0]);
+  op2.id = 'op-delete-duplicate-0002';
+  op2.transaction_id = 't0000000-0000-4000-8000-00000000d004';
+  const cs = { ...base, operations: [clone(base.operations[0]), op2] };
+  delete cs.operations[0].twin;          // op 1: no twin object at all
+  delete cs.operations[1].twin.date;     // op 2: a single missing twin field
+  const read = noDrift();
+  const apply = spy();
+  const audit = auditSpy();
+
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: read,
+    applyOp: apply,
+    audit,
+  });
+
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, 'twin_evidence_missing');
+  assert.equal(out.aborted, true);
+  // Both ops are reported — the loop accumulates, it does not return on the first.
+  assert.equal(out.twinErrors.length, 2);
+  assert.deepEqual(out.twinErrors.map((e) => e.op_id), ['op-delete-duplicate-0001', 'op-delete-duplicate-0002']);
+  assert.deepEqual(out.twinErrors[1].missing, ['date']);
+  // A single bad op aborts the whole batch before any port is touched.
+  assert.equal(read.calls.length, 0);
+  assert.equal(apply.calls.length, 0);
+  assert.equal(audit.calls.length, 0);
+});
+
 // --- AC: drift = abort for that op -----------------------------------------
 
 test('a delete_duplicate op whose victim has drifted is marked stale and skipped, not applied', async () => {

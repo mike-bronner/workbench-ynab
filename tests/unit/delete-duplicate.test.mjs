@@ -125,6 +125,21 @@ test('an op whose victim IS its surviving twin is rejected (would delete the onl
   assert.deepEqual(v.error.missing, []);
 });
 
+test('an op with no victim transaction_id is rejected (cannot slip past the collision guard)', () => {
+  // The collision guard is `op.transaction_id === twin.id`; an absent victim id is
+  // `undefined`, which never equals the proven non-empty twin.id — so without an
+  // explicit presence check it would sail through this exported safety primitive.
+  for (const mutate of [(o) => { delete o.transaction_id; }, (o) => { o.transaction_id = ''; }, (o) => { o.transaction_id = 42; }]) {
+    const op = validOp();
+    mutate(op);
+    const v = validateTwinEvidence(op);
+    assert.equal(v.valid, false);
+    assert.equal(v.error.rule, 'victim_id_missing');
+    assert.equal(v.error.op_id, op.id);
+    assert.deepEqual(v.error.missing, ['transaction_id']);
+  }
+});
+
 test('a twin amount of 0 is accepted (a real $0.00 transaction is valid evidence)', () => {
   // Regression anchor: 0 is a valid integer milliunit amount. A future `if (!twin.amount)`
   // shortcut would silently reject it — this pins the integer-type check as correct.
@@ -166,6 +181,18 @@ test('deleting a cleared victim projects the cleared balance (adds the outflow b
   const preview = renderDeletePreview(validOp(), { clearedBalanceBefore: 1200000 });
   assert.equal(preview.cleared_balance.counts_toward_cleared, true);
   assert.equal(preview.cleared_balance.before, '$1,200.00');
+  assert.equal(preview.cleared_balance.after_milliunits, 1254990);
+  assert.equal(preview.cleared_balance.after, '$1,254.99');
+});
+
+test('deleting a reconciled victim projects the cleared balance (reconciled also counts)', () => {
+  // `reconciled` is the other state that counts toward the cleared balance — same
+  // projection as `cleared`: after = before − (−54990) = +54990.
+  const op = validOp();
+  op.before.cleared = 'reconciled';
+  const preview = renderDeletePreview(op, { clearedBalanceBefore: 1200000 });
+  assert.equal(preview.victim.cleared, 'reconciled');
+  assert.equal(preview.cleared_balance.counts_toward_cleared, true);
   assert.equal(preview.cleared_balance.after_milliunits, 1254990);
   assert.equal(preview.cleared_balance.after, '$1,254.99');
 });
