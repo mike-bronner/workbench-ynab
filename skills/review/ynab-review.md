@@ -105,7 +105,7 @@ never paste a concrete tool name into this file:
 
 | Logical op | Used for |
 |---|---|
-| `list_budgets` | Resolve `plan.budget.name` → id (if the plan didn't). |
+| `list_budgets` | Resolve `plan.budget.name` → id (if the plan didn't), and read the budget's `currency_format` for the session (see [§5](#5-money--locale)). |
 | `list_accounts` | On/off-budget accounts, types, balances, cleared/reconciled, closed flags. |
 | `list_categories` | Category groups, budgeted / activity / balance, goals, hidden. |
 | `list_transactions` | The period's transactions (filtered to the plan's window/accounts). |
@@ -158,11 +158,28 @@ constant corrupts every downstream number; failing loud is correct.
 - **Milliunits → currency.** Every YNAB monetary amount is in **milliunits**:
   divide by **1000** before any display or comparison. (A balance of `-12340`
   is `-12.34`.) Do this once, at read, so every downstream comparison is in
-  currency units.
-- **Multi-currency.** Format amounts using the budget's own `currency_format`
-  (symbol, decimal/group separators, decimal digits) from the budget settings —
-  don't assume `$` or two decimals. Mixed-currency accounts are reported in each
-  account's native currency; never sum across currencies into one figure.
+  currency units. The divisor is always **1000** regardless of currency; only
+  `decimal_digits` (below) governs display rounding — never assume two decimals.
+- **Read `currency_format` at review start.** The `list_budgets` response carries
+  the budget's `currency_format` object. Extract it once, at the start of the
+  review, and hold it for the whole session: `iso_code`, `currency_symbol`,
+  `symbol_first`, `decimal_digits`, `group_separator`, `decimal_separator`,
+  `display_symbol`.
+- **Render every amount through `formatMoney`.** Format all displayed money with
+  the shared helper [`../../assets/format-money.js`](../../assets/format-money.js)
+  — `formatMoney(milliunits, currency_format)` — never hardcode `$`, a comma, a
+  period, or two decimals. It divides by 1000, rounds to `decimal_digits` (0 for
+  currencies like JPY, 2 for USD/EUR, 3 for others), places the symbol per
+  `symbol_first`, and applies `group_separator` / `decimal_separator`. So a EUR
+  budget renders `1.234,56 €` and a JPY budget renders `¥1,234`, driven entirely
+  by the budget's own `currency_format`.
+- **Multi-currency.** Mixed-currency accounts are reported in each account's
+  native currency; never sum across currencies into one figure.
+- **Currency scope is presentation only.** `formatMoney` fixes how amounts are
+  *displayed*. The **tax engine stays US-only** and is **not** extended to any
+  non-US tax regime even when the budget currency is not USD — a non-USD budget
+  gets correct currency display but the same US-only tax logic (see the README
+  scope note).
 
 ---
 

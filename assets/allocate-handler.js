@@ -58,6 +58,7 @@
  */
 
 const { ALLOWED_TOOLS } = require('./write-safety-guardrail');
+const { formatMoney } = require('./format-money');
 
 /** The operation type this handler owns. */
 const OP_TYPE = 'allocate';
@@ -165,21 +166,17 @@ function buildApplyArgs(op) {
 
 /**
  * Format raw milliunits as a human-readable currency string. Display-only: the
- * ÷1000 conversion happens HERE and nowhere on the apply path (contract §2:
- * `250000` → `$250.00`, `-54990` → `-$54.99`). Integer-cent arithmetic avoids a
- * float round-trip; thousands are grouped for readability, deterministically (no
- * locale). A shared money helper is planned in the backlog (contract §2); until it
- * lands this local formatter owns allocate's display conversion.
+ * ÷1000 conversion happens on the display path (contract §2: `250000` → `$250.00`,
+ * `-54990` → `-$54.99`), never on the apply path. Delegates to the shared money
+ * helper (assets/format-money.js — issue #34, ROADMAP #8, contract §2), the single
+ * source of truth for milliunits → currency formatting. The write path does not
+ * fetch the budget's `currency_format`, so the dry-run renders with the US/USD
+ * default; when a non-USD write path is built it passes the budget's format here.
  * @param {number} milliunits raw integer milliunits.
  * @returns {string}
  */
 function formatMilliunits(milliunits) {
-  const cents = Math.round(milliunits / 10);
-  const sign = cents < 0 ? '-' : '';
-  const abs = Math.abs(cents);
-  const dollars = String(Math.floor(abs / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  const remainder = String(abs % 100).padStart(2, '0');
-  return `${sign}$${dollars}.${remainder}`;
+  return formatMoney(milliunits);
 }
 
 /**

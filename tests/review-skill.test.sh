@@ -161,5 +161,12 @@ assert_present "HTML-escapes untrusted YNAB strings" "HTML-escape"
 # ---- milliunit rule (AC) -----------------------------------------------------
 assert_present_re "divides milliunits by 1000" "milliunit|/ ?1000|by .*1000"
 
+# ---- multi-currency: currency_format read + formatMoney (issue #34) ----------
+assert_present "reads the budget currency_format"           "currency_format"
+assert_present "renders amounts via the shared formatMoney" "formatMoney"
+assert_present "references the shared money helper file"    "assets/format-money.js"
+assert_present "rounds by decimal_digits, not a fixed 2"    "decimal_digits"
+assert_present_re "currency scope keeps the tax engine US-only" "tax engine.*US-only|US-only.*tax"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
