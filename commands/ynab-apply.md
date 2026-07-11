@@ -312,8 +312,14 @@ const live = await applyChangeset(approvedChangeset, {
   activeBudgetId: ACTIVE_BUDGET_ID,
   dryRun: false,                // REAL apply — approved ops only
   toolMap, readLiveState, applyOp, audit,
+  authPreflight,                // read-only ynab_list_budgets; THROWS on 401/403/network
 });
 ```
+
+`authPreflight` is **mandatory** on real apply — wire it to a read-only
+`ynab_list_budgets` (resolved from the SSoT) that **throws** on a non-2xx or network
+failure. The executor runs it **before the first mutation** to confirm the token is
+valid and write-capable; a failure aborts the batch with **zero mutations**.
 
 The executor re-checks drift per op (a now-stale op is skipped, not clobbered),
 dispatches the namespaced mutating tool for each clean op, and appends an audit record
@@ -326,6 +332,17 @@ bash "${CLAUDE_PLUGIN_ROOT}/bin/audit-log.sh" last <N>   # the N ops just applie
 ```
 
 Show, per op: `applied` / `skipped-stale` / `error`, with before → after (÷1000).
+
+### Auth failure — surface it and stop (GAP-8 / #50)
+
+If the outcome `reason` is `auth_preflight_fail` or `auth_abort`, the token failed
+(revoked, expired, or missing write scope). Render the message with the executor's
+`describeAuthFailure(outcome)` helper — it lists which ops applied before the stop,
+names the failed op and its `error_class`, and states the exact remediation
+(`re-issue token via /workbench-ynab:setup` for `auth_revoked`; `token requires write
+scope` for `insufficient_scope`), distinguishing **"no changes applied"** from
+**"N of M applied, batch stopped at op K"**. **Never** auto-retry a failed batch —
+re-running after the fix resumes safely via the idempotency guard (Step 1b).
 
 ## Loop or finish
 

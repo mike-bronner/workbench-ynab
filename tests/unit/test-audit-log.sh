@@ -95,11 +95,16 @@ assert_eq    "monthly file created at audit-YYYY-MM.jsonl" "1" "$([ -f "$FILE" ]
 assert_eq    "exactly one record appended"                "1" "$(wc -l < "$FILE" | tr -d ' ')"
 
 REC="$(head -1 "$FILE")"
-assert_jq "record has all 11 required fields" "$REC" '
+assert_jq "record has all 13 required fields" "$REC" '
   has("timestamp") and has("schema_version") and has("run_id")
   and has("operation_id") and has("operation_type") and has("target_entity_ids")
   and has("before") and has("after") and has("tool")
-  and has("result_status") and has("dry_run")'
+  and has("result_status") and has("error_class") and has("applied_state")
+  and has("dry_run")'
+# A normal (non-error) op carries null in both auth-failure fields — they are
+# populated only when the executor stamps an errored op (GAP-8 / #50).
+assert_jq "error_class is null on a normal op"   "$REC" '.error_class == null'
+assert_jq "applied_state is null on a normal op" "$REC" '.applied_state == null'
 assert_eq "timestamp is ISO 8601 + Z"        "2026-06-15T12:00:00Z" "$(printf '%s' "$REC" | jq -r '.timestamp')"
 assert_eq "schema_version from change-set"   "1.0.0"                "$(printf '%s' "$REC" | jq -r '.schema_version')"
 assert_eq "run_id from change-set source"    "run-A"                "$(printf '%s' "$REC" | jq -r '.run_id')"
@@ -130,6 +135,21 @@ _audit_append "$ALLOCATE_OP" "$ALLOCATE_RES" false
 assert_eq "three records after another append" "3" "$(wc -l < "$FILE" | tr -d ' ')"
 FIRST_AFTER="$(head -1 "$FILE")"
 assert_eq "first line byte-identical after later appends" "$FIRST_BEFORE" "$FIRST_AFTER"
+
+# ---------------------------------------------------------------------------
+# GAP-8 / #50: an errored op's result carries error_class + applied_state, and the
+# writer persists them verbatim so a later resume (#48) can reason about failed ops.
+echo "auth-failure fields: an errored op records error_class + applied_state:"
+export YNAB_AUDIT_DIR="$SANDBOX/errfields"
+export YNAB_AUDIT_MONTH="2026-06"
+export YNAB_AUDIT_TIMESTAMP="2026-06-15T12:20:00Z"
+ERR_RES='{"tool":"mcp__ynab__ynab_update_transaction","status":"error","schema_version":"1.0.0","run_id":"run-A","error_class":"auth_revoked","applied_state":"not_applied"}'
+_audit_append "$CATEGORIZE_OP" "$ERR_RES" false
+EFILE="$SANDBOX/errfields/audit-2026-06.jsonl"
+ERR_REC="$(head -1 "$EFILE")"
+assert_eq "errored op result_status is error"        "error"        "$(printf '%s' "$ERR_REC" | jq -r '.result_status')"
+assert_eq "error_class persisted verbatim"           "auth_revoked" "$(printf '%s' "$ERR_REC" | jq -r '.error_class')"
+assert_eq "applied_state persisted verbatim"         "not_applied"  "$(printf '%s' "$ERR_REC" | jq -r '.applied_state')"
 
 # ---------------------------------------------------------------------------
 # Writer hardening (issue #57, Mike's call): the writer must NEVER leave a

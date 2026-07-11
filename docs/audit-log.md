@@ -77,8 +77,18 @@ fragment (see [Why JSONL](#why-jsonl-one-object-per-line-not-a-single-json-array
 | Argument | Shape | Notes |
 |---|---|---|
 | `operation_json` | a change-set operation (see [`assets/changeset-schema.json`](../assets/changeset-schema.json)) | `before`/`after` are stored **verbatim, in raw milliunits** |
-| `result_json` | `{ tool, status, schema_version, run_id }` | the executor's call descriptor + the change-set provenance it carries |
+| `result_json` | `{ tool, status, schema_version, run_id, error_class?, applied_state? }` | the executor's call descriptor + the change-set provenance it carries; the last two are present only on an errored op |
 | `dry_run` | `true`\|`1`\|`yes` → `true`; else `false` | dry runs are logged too, flagged, so they leave a full paper trail |
+
+On an **errored** op the executor also stamps two auth-failure fields (GAP-8 / #50),
+which the writer persists verbatim (both default to `null` on a non-error op):
+
+| Field | Values | Meaning |
+|---|---|---|
+| `error_class` | `auth_revoked` / `insufficient_scope` / `rate_limited` / `unknown` | the failure class the executor classified the thrown port error into |
+| `applied_state` | `not_applied` / `unknown` | `not_applied` when YNAB rejected the call (a 4xx, so nothing changed); `unknown` when it can't be determined (a 5xx or a network timeout mid-mutation) |
+
+These two are the substrate the idempotent-resume design ([#48](https://github.com/mike-bronner/workbench-ynab/issues/48)) reads to reason about a failed op without re-querying.
 
 `STDOUT` is left untouched (reserved for the read helper); diagnostics go to
 `STDERR`; a non-zero exit signals a build/append failure.
@@ -99,9 +109,14 @@ Every record contains exactly these fields:
   "after":  { "category_id": "c9", "category_name": "Groceries" },
   "tool": "mcp__ynab__ynab_update_transaction",
   "result_status": "success",
+  "error_class": null,
+  "applied_state": null,
   "dry_run": false
 }
 ```
+
+`error_class` and `applied_state` are `null` on a successful or dry-run record and
+carry a value only when `result_status` is `error` (see the writer contract above).
 
 `target_entity_ids` is derived from whichever id fields the operation carries:
 `transaction_id` / `category_id` / `account_id`, followed by any

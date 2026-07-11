@@ -18,6 +18,15 @@
  *  - FAIL-CLOSED at the guardrail. The whole change-set runs through
  *    `evaluateChangeset` first; a single blocked operation aborts the ENTIRE
  *    batch — nothing is applied past (or around) a block.
+ *  - AUTH FAIL-CLOSED, both ends (real apply only, GAP-8 / #50). A preflight
+ *    read-only call (`authPreflight`, e.g. ynab_list_budgets) runs BEFORE the first
+ *    mutation; any failure aborts with zero mutations and no per-op audit records.
+ *    And if a 401/403 surfaces mid-batch, the loop STOPS immediately (the token is
+ *    bad — continuing would just fail every remaining op). An auth failure aborts the
+ *    whole batch; a single-op data error (422), a rate limit (429), or an
+ *    indeterminate 5xx / network fault is recorded per-op and the batch CONTINUES —
+ *    two mutually-exclusive policies. Every errored op's audit record carries an
+ *    `error_class` and `applied_state` (the substrate the resume design, #48, reads).
  *  - PURE ORCHESTRATOR, INJECTED I/O. This module owns the control flow but holds
  *    no MCP or filesystem coupling: the side-effecting operations are injected as
  *    ports — `readLiveState(op)` (read-only entity resolution + drift detection),
@@ -49,6 +58,7 @@
  *     toolMap: { categorize: '<namespaced tool>', ... },  // the registration point
  *     readLiveState: async (op) => ({ ...fields shaped like op.before }),
  *     applyOp: async (toolName, op) => ({ ...mcp result }),  // real apply only
+ *     authPreflight: async () => ({ ...ynab_list_budgets result }),  // real apply only
  *     audit: async ({ operation, result, dryRun }) => { ... },
  *   });
  *   // outcome.results: [{ op_id, status, dry_run, detail }, ...]
@@ -60,6 +70,11 @@ const {
   evaluateOperation,
   evaluateTool,
 } = require('./write-safety-guardrail');
+const {
+  classifyError,
+  isAuthFailure,
+  remediation,
+} = require('./write-error');
 
 /**
  * The per-operation result statuses. This is the contract M4-5 renders for the
@@ -81,6 +96,8 @@ const OUTCOME = Object.freeze({
   SCHEMA_INVALID: 'schema_invalid',
   GUARDRAIL_BLOCK: 'guardrail_block',
   TOOL_BLOCK: 'tool_block',
+  AUTH_PREFLIGHT_FAIL: 'auth_preflight_fail',
+  AUTH_ABORT: 'auth_abort',
   DRY_RUN_COMPLETE: 'dry_run_complete',
   APPLY_COMPLETE: 'apply_complete',
 });
@@ -143,12 +160,15 @@ function errMessage(err) {
 async function processOp(op, { activeBudgetId, dryRun, toolMap, readLiveState, applyOp }) {
   const opId = op.id == null ? null : op.id;
 
-  // Re-read live state before processing (both modes). A read failure is a per-op error.
+  // Re-read live state before processing (both modes). A read failure is a per-op
+  // error, classified so an auth failure (a dead token surfaces on the read too)
+  // aborts the batch and the audit record carries error_class / applied_state.
   let live;
   try {
     live = await readLiveState(op);
   } catch (err) {
-    return { op_id: opId, status: STATUS.ERROR, dry_run: dryRun, detail: { phase: 'read', message: errMessage(err) } };
+    const { error_class, applied_state } = classifyError(err);
+    return { op_id: opId, status: STATUS.ERROR, dry_run: dryRun, detail: { phase: 'read', message: errMessage(err), error_class, applied_state } };
   }
 
   // Drift detection — compare live to the op's `before` snapshot.
@@ -181,7 +201,12 @@ async function processOp(op, { activeBudgetId, dryRun, toolMap, readLiveState, a
     const result = await applyOp(toolName, op);
     return { op_id: opId, status: STATUS.APPLIED, dry_run: false, detail: { tool: toolName, result: result == null ? null : result } };
   } catch (err) {
-    return { op_id: opId, status: STATUS.ERROR, dry_run: false, detail: { phase: 'apply', tool: toolName, message: errMessage(err) } };
+    // Classify the mutation failure: error_class drives the abort-vs-continue
+    // decision in the loop (auth → abort; data error / rate limit / 5xx → per-op
+    // error, continue) and applied_state (not_applied vs unknown) lets a later
+    // resume reason about whether the mutation may have landed.
+    const { error_class, applied_state } = classifyError(err);
+    return { op_id: opId, status: STATUS.ERROR, dry_run: false, detail: { phase: 'apply', tool: toolName, message: errMessage(err), error_class, applied_state } };
   }
 }
 
@@ -193,6 +218,7 @@ async function processOp(op, { activeBudgetId, dryRun, toolMap, readLiveState, a
  * so every attempt leaves a paper trail with `dry_run` stamped.
  */
 async function recordAudit(audit, op, result, changeset, toolMap, dryRun) {
+  const detail = result.detail || {};
   await audit({
     operation: op,
     result: {
@@ -200,6 +226,11 @@ async function recordAudit(audit, op, result, changeset, toolMap, dryRun) {
       status: result.status,
       schema_version: changeset.schema_version == null ? null : changeset.schema_version,
       run_id: changeset.source == null ? null : changeset.source,
+      // Present only on an errored op; null everywhere else. These two fields are
+      // the substrate the idempotent-resume design (#48) reads to reason about a
+      // failed op without re-querying — so they flow all the way to the audit log.
+      error_class: detail.error_class == null ? null : detail.error_class,
+      applied_state: detail.applied_state == null ? null : detail.applied_state,
     },
     dryRun,
   });
@@ -224,14 +255,19 @@ async function recordAudit(audit, op, result, changeset, toolMap, dryRun) {
  *   live entity state for drift detection (read-only namespaced MCP reads).
  * @param {(toolName:string, op:object)=>(unknown|Promise<unknown>)} [options.applyOp] REQUIRED
  *   when dryRun is false — dispatches the mutating tool.
+ * @param {()=>(unknown|Promise<unknown>)} [options.authPreflight] REQUIRED when dryRun is
+ *   false — a read-only YNAB call (e.g. ynab_list_budgets) that confirms the token is
+ *   valid and write-capable before the first mutation. It must THROW on a non-2xx /
+ *   network failure; any throw aborts the whole batch before any op is dispatched.
  * @param {(record:{operation:object, result:object, dryRun:boolean})=>(void|Promise<void>)}
  *   options.audit REQUIRED — the append-only audit sink (M4-3).
  * @returns {Promise<{ok:boolean, dry_run:boolean, aborted:boolean, reason:string,
  *   validation?:object, guardrail?:object, toolBlocks?:Array<object>,
+ *   authFailure?:object, total_ops?:number, stopped_at_index?:number,
  *   results:Array<{op_id:string|null, status:string, dry_run:boolean, detail:object}>}>}
  */
 async function applyChangeset(changeset, options = {}) {
-  const { activeBudgetId, dryRun = true, toolMap = {}, readLiveState, applyOp, audit } = options;
+  const { activeBudgetId, dryRun = true, toolMap = {}, readLiveState, applyOp, authPreflight, audit } = options;
 
   // Contract — fail fast on a misconfigured caller before touching the change-set.
   // activeBudgetId is MANDATORY: the caller resolves the active budget (the one the
@@ -250,6 +286,9 @@ async function applyChangeset(changeset, options = {}) {
   }
   if (!dryRun && typeof applyOp !== 'function') {
     throw new TypeError('real apply (dryRun: false) requires an applyOp(toolName, op) function');
+  }
+  if (!dryRun && typeof authPreflight !== 'function') {
+    throw new TypeError('real apply (dryRun: false) requires an authPreflight() function — the preflight auth-check is mandatory before any mutation');
   }
 
   // 1. Schema validation — reject malformed input and call NO ports.
@@ -298,12 +337,68 @@ async function applyChangeset(changeset, options = {}) {
     }
   }
 
+  // 3.5. Auth preflight (real apply only) — a cheap read-only YNAB call BEFORE the
+  //      first mutation confirms the token is valid and write-capable. Any failure
+  //      (401 / 403 / network) aborts the whole batch: zero mutations are attempted
+  //      and NO audit record is written for ops that never ran (#50 AC #2). Dry-run
+  //      never mutates, so it skips the preflight entirely.
+  if (!dryRun) {
+    try {
+      await authPreflight();
+    } catch (err) {
+      const { error_class, applied_state } = classifyError(err);
+      return {
+        ok: false,
+        dry_run: false,
+        aborted: true,
+        reason: OUTCOME.AUTH_PREFLIGHT_FAIL,
+        authFailure: { phase: 'preflight', op_id: null, error_class, applied_state, message: errMessage(err) },
+        total_ops: changeset.operations.length,
+        results: [],
+      };
+    }
+  }
+
   // 4. Per-op loop — apply in array order; one audit record per op processed.
+  //    Two mutually-exclusive failure policies (#50 AC #5): an AUTH failure (401 /
+  //    403 — the token is bad) triggers ABORT-WHOLE-BATCH — record that op, then stop
+  //    immediately (fail-closed), leaving the remaining ops untouched and un-audited;
+  //    every other per-op error (a 422 data error, a 429 rate limit, a 5xx / network
+  //    fault) triggers SKIP-THIS-OP-AND-CONTINUE — the batch keeps going.
   const results = [];
-  for (const op of changeset.operations) {
+  let authFailure = null;
+  for (let index = 0; index < changeset.operations.length; index += 1) {
+    const op = changeset.operations[index];
     const result = await processOp(op, { activeBudgetId, dryRun, toolMap, readLiveState, applyOp });
     await recordAudit(audit, op, result, changeset, toolMap, dryRun);
     results.push(result);
+
+    // Auth failure mid-batch: the token died. Continuing would just fail (and waste a
+    // call) on every remaining op, so stop now. Only on a real apply — a dry-run
+    // mutates nothing, so its per-op errors never warrant an abort.
+    if (!dryRun && result.status === STATUS.ERROR && isAuthFailure(result.detail.error_class)) {
+      authFailure = {
+        phase: result.detail.phase,
+        op_id: result.op_id,
+        index,
+        error_class: result.detail.error_class,
+        applied_state: result.detail.applied_state,
+      };
+      break;
+    }
+  }
+
+  if (authFailure) {
+    return {
+      ok: false,
+      dry_run: false,
+      aborted: true,
+      reason: OUTCOME.AUTH_ABORT,
+      authFailure,
+      stopped_at_index: authFailure.index,
+      total_ops: changeset.operations.length,
+      results,
+    };
   }
 
   return {
@@ -315,10 +410,51 @@ async function applyChangeset(changeset, options = {}) {
   };
 }
 
+/**
+ * Build the human-facing message for an auth-preflight or mid-batch auth abort
+ * (#50 AC #6/#7). It (a) lists the ops that applied before the stop, (b) names the
+ * failed op and its error_class, and (c) states the exact remediation — and it
+ * distinguishes "no changes applied" (preflight, or a first-op failure) from
+ * "N of M ops applied, batch stopped at op K" (a genuine mid-batch failure).
+ * Returns null for any non-auth-failure outcome — the caller renders those (the
+ * dry-run diff, the guardrail block) its own way.
+ * @param {object} outcome an applyChangeset outcome.
+ * @returns {string|null}
+ */
+function describeAuthFailure(outcome) {
+  if (
+    !outcome
+    || (outcome.reason !== OUTCOME.AUTH_PREFLIGHT_FAIL && outcome.reason !== OUTCOME.AUTH_ABORT)
+  ) {
+    return null;
+  }
+
+  const failure = outcome.authFailure || {};
+  const preflight = outcome.reason === OUTCOME.AUTH_PREFLIGHT_FAIL;
+  // Ops that genuinely applied (real apply only) before the stop.
+  const applied = (outcome.results || [])
+    .filter((r) => r.status === STATUS.APPLIED && r.dry_run === false)
+    .map((r) => r.op_id);
+  const total = outcome.total_ops;
+  const stoppedAt = failure.index == null ? null : failure.index + 1; // 1-based op position K
+
+  const headline = preflight || applied.length === 0
+    ? 'No changes applied.'
+    : `${applied.length} of ${total} op(s) applied, batch stopped at op ${stoppedAt}.`;
+
+  const lines = [headline];
+  if (applied.length > 0) lines.push(`Applied before the failure: ${applied.join(', ')}.`);
+  const where = preflight ? 'preflight auth-check' : `op ${failure.op_id}`;
+  lines.push(`Failed at ${where}: ${failure.error_class} (applied_state=${failure.applied_state}).`);
+  lines.push(`Remediation: ${remediation(failure.error_class)}.`);
+  return lines.join('\n');
+}
+
 module.exports = {
   STATUS,
   OUTCOME,
   deepEqual,
   isStale,
   applyChangeset,
+  describeAuthFailure,
 };

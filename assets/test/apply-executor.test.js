@@ -54,6 +54,12 @@ const noDrift = () => spy((op) => clone(op.before));
 /** A no-op audit sink spy. */
 const auditSpy = () => spy(() => undefined);
 
+/** authPreflight that succeeds — a valid, write-capable token (real apply only). */
+const okPreflight = () => spy(() => ({ budgets: [{ id: 'b1' }] }));
+
+/** Build a thrown error carrying an HTTP status, the shape a real MCP port surfaces. */
+const httpError = (status, message) => Object.assign(new Error(message || `HTTP ${status}`), { status });
+
 // --- helpers: deepEqual / isStale -----------------------------------------
 
 test('deepEqual compares integer milliunits exactly and never coerces to float', () => {
@@ -168,6 +174,7 @@ test('(c) real apply skips the stale op individually and applies the clean one',
     toolMap: TOOL_MAP,
     readLiveState: read,
     applyOp: apply,
+    authPreflight: okPreflight(),
     audit,
   });
 
@@ -205,6 +212,7 @@ test('an applyOp failure becomes a per-op error and the rest of the batch still 
     toolMap: TOOL_MAP,
     readLiveState: noDrift(),
     applyOp: apply,
+    authPreflight: okPreflight(),
     audit: auditSpy(),
   });
   const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
@@ -235,6 +243,7 @@ test('(d) a guardrail block (wrong active budget) aborts the whole batch: nothin
     toolMap: TOOL_MAP,
     readLiveState: noDrift(),
     applyOp: apply,
+    authPreflight: okPreflight(),
     audit,
   });
 
@@ -275,6 +284,7 @@ test('(e) a schema-invalid change-set is rejected before any port is touched', a
   delete cs.operations[0].rationale; // schema requires rationale; the guardrail does not check it
   const read = noDrift();
   const apply = spy();
+  const preflight = okPreflight();
   const audit = auditSpy();
 
   const out = await applyChangeset(cs, {
@@ -283,6 +293,7 @@ test('(e) a schema-invalid change-set is rejected before any port is touched', a
     toolMap: TOOL_MAP,
     readLiveState: read,
     applyOp: apply,
+    authPreflight: preflight,
     audit,
   });
 
@@ -291,9 +302,10 @@ test('(e) a schema-invalid change-set is rejected before any port is touched', a
   assert.equal(out.validation.valid, false);
   assert.ok(out.validation.errors.length > 0);
   assert.deepEqual(out.results, []);
-  // No port was called — not even the read.
+  // No port was called — not even the read or the auth preflight.
   assert.equal(read.calls.length, 0);
   assert.equal(apply.calls.length, 0);
+  assert.equal(preflight.calls.length, 0);
   assert.equal(audit.calls.length, 0);
 });
 
@@ -308,6 +320,7 @@ test('the op→tool mapping is supplied by the caller (registration point), not 
     toolMap: TOOL_MAP,
     readLiveState: noDrift(),
     applyOp: apply,
+    authPreflight: okPreflight(),
     audit: auditSpy(),
   });
   // The exact tool the executor dispatched is the one the caller registered.
@@ -324,6 +337,7 @@ test('real apply aborts the whole batch when a registered tool is denied / un-na
     toolMap: { categorize: 'mcp__ynab__ynab_create_transaction' },
     readLiveState: noDrift(),
     applyOp: apply,
+    authPreflight: okPreflight(),
     audit: auditSpy(),
   });
   assert.equal(out.ok, false);
@@ -340,6 +354,7 @@ test('real apply blocks an op whose type has no registered tool (fail-closed)', 
     toolMap: {}, // categorize unmapped → evaluateTool(undefined) blocks
     readLiveState: noDrift(),
     applyOp: spy(),
+    authPreflight: okPreflight(),
     audit: auditSpy(),
   });
   assert.equal(out.reason, OUTCOME.TOOL_BLOCK);
@@ -401,7 +416,7 @@ test('every result entry matches the { op_id, status, dry_run, detail } contract
 
 // --- port contract (fail fast on misconfiguration) -------------------------
 
-test('a missing readLiveState or audit port throws; real apply also requires applyOp', async () => {
+test('a missing readLiveState or audit port throws; real apply also requires applyOp + authPreflight', async () => {
   const cs = loadFixture('categorize.example.json');
   await assert.rejects(
     () => applyChangeset(cs, { activeBudgetId: cs.budget_id, audit: auditSpy() }),
@@ -415,6 +430,11 @@ test('a missing readLiveState or audit port throws; real apply also requires app
     () => applyChangeset(cs, { activeBudgetId: cs.budget_id, dryRun: false, readLiveState: noDrift(), audit: auditSpy() }),
     /applyOp/,
   );
+  // Real apply also fails closed without the mandatory auth preflight port.
+  await assert.rejects(
+    () => applyChangeset(cs, { activeBudgetId: cs.budget_id, dryRun: false, toolMap: TOOL_MAP, readLiveState: noDrift(), applyOp: spy(), audit: auditSpy() }),
+    /authPreflight/,
+  );
 });
 
 test('a missing or empty activeBudgetId throws (fail-closed, never a silent envelope fallback)', async () => {
@@ -427,4 +447,247 @@ test('a missing or empty activeBudgetId throws (fail-closed, never a silent enve
     () => applyChangeset(cs, { activeBudgetId: '', readLiveState: noDrift(), audit: auditSpy() }),
     /activeBudgetId/,
   );
+});
+
+// --- (#50) auth-failure handling on the write path -------------------------
+
+const { describeAuthFailure } = require('../apply-executor');
+
+/** applyOp that throws `err` for one op id and succeeds for the rest. */
+const applyFailingOn = (failId, err) => spy((toolName, op) => {
+  if (op.id === failId) throw err;
+  return { ok: true };
+});
+
+test('preflight auth failure aborts before any mutation — zero ops, no audit records', async () => {
+  const cs = loadFixture('combined.example.json');
+  const apply = spy();
+  const audit = auditSpy();
+
+  const out = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    applyOp: apply,
+    authPreflight: spy(() => { throw httpError(401, 'token revoked'); }),
+    audit,
+  });
+
+  assert.equal(out.ok, false);
+  assert.equal(out.aborted, true);
+  assert.equal(out.reason, OUTCOME.AUTH_PREFLIGHT_FAIL);
+  assert.equal(out.authFailure.error_class, 'auth_revoked');
+  assert.equal(out.authFailure.applied_state, 'not_applied');
+  assert.equal(out.authFailure.phase, 'preflight');
+  assert.deepEqual(out.results, []);
+  // The mutation port was NEVER reached, and no op that never ran was audited.
+  assert.equal(apply.calls.length, 0);
+  assert.equal(audit.calls.length, 0);
+});
+
+test('preflight NETWORK failure (statusless) also aborts the whole batch', async () => {
+  const cs = loadFixture('combined.example.json');
+  const apply = spy();
+
+  const out = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    applyOp: apply,
+    authPreflight: spy(() => { throw new Error('network timeout: socket hang up'); }),
+    audit: auditSpy(),
+  });
+
+  assert.equal(out.reason, OUTCOME.AUTH_PREFLIGHT_FAIL);
+  assert.equal(out.authFailure.error_class, 'unknown');
+  assert.equal(out.authFailure.applied_state, 'unknown');
+  assert.equal(apply.calls.length, 0);
+});
+
+test('mid-batch 401 stops the batch and audits the failed op (auth_revoked / not_applied)', async () => {
+  const cs = loadFixture('combined.example.json');
+  const failId = cs.operations[1].id; // fail on the SECOND op → the first still applies
+  const apply = applyFailingOn(failId, httpError(401, 'unauthorized'));
+  const audit = auditSpy();
+
+  const out = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit,
+  });
+
+  assert.equal(out.ok, false);
+  assert.equal(out.aborted, true);
+  assert.equal(out.reason, OUTCOME.AUTH_ABORT);
+  assert.equal(out.stopped_at_index, 1);
+  assert.equal(out.total_ops, cs.operations.length);
+
+  // Op 0 applied; op 1 errored (auth); op 2 was NEVER processed.
+  assert.equal(out.results.length, 2);
+  assert.equal(out.results[0].status, STATUS.APPLIED);
+  assert.equal(out.results[1].status, STATUS.ERROR);
+  assert.equal(out.results[1].detail.error_class, 'auth_revoked');
+  assert.equal(out.results[1].detail.applied_state, 'not_applied');
+  // The mutation was attempted for op 0 and op 1 only, never op 2 (fail-closed stop).
+  assert.equal(apply.calls.length, 2);
+  assert.ok(!apply.calls.some(([, op]) => op.id === cs.operations[2].id));
+
+  // Exactly the two processed ops were audited; the failed op's record carries the class.
+  assert.equal(audit.calls.length, 2);
+  const failedRec = audit.calls[1][0];
+  assert.equal(failedRec.result.status, STATUS.ERROR);
+  assert.equal(failedRec.result.error_class, 'auth_revoked');
+  assert.equal(failedRec.result.applied_state, 'not_applied');
+});
+
+test('mid-batch 403 stops the batch and records insufficient_scope', async () => {
+  const cs = loadFixture('combined.example.json');
+  const failId = cs.operations[0].id; // fail on the FIRST op → nothing applies
+  const audit = auditSpy();
+
+  const out = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    applyOp: applyFailingOn(failId, httpError(403, 'not authorized (scope)')),
+    authPreflight: okPreflight(),
+    audit,
+  });
+
+  assert.equal(out.reason, OUTCOME.AUTH_ABORT);
+  assert.equal(out.stopped_at_index, 0);
+  assert.equal(out.results.length, 1);
+  assert.equal(out.results[0].detail.error_class, 'insufficient_scope');
+  assert.equal(audit.calls.length, 1);
+});
+
+test('a single-op 422 skips that op and CONTINUES the rest (data-error policy)', async () => {
+  const cs = loadFixture('combined.example.json');
+  const failId = cs.operations[1].id;
+  const apply = applyFailingOn(failId, httpError(422, 'Unprocessable Entity'));
+  const audit = auditSpy();
+
+  const out = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit,
+  });
+
+  // NOT an abort — the whole batch is processed to completion.
+  assert.equal(out.ok, true);
+  assert.equal(out.reason, OUTCOME.APPLY_COMPLETE);
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId[failId].status, STATUS.ERROR);
+  assert.equal(byId[failId].detail.error_class, 'unknown'); // 422 is not an auth/rate class
+  assert.equal(byId[failId].detail.applied_state, 'not_applied'); // but YNAB rejected it → no change
+  for (const r of out.results) {
+    if (r.op_id !== failId) assert.equal(r.status, STATUS.APPLIED);
+  }
+  // Every op was attempted and audited (the 422 didn't stop the batch).
+  assert.equal(apply.calls.length, cs.operations.length);
+  assert.equal(audit.calls.length, cs.operations.length);
+});
+
+test('a network timeout on a mutation records applied_state=unknown and continues', async () => {
+  const cs = loadFixture('combined.example.json');
+  const failId = cs.operations[1].id;
+  const out = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    applyOp: applyFailingOn(failId, new Error('network timeout during mutation')),
+    authPreflight: okPreflight(),
+    audit: auditSpy(),
+  });
+
+  assert.equal(out.reason, OUTCOME.APPLY_COMPLETE); // indeterminate ≠ auth → not an abort
+  const failed = out.results.find((r) => r.op_id === failId);
+  assert.equal(failed.status, STATUS.ERROR);
+  assert.equal(failed.detail.applied_state, 'unknown'); // may have landed server-side
+  assert.equal(failed.detail.error_class, 'unknown');
+});
+
+test('a normal applied op audits error_class=null and applied_state=null', async () => {
+  const cs = loadFixture('categorize.example.json');
+  const audit = auditSpy();
+  await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    applyOp: spy(() => ({ ok: true })),
+    authPreflight: okPreflight(),
+    audit,
+  });
+  const [rec] = audit.calls[0];
+  assert.equal(rec.result.status, STATUS.APPLIED);
+  assert.equal(rec.result.error_class, null);
+  assert.equal(rec.result.applied_state, null);
+});
+
+test('describeAuthFailure distinguishes "no changes" from "N of M applied, stopped at op K"', async () => {
+  const cs = loadFixture('combined.example.json');
+
+  // Mid-batch abort after op 0 applied → "1 of 3 applied, stopped at op 2".
+  const mid = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    applyOp: applyFailingOn(cs.operations[1].id, httpError(401)),
+    authPreflight: okPreflight(),
+    audit: auditSpy(),
+  });
+  const midMsg = describeAuthFailure(mid);
+  assert.match(midMsg, /1 of \d+ op\(s\) applied, batch stopped at op 2/);
+  assert.match(midMsg, /Applied before the failure: /);
+  assert.match(midMsg, /re-issue token via \/workbench-ynab:setup/); // auth_revoked remediation
+
+  // Preflight failure → "No changes applied." + the scope remediation.
+  const pre = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    applyOp: spy(),
+    authPreflight: spy(() => { throw httpError(403); }),
+    audit: auditSpy(),
+  });
+  const preMsg = describeAuthFailure(pre);
+  assert.match(preMsg, /^No changes applied\./);
+  assert.match(preMsg, /token requires write scope/);
+
+  // A first-op mid-batch failure is also "No changes applied." (nothing applied yet).
+  const first = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    applyOp: applyFailingOn(cs.operations[0].id, httpError(401)),
+    authPreflight: okPreflight(),
+    audit: auditSpy(),
+  });
+  assert.match(describeAuthFailure(first), /^No changes applied\./);
+
+  // A non-auth-failure outcome has no auth message.
+  const clean = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: true,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    audit: auditSpy(),
+  });
+  assert.equal(describeAuthFailure(clean), null);
 });
