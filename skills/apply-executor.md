@@ -164,9 +164,23 @@ and audit log:
   audit log. The record mirrors the writer's
   `_audit_append <operation_json> <result_json> <dry_run>` signature
   ([`docs/audit-log.md`](../docs/audit-log.md)): `operation` is the change-set op,
-  `result` is `{ tool, status, schema_version, run_id }`, and `dryRun` is stamped
-  on every record — **dry-run attempts are audited too**, flagged, so they leave a
-  full paper trail.
+  `result` is `{ tool, status, schema_version, run_id, error_class, applied_state }`
+  (the last two are `null` on a non-error op and populated only on an errored one —
+  see [`docs/audit-log.md`](../docs/audit-log.md) for the field semantics), and
+  `dryRun` is stamped on every record — **dry-run attempts are audited too**,
+  flagged, so they leave a full paper trail.
+
+> **Every port wrapper must `throw` on failure — check `result.isError` first.**
+> The auth-preflight, mid-batch abort, and error-classification machinery all key
+> on the ports **throwing**: `classifyError` only runs inside the executor's
+> `catch` blocks. But the vendored YNAB MCP (`vendor/ynab-mcp/index.cjs`) surfaces
+> auth / rate-limit / 5xx failures as a **resolved** `{ isError: true, … }` result,
+> not a rejected promise. So each wrapper for `readLiveState`, `applyOp`, and
+> `authPreflight` **must inspect `result.isError` and `throw`** (rethrowing the
+> structured error, preserving the HTTP status) before returning to the executor.
+> A wrapper that returns the MCP result verbatim fails **open** — a 401 preflight
+> would silently "pass" and a mid-batch 401 would look like a success. Mirrored in
+> [`ynab-tools.md`](protocol/ynab-tools.md).
 
 ### Deferred-tool boot-patience — load schemas before the first MCP call
 
