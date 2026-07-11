@@ -76,6 +76,20 @@ test('(a) first run: writeState creates the file with every required top-level f
   assert.equal(onDisk.serverKnowledge, 42);
 });
 
+test('readState heals forward on a corrupt file: unparseable → existed:false + default shape', () => {
+  // A truncated / garbage state file must not crash an unattended pass. readState
+  // treats it as a first run (existed:false, default shape), so the next writeState
+  // rewrites a clean file rather than the poll throwing on a JSON.parse.
+  const statePath = freshPath();
+  writeFileSync(statePath, '{ this is not valid json', 'utf8');
+  const { state, existed } = readState({ statePath });
+  assert.equal(existed, false, 'a corrupt file heals forward as a first run');
+  assert.deepEqual(state, defaultState(), 'corrupt file yields the default shape, not a throw');
+  for (const f of REQUIRED_FIELDS) {
+    assert.ok(Object.prototype.hasOwnProperty.call(state, f), `healed state missing required field: ${f}`);
+  }
+});
+
 // --- (b) second run reads + updates without duplicating fields --------------
 
 test('(b) second run: reads existing state, updates in place, no duplicated fields', () => {
