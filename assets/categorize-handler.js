@@ -75,6 +75,7 @@
  */
 
 const { STATUS, OUTCOME, applyChangeset } = require('./apply-executor');
+const { validateChangeset } = require('./validate-changeset');
 const { ALLOWED_TOOLS } = require('./write-safety-guardrail');
 
 /** The op type this handler is the sole registered handler for (M4-4 registration). */
@@ -202,14 +203,21 @@ async function loadSchemas({ toolSearch, sleep, retries, delayMs } = {}) {
  * Resolve the proposed category id for an op. PREFER the already-resolved
  * `after.category_id` — the M4-10 proposal SHOULD pre-resolve ids so this lookup
  * never runs. ONLY when the id is absent do we fall back to a name lookup via the
- * injected read port (`listCategories`). Never throws: an unresolvable name (or a
- * lookup failure, or a missing port) returns `{ error }`, which the caller turns
+ * injected read port (`listCategories`). Never throws: an unresolvable name, an
+ * AMBIGUOUS name (>1 match — YNAB allows identically-named categories across
+ * groups, and `after` carries no group to disambiguate), a cross-budget op, a
+ * lookup failure, or a missing port all return `{ error }`, which the caller turns
  * into an `error` result so the rest of the batch still proceeds.
+ *
+ * Defense-in-depth: the name lookup reads `listCategories(op.budget_id)` — which
+ * runs BEFORE the executor's guardrail — so when `activeBudgetId` is known we
+ * refuse the read for an op targeting any other budget. The mutation stays
+ * fail-closed at the guardrail regardless; this stops even a cross-budget READ.
  * @param {object} op
- * @param {{listCategories?: Function}} ctx
+ * @param {{listCategories?: Function, activeBudgetId?: string}} ctx
  * @returns {Promise<{category_id: string, category_name: string|null}|{error: string}>}
  */
-async function resolveCategory(op, { listCategories }) {
+async function resolveCategory(op, { listCategories, activeBudgetId }) {
   const after = (op && op.after) || {};
   if (typeof after.category_id === 'string' && after.category_id.length > 0) {
     return { category_id: after.category_id, category_name: after.category_name ?? null };
@@ -222,6 +230,11 @@ async function resolveCategory(op, { listCategories }) {
   if (typeof listCategories !== 'function') {
     return { error: `categorize op ${op.id}: after.category_id absent and no listCategories port wired to resolve "${name}".` };
   }
+  // Defense-in-depth: never issue even a READ against a budget other than the
+  // active one (the name lookup runs ahead of the executor's guardrail).
+  if (typeof activeBudgetId === 'string' && activeBudgetId.length > 0 && op.budget_id !== activeBudgetId) {
+    return { error: `categorize op ${op.id}: op.budget_id "${op.budget_id}" is not the active budget — refusing a cross-budget category lookup.` };
+  }
 
   let categories;
   try {
@@ -229,11 +242,15 @@ async function resolveCategory(op, { listCategories }) {
   } catch (err) {
     return { error: `categorize op ${op.id}: category lookup failed: ${errMessage(err)}` };
   }
-  const match = (Array.isArray(categories) ? categories : []).find((c) => c && c.name === name);
-  if (!match || typeof match.id !== 'string' || match.id.length === 0) {
+  const matches = (Array.isArray(categories) ? categories : [])
+    .filter((c) => c && c.name === name && typeof c.id === 'string' && c.id.length > 0);
+  if (matches.length === 0) {
     return { error: `categorize op ${op.id}: category name "${name}" did not resolve to an id.` };
   }
-  return { category_id: match.id, category_name: name };
+  if (matches.length > 1) {
+    return { error: `categorize op ${op.id}: category name "${name}" is ambiguous — it matches ${matches.length} categories; the M4-10 proposal must pre-resolve the category_id.` };
+  }
+  return { category_id: matches[0].id, category_name: name };
 }
 
 /**
@@ -403,7 +420,7 @@ async function applyCategorize(changeset, ctx = {}) {
   for (let i = 0; i < operations.length; i += 1) {
     const op = operations[i];
     if (!op || op.type !== CATEGORIZE_TYPE) { toRun.push({ index: i, op }); continue; }
-    const resolved = await resolveCategory(op, { listCategories: listCategoriesPatient });
+    const resolved = await resolveCategory(op, { listCategories: listCategoriesPatient, activeBudgetId });
     if (resolved.error) {
       merged[i] = catResult(op, STATUS.ERROR, dryRun, { phase: 'resolve', message: resolved.error });
       continue;
@@ -412,10 +429,21 @@ async function applyCategorize(changeset, ctx = {}) {
     toRun.push({ index: i, op: alreadyResolved ? op : enrichAfter(op, resolved) });
   }
 
-  // Every op was an unresolvable-name error → nothing to run. A resolution failure
-  // is a per-op error, not a batch abort (mirroring the executor's per-op error
-  // semantics), so the batch still "completes".
+  // Nothing reached the executor. Two very different reasons:
   if (toRun.length === 0) {
+    // (a) The envelope carried NO operations (`null` / `{}` / `{operations: []}` /
+    //     a non-array `operations`). A valid change-set requires >=1 operation
+    //     (schema `minItems`), so this is a MALFORMED envelope — fail CLOSED with
+    //     `schema_invalid` (matching the executor's own shape) rather than
+    //     reporting a fail-open "success" for garbage input. The rest of this
+    //     write path is fail-closed everywhere else; the short-circuit must be too.
+    if (operations.length === 0) {
+      return { ok: false, dry_run: dryRun, aborted: true, reason: OUTCOME.SCHEMA_INVALID, validation: validateChangeset(changeset), results: [] };
+    }
+    // (b) Every op was a categorize op that errored in resolution (e.g. an
+    //     unresolvable name). A resolution failure is a per-op error, not a batch
+    //     abort (mirroring the executor's per-op error semantics), so the batch
+    //     still "completes" with those error results.
     return {
       ok: true,
       dry_run: dryRun,
@@ -440,14 +468,22 @@ async function applyCategorize(changeset, ctx = {}) {
     },
   );
 
-  // Normal / per-op / guardrail-block / tool-block: one executor result per run op —
-  // map each back to its original slot in the categorize contract. A pre-loop abort
-  // (schema_invalid) yields no per-op results; surface that outcome as-is.
+  // Map each executor per-op result back to its original slot in the categorize
+  // contract. On a normal run and on the guardrail-block / tool-block aborts the
+  // executor returns one result per run op (a BLOCKED per op). A `schema_invalid`
+  // abort returns `results: []` (no per-op results, nothing audited) — fill those
+  // run slots with a per-op schema error so the abort is surfaced WITHOUT
+  // discarding the resolve-phase error slots already computed in `merged`. Either
+  // way every op the caller handed us gets exactly one result (AC8), and the
+  // top-level outcome (`ok` / `aborted` / `reason`) is preserved from the executor.
   if (outcome.results.length === toRun.length) {
     outcome.results.forEach((r, k) => { merged[toRun[k].index] = toCategorizeResult(r, toRun[k].op); });
-    return { ...outcome, results: merged };
+  } else {
+    for (const { index, op } of toRun) {
+      merged[index] = catResult(op, STATUS.ERROR, dryRun, { phase: 'schema', reason: outcome.reason, validation: outcome.validation });
+    }
   }
-  return outcome;
+  return { ...outcome, results: merged };
 }
 
 module.exports = {

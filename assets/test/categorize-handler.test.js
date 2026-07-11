@@ -331,6 +331,27 @@ test('enrichAfter writes the resolved id into a COPY and never sets a null categ
   assert.ok(!('category_name' in noName.after)); // never a null string field
 });
 
+test('resolveCategory errors on an AMBIGUOUS category name (>1 match) instead of guessing the first', async () => {
+  // YNAB allows identically-named categories across groups; `after` carries no group.
+  const nameOnly = op({ after: { category_name: 'Groceries' } });
+  const listCategories = spy(() => [
+    { id: 'c-g1', name: 'Groceries' }, // e.g. under "Monthly"
+    { id: 'c-g2', name: 'Groceries' }, // duplicate name under "Weekly"
+  ]);
+  const resolved = await resolveCategory(nameOnly, { listCategories, activeBudgetId: BUDGET });
+  assert.ok(resolved.error);
+  assert.match(resolved.error, /ambiguous/i);
+});
+
+test('resolveCategory refuses a cross-budget category READ (defense-in-depth ahead of the guardrail)', async () => {
+  const foreign = op({ budget_id: 'other-budget', after: { category_name: 'Groceries' } });
+  const listCategories = spy(() => [{ id: 'c-g', name: 'Groceries' }]);
+  const resolved = await resolveCategory(foreign, { listCategories, activeBudgetId: BUDGET });
+  assert.ok(resolved.error);
+  assert.match(resolved.error, /cross-budget/);
+  assert.equal(listCategories.calls.length, 0); // the read never happened
+});
+
 // --- Holmes fold-in: name resolution in DRY-RUN too -------------------------
 
 test('(fold-in) dry-run resolves a name-only after and the diff carries the resolved id/name — no mutating call', async () => {
@@ -378,6 +399,50 @@ test('when every op is an unresolvable name, the batch completes with all-error 
   assert.equal(out.ok, true);
   assert.equal(out.aborted, false);
   assert.equal(out.results[0].status, STATUS.ERROR);
+});
+
+// --- blocker 1: a malformed / empty envelope must fail CLOSED, not fail open -----
+
+test('(blocker 1) applyCategorize(null) fails CLOSED as schema_invalid — never a fail-open success', async () => {
+  const out = await applyCategorize(null); // the exact repro: no changeset, no ctx
+  assert.equal(out.ok, false);
+  assert.equal(out.aborted, true);
+  assert.equal(out.reason, OUTCOME.SCHEMA_INVALID);
+  assert.deepEqual(out.results, []);
+});
+
+test('(blocker 1) an empty / non-array operations envelope returns schema_invalid, not "nothing to do, all good"', async () => {
+  for (const bad of [{}, { operations: [] }, { operations: 'nope' }]) {
+    const out = await applyCategorize(bad, baseCtx({ dryRun: false, callTool: spy(() => ({ ok: true })) }));
+    assert.equal(out.ok, false, `${JSON.stringify(bad)} must not report success`);
+    assert.equal(out.aborted, true);
+    assert.equal(out.reason, OUTCOME.SCHEMA_INVALID);
+    assert.deepEqual(out.results, []);
+  }
+});
+
+// --- blocker 2: an executor abort must not discard already-computed results ------
+
+test('(blocker 2) a schema_invalid executor abort still returns EVERY op result — resolve-phase errors are never dropped', async () => {
+  // op A: schema-invalid categorize (missing `rationale`) but passes resolveCategory
+  //       (it carries after.category_id) → handed to the executor, whose trimmed
+  //       batch aborts as schema_invalid (results: []).
+  // op B: a name-only after that can't resolve → a resolve-phase ERROR in `merged`.
+  const a = op({ id: 'op-a', transaction_id: 't-a' });
+  delete a.rationale; // makes the trimmed change-set schema-invalid
+  const b = op({ id: 'op-b', transaction_id: 't-b', after: { category_name: 'Nonexistent' } });
+  const listCategories = spy(() => []); // 'Nonexistent' resolves to nothing
+  const out = await applyCategorize(changeset([a, b]), baseCtx({ dryRun: false, callTool: spy(() => ({ ok: true })), listCategories }));
+
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, OUTCOME.SCHEMA_INVALID);
+  assert.equal(out.results.length, 2); // nothing lost — one result per op the caller handed us
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  // The bug: op-b's resolve error was silently discarded when the executor aborted.
+  assert.equal(byId['op-b'].status, STATUS.ERROR);
+  assert.match(byId['op-b'].detail.message, /did not resolve to an id/);
+  // op-a (in the aborted run set) is surfaced as an error too, not vanished.
+  assert.equal(byId['op-a'].status, STATUS.ERROR);
 });
 
 // --- deferred-schema loading (AC7) ------------------------------------------

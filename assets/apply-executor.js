@@ -49,7 +49,11 @@
  *    audits EACH op individually — only the mutating dispatch of the survivors is
  *    batched. If `bulkApplyOp` throws (the bulk shape was rejected at runtime), the
  *    executor falls back to a per-op `applyOp` call for each op in that group, so a
- *    bulk-capable path is never less safe than a per-op one.
+ *    bulk-capable path is never less safe than a per-op one. A bulk call that
+ *    RESOLVES is not assumed to have applied every op: the executor inspects the
+ *    result's per-entry `results` (and top-level `success`) and audits any failed
+ *    entry as `error`, so the M4-3 trail never records `applied` for a transaction
+ *    the tool reported as failed.
  *
  * Usage (M4-5 approval command, M4-6..M4-9 write paths):
  *   const { applyChangeset } = require('./assets/apply-executor');
@@ -218,29 +222,68 @@ async function applyOneOp(op, { toolMap, applyOp }) {
 }
 
 /**
- * Dispatch a group of same-type survivors as a SINGLE bulk call, falling back to
- * per-op `applyOp` calls if the bulk dispatch is rejected at runtime. The fallback
- * is safe only because a bulk-capable write path opts in for idempotent ops (a
- * re-applied categorize is a no-op-equivalent). Each op still got its own drift
- * check, guardrail, and audit in the surrounding loop — only the mutating dispatch
- * is batched here. Never throws.
+ * Read a resolved bulk result and decide each op's real per-entry outcome. A bulk
+ * tool that RESOLVES is NOT proof every op was mutated: the vendored
+ * `ynab_update_transactions` does not throw on a partial failure — it returns
+ * `{ success, summary: { failed }, results: [{ request_index, status,
+ * transaction_id, error, error_code, ... }] }`, where a per-entry
+ * `status: "failed"` marks a transaction that was NEVER mutated. Each op is
+ * correlated to its entry by `request_index` (the index into the request array,
+ * which is `ops` order), falling back to `transaction_id`, then position. When the
+ * payload carries no per-entry `results`, a top-level `success === false` fails the
+ * whole group closed.
+ * @param {unknown} result the resolved bulk-call payload.
+ * @returns {(op: object, i: number) => {failed: boolean, entry: object|null}}
+ */
+function bulkOutcomeReader(result) {
+  const entries = result && Array.isArray(result.results) ? result.results : null;
+  const overallFailed = result != null && result.success === false;
+  return (op, i) => {
+    if (!entries) return { failed: overallFailed, entry: null };
+    const entry = entries.find((e) => e && e.request_index === i)
+      || entries.find((e) => e && e.transaction_id != null && e.transaction_id === op.transaction_id)
+      || entries[i]
+      || null;
+    if (!entry) return { failed: overallFailed, entry: null };
+    return { failed: entry.status === 'failed', entry };
+  };
+}
+
+/**
+ * Dispatch a group of same-type survivors as a SINGLE bulk call. Two failure modes,
+ * both handled so the mandatory M4-3 audit trail never records `applied` for a
+ * mutation that did not happen:
+ *  - the bulk SHAPE is rejected (a thrown Error) → fall back to per-op `applyOp`
+ *    calls (safe only because a bulk-capable write path opts in for idempotent ops —
+ *    a re-applied categorize is a no-op-equivalent);
+ *  - the bulk call RESOLVES but reports per-entry failures → each failed entry maps
+ *    to an `error` result, not a blanket `applied`.
+ * Each op still got its own drift check, guardrail, and audit in the surrounding
+ * loop — only the mutating dispatch is batched here. Never throws.
  * @returns {Promise<Array<object>>} one result per op, in the group's order.
  */
 async function applyBulkGroup(ops, { bulkToolMap, bulkApplyOp, toolMap, applyOp }) {
   const bulkTool = bulkToolMap[ops[0].type];
+  let result;
   try {
-    const result = await bulkApplyOp(bulkTool, ops);
-    return ops.map((op) => ({
-      op_id: op.id == null ? null : op.id,
-      status: STATUS.APPLIED,
-      dry_run: false,
-      detail: { tool: bulkTool, bulk: true, result: result == null ? null : result },
-    }));
+    result = await bulkApplyOp(bulkTool, ops);
   } catch (err) {
     const out = [];
     for (const op of ops) out.push(await applyOneOp(op, { toolMap, applyOp }));
     return out;
   }
+  // Resolved — but inspect the payload: a resolved bulk result can still report
+  // per-entry FAILURES without throwing.
+  const read = bulkOutcomeReader(result);
+  return ops.map((op, i) => {
+    const opId = op.id == null ? null : op.id;
+    const { failed, entry } = read(op, i);
+    if (failed) {
+      const message = (entry && (entry.error || entry.error_code)) || 'bulk update reported failure without a per-entry error';
+      return { op_id: opId, status: STATUS.ERROR, dry_run: false, detail: { phase: 'apply', tool: bulkTool, bulk: true, message, result: entry == null ? (result == null ? null : result) : entry } };
+    }
+    return { op_id: opId, status: STATUS.APPLIED, dry_run: false, detail: { tool: bulkTool, bulk: true, result: result == null ? null : result } };
+  });
 }
 
 /**

@@ -499,6 +499,33 @@ test('bulk dispatch falls back to per-op applyOp when bulkApplyOp throws (reject
   for (const r of out.results) assert.equal(r.status, STATUS.APPLIED);
 });
 
+test('bulk dispatch: a RESOLVED but partially-failed bulk envelope audits each failed entry as error, not applied', async () => {
+  const cs = twoCategorize(); // op-1 → t-a, op-2 → t-b
+  // The vendored ynab_update_transactions does NOT throw on a partial failure — it
+  // RESOLVES with per-entry statuses. t-a updated; t-b failed.
+  const bulk = spy(() => ({
+    success: false,
+    summary: { total_requested: 2, updated: 1, failed: 1 },
+    results: [
+      { request_index: 0, status: 'updated', transaction_id: 't-a', correlation_key: 'k0' },
+      { request_index: 1, status: 'failed', transaction_id: 't-b', correlation_key: 'k1', error: 'insufficient scope' },
+    ],
+  }));
+  const apply = spy(() => ({ ok: true }));
+  const audit = auditSpy();
+  const out = await applyChangeset(cs, bulkCtx({ bulkApplyOp: bulk, applyOp: apply, audit }));
+
+  assert.equal(bulk.calls.length, 1); // one bulk call, no throw → no fallback
+  assert.equal(apply.calls.length, 0);
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId['op-1'].status, STATUS.APPLIED); // t-a updated
+  assert.equal(byId['op-2'].status, STATUS.ERROR); // t-b failed — NOT applied
+  assert.match(byId['op-2'].detail.message, /insufficient scope/);
+  // The audit trail must NOT lie: the failed op is audited as error, not applied.
+  const auditByStatus = audit.calls.map(([rec]) => rec.result.status).sort();
+  assert.deepEqual(auditByStatus, ['applied', 'error']);
+});
+
 test('bulkFits=false keeps the group on the per-op path (no bulk call)', async () => {
   const cs = twoCategorize();
   const bulk = spy(() => ({ ok: true }));
