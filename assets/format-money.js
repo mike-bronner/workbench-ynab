@@ -26,6 +26,13 @@
  * throwing, so a partial or surprising API response can never crash a render.
  * `milliunits` that is not a finite number becomes `0` (never `NaN`), matching
  * the milliToDollars convention in lib/tax/estimatedTax.mjs.
+ *
+ * OUTPUT IS NOT PRE-ESCAPED. The returned string embeds the off-the-wire
+ * `currency_symbol` and separators VERBATIM — `formatMoney` also feeds non-HTML
+ * surfaces (the write-path dry-run diffs, terminal dispatch), where escaping
+ * would corrupt the output. A formatted amount is therefore NOT a "safe computed
+ * number": any caller rendering it into HTML must HTML-escape it like any other
+ * YNAB string (see skills/review/ynab-review.md §5/§8).
  */
 
 /**
@@ -64,8 +71,12 @@ function resolveCurrencyFormat(cf) {
       : typeof raw.symbol === 'string' ? raw.symbol
         : DEFAULT_CURRENCY_FORMAT.currency_symbol;
 
-  let digits = Number(raw.decimal_digits);
-  digits = Number.isFinite(digits) ? Math.min(Math.max(Math.trunc(digits), 0), MAX_DECIMAL_DIGITS)
+  // Guard the type BEFORE coercing: `Number(null)`/`Number(false)`/`Number('')`
+  // are all 0 and would pass `Number.isFinite`, silently forcing 0 decimals
+  // instead of the promised default. Only a genuine finite number is honored
+  // (a legit numeric 0 — e.g. JPY — still passes and renders decimal-free).
+  const digits = typeof raw.decimal_digits === 'number' && Number.isFinite(raw.decimal_digits)
+    ? Math.min(Math.max(Math.trunc(raw.decimal_digits), 0), MAX_DECIMAL_DIGITS)
     : DEFAULT_CURRENCY_FORMAT.decimal_digits;
 
   return {
@@ -73,7 +84,12 @@ function resolveCurrencyFormat(cf) {
     symbol_first: typeof raw.symbol_first === 'boolean' ? raw.symbol_first : DEFAULT_CURRENCY_FORMAT.symbol_first,
     decimal_digits: digits,
     group_separator: typeof raw.group_separator === 'string' ? raw.group_separator : DEFAULT_CURRENCY_FORMAT.group_separator,
-    decimal_separator: typeof raw.decimal_separator === 'string' ? raw.decimal_separator : DEFAULT_CURRENCY_FORMAT.decimal_separator,
+    // An empty decimal_separator is treated as ABSENT (fall back to the default),
+    // not "valid but blank" — otherwise the fractional digits glue onto the
+    // integer part (`$1,23456`). It is only ever consumed when decimal_digits > 0,
+    // so the fallback is a no-op for 0-decimal currencies. (Contrast group_separator,
+    // whose empty value is a deliberate, unambiguous "no grouping".)
+    decimal_separator: typeof raw.decimal_separator === 'string' && raw.decimal_separator !== '' ? raw.decimal_separator : DEFAULT_CURRENCY_FORMAT.decimal_separator,
     display_symbol: typeof raw.display_symbol === 'boolean' ? raw.display_symbol : DEFAULT_CURRENCY_FORMAT.display_symbol,
   };
 }
@@ -86,7 +102,11 @@ function resolveCurrencyFormat(cf) {
  * @returns {string}
  */
 function groupThousands(intDigits, sep) {
-  return intDigits.replace(/\B(?=(\d{3})+(?!\d))/g, sep);
+  // A FUNCTION replacement, not a string: `sep` is an off-the-wire value, and a
+  // string replacement would interpret `$`-metacharacters (`$&`, `$1`, `$$`) in
+  // it. The function form inserts `sep` verbatim (matching this module's
+  // hostile-input posture), so a `$` separator can never distort the output.
+  return intDigits.replace(/\B(?=(\d{3})+(?!\d))/g, () => sep);
 }
 
 /**

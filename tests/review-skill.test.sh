@@ -162,11 +162,19 @@ assert_present "HTML-escapes untrusted YNAB strings" "HTML-escape"
 assert_present_re "divides milliunits by 1000" "milliunit|/ ?1000|by .*1000"
 
 # ---- multi-currency: currency_format read + formatMoney (issue #34) ----------
-assert_present "reads the budget currency_format"           "currency_format"
+# The currency_format read must be WIRED, not merely mentioned: it must request
+# JSON (else the MCP's markdown renderer drops six of the seven fields) and hold
+# the object for the session, and every amount must route through formatMoney.
+assert_present_re "currency_format read requests response_format json" \
+  'response_format.*(json|"json")'
+assert_present "currency_format is held for the whole session"  "holding it for the whole session"
 assert_present "renders amounts via the shared formatMoney" "formatMoney"
 assert_present "references the shared money helper file"    "assets/format-money.js"
 assert_present "rounds by decimal_digits, not a fixed 2"    "decimal_digits"
 assert_present_re "currency scope keeps the tax engine US-only" "tax engine.*US-only|US-only.*tax"
+# A formatted amount carries an untrusted symbol → must be HTML-escaped (§5/§8).
+assert_present_re "formatted amounts are HTML-escaped at the boundary" \
+  'formatted amount is not a bare number|escape every rendered amount|formatted amount.*[Uu]ntrusted'
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
