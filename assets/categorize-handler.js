@@ -11,53 +11,70 @@
  * It is a DUMB, SAFE applier: it changes ONLY the category field. It never
  * touches payee, account, amount, date, or a transfer payee — recategorization
  * (overwriting an existing category) and first-time categorization (an
- * uncategorized transaction) flow through exactly the same code path; only the
- * dry-run narrative differs. Tax-awareness and category choice live upstream in
- * the proposal (M4-10), not here.
+ * uncategorized transaction) flow through exactly the same code path. Tax-awareness
+ * and category choice live upstream in the proposal (M4-10), not here.
  *
- * Design rules (mirroring the executor's, deliberately):
+ * ROUTES THROUGH THE EXECUTOR (the locked M4-6 architecture, Option 1). This
+ * handler does NOT run its own apply loop. It hands the batch to the M4-4 apply
+ * executor (`applyChangeset`), registering:
+ *  - `categorizeToolMap()` — op-type → the per-op `ynab_update_transaction` tool;
+ *  - `categorizeBulkToolMap()` — op-type → the bulk `ynab_update_transactions` tool;
+ *  - `makeCategorizeApplyOp` / `makeCategorizeBulkApplyOp` — the field-isolated
+ *    dispatch ports (per-op and one-call-for-the-group); and
+ *  - `categorizeBulkFits` — the predicate that decides whether a group of survivors
+ *    goes through one bulk call.
+ * The executor owns the loop, so bulk dispatch STILL gets per-op drift detection
+ * (`skipped-stale`), the per-op guardrail re-check (`blocked`), the mandatory M4-3
+ * audit record, and the per-op-fallback when the bulk shape is rejected — none of
+ * which a bespoke handler loop would inherit. This is why the four result statuses
+ * are all reachable through this path.
+ *
+ * Design rules:
  *  - DRY-RUN BY DEFAULT. `dryRun` is true unless the caller passes an explicit
- *    `false`. A dry-run produces a per-op before→after category diff and calls
+ *    `false`; a dry-run produces the executor's per-op before→after diff and calls
  *    NO mutating tool.
  *  - FIELD ISOLATION. The single-transaction update payload carries ONLY
- *    `category_id` (plus the `budget_id` / `transaction_id` addressing the
- *    flat YNAB tool requires) — never `payee_id`, `account_id`, `amount`,
- *    `date`, or `transfer_account_id`, even when those appear in an op's
- *    `before` / `after` snapshots. The bulk per-entry shape is likewise just
- *    `{ id, category_id }`.
- *  - PURE LOGIC, INJECTED I/O. This module owns payload-building, category
- *    resolution, the bulk-vs-single decision, and the dry-run diff, but holds no
- *    MCP coupling: the side-effecting operations are injected as ports —
- *    `callTool(toolName, payload)` (the mutating dispatch), `listCategories(budgetId)`
- *    (read-only name→id resolution), and `toolSearch(names)` (deferred-schema
- *    loading). That keeps it unit-testable and keeps the read tool name entirely
- *    in the runtime that wires the port.
- *  - NO HARD-CODED TOOL NAMES. The write tool names are resolved from the
- *    guardrail's exported `ALLOWED_TOOLS` by suffix, so no concrete
- *    `mcp__plugin_workbench-ynab_ynab__*` string lives in this file (the
- *    swap-ready single-source-of-truth invariant, issue #87). Only the family
- *    glob — explicitly safe to mention anywhere — appears, for the ToolSearch
- *    select. Bare `mcp__ynab__*` names are never produced.
- *  - SHARED RESULT CONTRACT. Per-op results reuse the executor's `STATUS`
- *    constants, so `applied` / `skipped-stale` / `blocked` / `error` mean the
- *    same thing here as in M4-4.
+ *    `category_id` (plus the `budget_id` / `transaction_id` addressing the flat
+ *    YNAB tool requires); the bulk per-entry shape is just `{ id, category_id }`.
+ *    No payee / account / amount / date / transfer field is ever included, even
+ *    when present in an op's `before` / `after` snapshots.
+ *  - CATEGORY RESOLUTION IS A READ-ONLY PREP STEP, BEFORE THE EXECUTOR. When an
+ *    op's `after.category_id` is absent, its `after.category_name` is resolved to an
+ *    id via the injected `listCategories` port and written into a copy of the op, so
+ *    the change-set the executor schema-validates is well-formed and every op still
+ *    gets drift / guardrail / audit. On schema-valid input `after.category_id` is
+ *    always present (the schema requires it, `changeset-schema.json`), so this is a
+ *    pass-through: the name path is the documented fallback the M4-10 proposal
+ *    SHOULD make unnecessary. An unresolvable name never reaches the executor — it
+ *    becomes an `error` result here (never a thrown exception).
+ *  - NO HARD-CODED TOOL NAMES. The write tool names are resolved from the guardrail's
+ *    exported `ALLOWED_TOOLS` by suffix, so no concrete
+ *    `mcp__plugin_workbench-ynab_ynab__*` string lives in this file (the swap-ready
+ *    single-source-of-truth invariant, issue #87). Only the family glob — explicitly
+ *    safe to mention anywhere — appears, for the ToolSearch select. Bare
+ *    `mcp__ynab__*` names are never produced.
+ *  - SHARED RESULT CONTRACT. Per-op results reuse the executor's `STATUS` constants,
+ *    extended with the categorize-specific `transaction_id` / `before` / `after` the
+ *    M4-5 command renders (AC8).
  *
  * Library-only by design (like the executor): no CLI — it cannot run without its
  * MCP-backed ports, which exist only in the agent runtime that wires them.
  *
  * Usage (M4-5 approval command):
- *   const { applyCategorize, categorizeToolMap } = require('./assets/categorize-handler');
- *   const results = await applyCategorize(categorizeOps, {
+ *   const { applyCategorize } = require('./assets/categorize-handler');
+ *   const outcome = await applyCategorize(changeset, {
+ *     activeBudgetId,                                 // mandatory non-empty string
  *     dryRun: false,                                  // omit/true = simulate
  *     callTool: async (toolName, payload) => ({ ...mcp result }),
  *     listCategories: async (budgetId) => [{ id, name }, ...],
  *     toolSearch: async (names) => { ...ToolSearch select },
- *     bulkPartialUpdate: true,                        // see bulk note below
+ *     readLiveState: async (op) => ({ ...fields shaped like op.before }),  // drift detection
+ *     audit: async ({ operation, result, dryRun }) => { ... },             // M4-3 sink
  *   });
- *   // results: [{ op_id, transaction_id, status, before, after, dry_run, detail }, ...]
+ *   // outcome.results: [{ op_id, transaction_id, status, dry_run, before, after, detail }, ...]
  */
 
-const { STATUS } = require('./apply-executor');
+const { STATUS, OUTCOME, applyChangeset } = require('./apply-executor');
 const { ALLOWED_TOOLS } = require('./write-safety-guardrail');
 
 /** The op type this handler is the sole registered handler for (M4-4 registration). */
@@ -91,14 +108,23 @@ function resolveTools() {
 }
 
 /**
- * The executor registration point: op-type → namespaced mutating tool. The
- * single-transaction tool is the executor's per-op dispatch target; the bulk
- * tool is used by this handler's own batch path (the executor's per-op loop
- * cannot express a single bulk call across multiple ops).
+ * The executor per-op registration point: op-type → the single-transaction tool
+ * the executor dispatches (and the bulk path falls back to).
  * @returns {Record<string, string>}
  */
 function categorizeToolMap() {
   return { [CATEGORIZE_TYPE]: resolveTools().single };
+}
+
+/**
+ * The executor bulk registration point: op-type → the bulk `ynab_update_transactions`
+ * tool. Supplied alongside `categorizeBulkFits` so the executor collapses a group of
+ * survivors into ONE call (while still drift-checking, guardrailing, and auditing
+ * each op individually).
+ * @returns {Record<string, string>}
+ */
+function categorizeBulkToolMap() {
+  return { [CATEGORIZE_TYPE]: resolveTools().bulk };
 }
 
 /** Extract a human-readable message from a thrown value. */
@@ -128,12 +154,17 @@ const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * an unloaded deferred schema is NOT an outage — the YNAB MCP may take ~10s to
  * boot, so retry before concluding failure (mirrors the bujo-orchestrator
  * pattern). A non-InputValidationError propagates immediately.
+ *
+ * On each retry, `onRetry` (when supplied) runs FIRST — an InputValidationError
+ * means the deferred schema isn't loaded, so the fix is to RELOAD it (re-run the
+ * ToolSearch select), not merely to sleep and re-hit the same unloaded schema. The
+ * reload is best-effort: if it throws, we still wait and retry the call.
  * @template T
  * @param {() => Promise<T>} fn
- * @param {{sleep?: Function, retries?: number, delayMs?: number}} [opts]
+ * @param {{sleep?: Function, retries?: number, delayMs?: number, onRetry?: Function}} [opts]
  * @returns {Promise<T>}
  */
-async function withBootPatience(fn, { sleep = defaultSleep, retries = 5, delayMs = 2000 } = {}) {
+async function withBootPatience(fn, { sleep = defaultSleep, retries = 5, delayMs = 2000, onRetry } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
@@ -141,7 +172,12 @@ async function withBootPatience(fn, { sleep = defaultSleep, retries = 5, delayMs
     } catch (err) {
       if (!isInputValidationError(err)) throw err;
       lastErr = err;
-      if (attempt < retries) await sleep(delayMs);
+      if (attempt < retries) {
+        if (typeof onRetry === 'function') {
+          try { await onRetry(); } catch { /* best-effort reload; fall through to wait + retry */ }
+        }
+        await sleep(delayMs);
+      }
     }
   }
   throw lastErr;
@@ -201,6 +237,23 @@ async function resolveCategory(op, { listCategories }) {
 }
 
 /**
+ * A copy of `op` with `after.category_id` set to the resolved id (and
+ * `after.category_name` set when resolved to a non-empty string, else omitted — the
+ * schema's `after.category_name` is a plain string, never null). Used only when the
+ * name path resolved an id that the op did not already carry; the common (already
+ * resolved) path passes the original op through untouched.
+ */
+function enrichAfter(op, resolved) {
+  const after = { ...op.after, category_id: resolved.category_id };
+  if (typeof resolved.category_name === 'string' && resolved.category_name.length > 0) {
+    after.category_name = resolved.category_name;
+  } else {
+    delete after.category_name;
+  }
+  return { ...op, after };
+}
+
+/**
  * Field-isolated single-transaction update payload: ONLY the category field, plus
  * the `budget_id` / `transaction_id` addressing the flat YNAB tool requires. No
  * payee / account / amount / date / transfer field is ever included.
@@ -220,29 +273,54 @@ function buildBulkEntry(op, categoryId) {
 }
 
 /**
- * A per-op before→after category diff (ids + names), conforming to the executor's
- * dry-run detail structure (`{ simulated, diff }`). Recategorization and
- * first-time categorization share this builder; ONLY the narrative wording
- * differs (first-time when `before.category_id` is null/absent).
+ * The executor `bulkFits` predicate for categorize: a group of same-type survivors
+ * may go through ONE bulk call when there are ≥2 of them and each forms a
+ * `{ id, category_id }` entry (a real transaction_id + a resolved category_id). A
+ * single op has no batching benefit. No budget check is needed — the executor's
+ * guardrail already fails every op whose `budget_id` ≠ the active budget, so all
+ * survivors share one budget.
+ * @param {object[]} ops
+ * @returns {boolean}
  */
-function buildDiff(op, resolved) {
-  const before = (op && op.before) || {};
-  const firstTime = before.category_id == null || before.category_id === '';
-  const beforeView = { category_id: before.category_id ?? null, category_name: before.category_name ?? null };
-  const afterView = { category_id: resolved.category_id, category_name: resolved.category_name ?? null };
-  const toLabel = afterView.category_name ?? afterView.category_id;
-  const narrative = firstTime
-    ? `categorize uncategorized transaction as ${toLabel}`
-    : `recategorize from ${beforeView.category_name ?? beforeView.category_id} to ${toLabel}`;
-  return { before: beforeView, after: afterView, narrative };
+function categorizeBulkFits(ops) {
+  if (!Array.isArray(ops) || ops.length < 2) return false;
+  return ops.every((op) =>
+    op && typeof op.transaction_id === 'string' && op.transaction_id.length > 0 &&
+    op.after && typeof op.after.category_id === 'string' && op.after.category_id.length > 0);
 }
 
 /**
- * Build a per-op result in the executor's contract, extended with the
- * categorize-specific `transaction_id` / `before` / `after` the M4-5 command
- * renders (AC8).
+ * Build the executor's per-op `applyOp(toolName, op)` port for categorize: a
+ * field-isolated single-transaction update, boot-patient (reloads deferred schemas
+ * on an InputValidationError before retrying).
+ * @param {{callTool: Function, reloadSchemas?: Function, sleep?: Function, retries?: number, delayMs?: number}} deps
  */
-function result(op, status, dryRun, detail) {
+function makeCategorizeApplyOp({ callTool, reloadSchemas, sleep, retries, delayMs }) {
+  return (toolName, op) => withBootPatience(
+    () => callTool(toolName, buildSingleUpdate(op, op.after.category_id)),
+    { onRetry: reloadSchemas, sleep, retries, delayMs },
+  );
+}
+
+/**
+ * Build the executor's `bulkApplyOp(toolName, ops)` port for categorize: ONE bulk
+ * `ynab_update_transactions` call carrying field-isolated `{ id, category_id }`
+ * entries for the whole group, boot-patient. A throw here makes the executor fall
+ * back to per-op `applyOp` calls (safe — categorize is idempotent).
+ * @param {{callTool: Function, reloadSchemas?: Function, sleep?: Function, retries?: number, delayMs?: number}} deps
+ */
+function makeCategorizeBulkApplyOp({ callTool, reloadSchemas, sleep, retries, delayMs }) {
+  return (toolName, ops) => {
+    const payload = {
+      budget_id: ops[0].budget_id,
+      transactions: ops.map((op) => buildBulkEntry(op, op.after.category_id)),
+    };
+    return withBootPatience(() => callTool(toolName, payload), { onRetry: reloadSchemas, sleep, retries, delayMs });
+  };
+}
+
+/** Build a resolution-phase per-op result in the categorize contract (AC8). */
+function catResult(op, status, dryRun, detail) {
   return {
     op_id: (op && op.id) == null ? null : op.id,
     transaction_id: (op && op.transaction_id) == null ? null : op.transaction_id,
@@ -255,137 +333,121 @@ function result(op, status, dryRun, detail) {
 }
 
 /**
- * Whether the batch can go through a single bulk call. Bulk is PREFERRED for ≥2
- * resolvable ops that share a budget and each yield a `{ id, category_id }` entry;
- * anything else falls back to per-transaction calls. (A single op gets a single
- * call with no batching benefit; a cross-budget batch cannot be one bulk call,
- * since the bulk tool takes one budget_id.)
- * @param {Array<{op: object, resolved: {category_id?: string}}>} candidates
- * @returns {boolean}
+ * Map an executor result (`{ op_id, status, dry_run, detail }`) into the categorize
+ * contract, extended with the `transaction_id` / `before` / `after` the M4-5 command
+ * renders (AC8). `op` is the (enriched) op the executor processed.
  */
-function bulkFits(candidates) {
-  if (candidates.length < 2) return false;
-  const budgetId = candidates[0].op.budget_id;
-  return candidates.every(({ op, resolved }) =>
-    typeof op.transaction_id === 'string' && op.transaction_id.length > 0 &&
-    typeof resolved.category_id === 'string' && resolved.category_id.length > 0 &&
-    op.budget_id === budgetId);
-}
-
-/** Apply one op via the single-transaction tool. Returns its per-op result. */
-async function applySingle(op, categoryId, { callTool, singleTool, sleep, retries, delayMs }) {
-  try {
-    const mcp = await withBootPatience(
-      () => callTool(singleTool, buildSingleUpdate(op, categoryId)),
-      { sleep, retries, delayMs },
-    );
-    return result(op, STATUS.APPLIED, false, { tool: singleTool, result: mcp == null ? null : mcp });
-  } catch (err) {
-    return result(op, STATUS.ERROR, false, { phase: 'apply', tool: singleTool, message: errMessage(err) });
-  }
-}
-
-/** Apply each candidate individually via the single-transaction tool (the fallback path). */
-async function applyPerTransaction(candidates, deps) {
-  const out = [];
-  for (const { op, resolved } of candidates) {
-    out.push(await applySingle(op, resolved.category_id, deps));
-  }
-  return out;
+function toCategorizeResult(r, op) {
+  return {
+    op_id: r.op_id,
+    transaction_id: (op && op.transaction_id) == null ? null : op.transaction_id,
+    status: r.status,
+    dry_run: r.dry_run,
+    before: (op && op.before) == null ? null : op.before,
+    after: (op && op.after) == null ? null : op.after,
+    detail: r.detail,
+  };
 }
 
 /**
- * Apply a batch of `categorize` ops. Dry-run by default — real apply requires an
- * explicit `dryRun: false` (the M4-5 approval command sets it only after the human
- * approves). Returns one per-op result (AC8); never throws for a per-op failure —
- * an unresolvable category or a tool error is isolated as an `error` result and the
- * rest of the batch proceeds.
+ * Apply a change-set's `categorize` ops by ROUTING THROUGH THE M4-4 executor.
+ * Dry-run by default — real apply requires an explicit `dryRun: false` (the M4-5
+ * approval command sets it only after the human approves). Category ids are resolved
+ * up front (a read-only prep step); every op then flows through the executor, which
+ * drift-checks, guardrails, dispatches (one bulk `ynab_update_transactions` call for
+ * a resolvable ≥2-op group, else per-transaction, with per-op fallback on a bulk
+ * rejection), and audits it.
  *
- * Real-apply dispatch PREFERS a single bulk `ynab_update_transactions` call to
- * minimize round-trips, and falls back to per-transaction `ynab_update_transaction`
- * calls when the bulk call shape does not fit. The documented fallback conditions:
- *   (a) the batch has fewer than 2 resolvable ops (no batching benefit);
- *   (b) an op cannot form a `{ id, category_id }` bulk entry, or the batch spans
- *       multiple budgets (`bulkFits` is false); or
- *   (c) the bulk dispatch is rejected at runtime because the bulk tool's per-entry
- *       schema does not accept a category-only partial update — each op is then
- *       retried individually as a flat `{ budget_id, transaction_id, category_id }`
- *       update. Retrying is SAFE because a categorize write is idempotent
- *       (re-setting the same category is a no-op-equivalent, never money movement).
- *
- * @param {object[]} ops the `categorize` operations (already schema-validated and
- *   guardrail-passed by the executor / approval command).
+ * @param {object} changeset the change-set envelope (assets/changeset-schema.json).
  * @param {object} [ctx]
+ * @param {string} [ctx.activeBudgetId] MANDATORY on real apply (the executor throws without it).
  * @param {boolean} [ctx.dryRun=true] real apply requires an explicit `false`.
  * @param {(toolName: string, payload: object) => (unknown|Promise<unknown>)} [ctx.callTool]
  *   REQUIRED for real apply — the mutating MCP dispatch.
- * @param {(budgetId: string) => (Array|Promise<Array>)} [ctx.listCategories] read-only
- *   port for name→id resolution; only needed when an op's `after.category_id` is absent.
- * @param {(names: string[]) => (unknown|Promise<unknown>)} [ctx.toolSearch] ToolSearch
- *   select port to load deferred schemas before the first MCP call.
+ * @param {(budgetId: string) => (Array|Promise<Array>)} [ctx.listCategories] read-only port for
+ *   name→id resolution; only needed when an op's `after.category_id` is absent.
+ * @param {(names: string[]) => (unknown|Promise<unknown>)} [ctx.toolSearch] ToolSearch select
+ *   port to load deferred schemas before the first MCP call.
+ * @param {(op: object) => (object|Promise<object>)} [ctx.readLiveState] REQUIRED — drift-detection read.
+ * @param {(record: object) => (void|Promise<void>)} [ctx.audit] REQUIRED — the M4-3 audit sink.
  * @param {Function} [ctx.sleep] @param {number} [ctx.retries] @param {number} [ctx.delayMs]
  *   boot-patience knobs.
- * @returns {Promise<Array<{op_id:string|null, transaction_id:string|null, status:string,
- *   before:object|null, after:object|null, dry_run:boolean, detail:object}>>}
+ * @returns {Promise<{ok:boolean, dry_run:boolean, aborted:boolean, reason:string,
+ *   results:Array<{op_id:string|null, transaction_id:string|null, status:string,
+ *   dry_run:boolean, before:object|null, after:object|null, detail:object}>}>}
  */
-async function applyCategorize(ops, ctx = {}) {
-  const operations = Array.isArray(ops) ? ops : [];
-  const { dryRun = true, callTool, listCategories, toolSearch, sleep, retries, delayMs } = ctx;
+async function applyCategorize(changeset, ctx = {}) {
+  const {
+    activeBudgetId, dryRun = true, callTool, listCategories, toolSearch,
+    readLiveState, audit, sleep, retries, delayMs,
+  } = ctx;
   const patience = { sleep, retries, delayMs };
 
-  // Load the deferred tool schemas before the FIRST MCP call, in any mode (AC7).
-  await loadSchemas({ toolSearch, ...patience });
-
-  // Resolve every op's target category id up front (AC6). Field-isolated; an
-  // unresolvable name is carried as an error and never dispatched.
-  const prepared = [];
-  for (const op of operations) {
-    prepared.push({ op, resolved: await resolveCategory(op, { listCategories }) });
-  }
-
-  // Dry-run: a per-op before→after category diff, no mutating call (AC5).
-  if (dryRun) {
-    return prepared.map(({ op, resolved }) => (resolved.error
-      ? result(op, STATUS.ERROR, true, { phase: 'resolve', message: resolved.error })
-      : result(op, STATUS.APPLIED, true, { simulated: true, diff: buildDiff(op, resolved) })));
-  }
-
-  // Real apply requires the mutating dispatch port.
-  if (typeof callTool !== 'function') {
+  if (!dryRun && typeof callTool !== 'function') {
     throw new TypeError('applyCategorize real apply (dryRun: false) requires a callTool(toolName, payload) function');
   }
-  const { single: singleTool, bulk: bulkTool } = resolveTools();
-  const deps = { callTool, singleTool, ...patience };
 
-  // Unresolvable ops become error results immediately; only resolvable ops dispatch.
-  const errored = prepared.filter(({ resolved }) => resolved.error);
-  const candidates = prepared.filter(({ resolved }) => !resolved.error);
-  const results = errored.map(({ op, resolved }) => result(op, STATUS.ERROR, false, { phase: 'resolve', message: resolved.error }));
+  // Load the deferred tool schemas before the FIRST MCP call, in any mode (AC7).
+  const reloadSchemas = () => loadSchemas({ toolSearch, ...patience });
+  await reloadSchemas();
 
-  if (candidates.length === 0) return results;
+  const operations = Array.isArray(changeset && changeset.operations) ? changeset.operations : [];
 
-  if (bulkFits(candidates)) {
-    const payload = {
-      budget_id: candidates[0].op.budget_id,
-      transactions: candidates.map(({ op, resolved }) => buildBulkEntry(op, resolved.category_id)),
-    };
-    try {
-      const mcp = await withBootPatience(() => callTool(bulkTool, payload), patience);
-      for (const { op } of candidates) {
-        results.push(result(op, STATUS.APPLIED, false, { tool: bulkTool, bulk: true, result: mcp == null ? null : mcp }));
-      }
-    } catch (err) {
-      // Fallback (c): the bulk tool rejected the category-only batch shape. Retry
-      // each op individually — safe because a categorize write is idempotent.
-      const fallback = await applyPerTransaction(candidates, deps);
-      results.push(...fallback);
+  // Category resolution — a READ-ONLY prep step BEFORE the executor (module doc).
+  const listCategoriesPatient = typeof listCategories === 'function'
+    ? (budgetId) => withBootPatience(() => listCategories(budgetId), { onRetry: reloadSchemas, ...patience })
+    : undefined;
+
+  const merged = new Array(operations.length);
+  const toRun = []; // { index, op } — ops handed to the executor, in original order
+  for (let i = 0; i < operations.length; i += 1) {
+    const op = operations[i];
+    if (!op || op.type !== CATEGORIZE_TYPE) { toRun.push({ index: i, op }); continue; }
+    const resolved = await resolveCategory(op, { listCategories: listCategoriesPatient });
+    if (resolved.error) {
+      merged[i] = catResult(op, STATUS.ERROR, dryRun, { phase: 'resolve', message: resolved.error });
+      continue;
     }
-    return results;
+    const alreadyResolved = op.after && typeof op.after.category_id === 'string' && op.after.category_id.length > 0;
+    toRun.push({ index: i, op: alreadyResolved ? op : enrichAfter(op, resolved) });
   }
 
-  // Fallback (a)/(b): per-transaction calls.
-  results.push(...(await applyPerTransaction(candidates, deps)));
-  return results;
+  // Every op was an unresolvable-name error → nothing to run. A resolution failure
+  // is a per-op error, not a batch abort (mirroring the executor's per-op error
+  // semantics), so the batch still "completes".
+  if (toRun.length === 0) {
+    return {
+      ok: true,
+      dry_run: dryRun,
+      aborted: false,
+      reason: dryRun ? OUTCOME.DRY_RUN_COMPLETE : OUTCOME.APPLY_COMPLETE,
+      results: merged,
+    };
+  }
+
+  const outcome = await applyChangeset(
+    { ...changeset, operations: toRun.map(({ op }) => op) },
+    {
+      activeBudgetId,
+      dryRun,
+      toolMap: categorizeToolMap(),
+      bulkToolMap: categorizeBulkToolMap(),
+      bulkFits: categorizeBulkFits,
+      applyOp: makeCategorizeApplyOp({ callTool, reloadSchemas, ...patience }),
+      bulkApplyOp: makeCategorizeBulkApplyOp({ callTool, reloadSchemas, ...patience }),
+      readLiveState,
+      audit,
+    },
+  );
+
+  // Normal / per-op / guardrail-block / tool-block: one executor result per run op —
+  // map each back to its original slot in the categorize contract. A pre-loop abort
+  // (schema_invalid) yields no per-op results; surface that outcome as-is.
+  if (outcome.results.length === toRun.length) {
+    outcome.results.forEach((r, k) => { merged[toRun[k].index] = toCategorizeResult(r, toRun[k].op); });
+    return { ...outcome, results: merged };
+  }
+  return outcome;
 }
 
 module.exports = {
@@ -393,13 +455,16 @@ module.exports = {
   TOOL_FAMILY_GLOB,
   resolveTools,
   categorizeToolMap,
+  categorizeBulkToolMap,
+  categorizeBulkFits,
   isInputValidationError,
   withBootPatience,
   loadSchemas,
   resolveCategory,
+  enrichAfter,
   buildSingleUpdate,
   buildBulkEntry,
-  buildDiff,
-  bulkFits,
+  makeCategorizeApplyOp,
+  makeCategorizeBulkApplyOp,
   applyCategorize,
 };
