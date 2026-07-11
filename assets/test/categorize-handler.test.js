@@ -30,6 +30,7 @@ const {
   buildSingleUpdate,
   buildBulkEntry,
   makeCategorizeApplyOp,
+  makeCategorizeBulkApplyOp,
   applyCategorize,
   TOOL_FAMILY_GLOB,
 } = require('../categorize-handler');
@@ -63,6 +64,25 @@ const noWait = () => spy(() => undefined);
 const noDrift = () => spy((op) => clone(op.before));
 /** A no-op audit sink spy. */
 const auditSpy = () => spy(() => undefined);
+
+/**
+ * The REAL confirmed `ynab_update_transactions` response for a bulk payload — the
+ * vendored shape (`{ success, summary, results:[{ request_index, status,
+ * transaction_id }] }`) with every entry `updated`, NOT an off-contract `{ ok: true }`
+ * (which the executor now reads fail-closed as unconfirmed). Fed the bulk call's payload.
+ */
+const bulkUpdated = (payload) => ({
+  success: true,
+  summary: { updated: payload.transactions.length, failed: 0 },
+  results: payload.transactions.map((t, i) => ({ request_index: i, status: 'updated', transaction_id: t.id, correlation_key: `k${i}` })),
+});
+
+/** A callTool spy: BULK calls resolve the confirmed vendored shape; single calls resolve ok. */
+const bulkAwareCallTool = () => spy((toolName, payload) => (
+  toolName === BULK_TOOL && payload && Array.isArray(payload.transactions)
+    ? bulkUpdated(payload)
+    : { ok: true }
+));
 
 /** Build a categorize op; override any field. */
 function op(overrides = {}) {
@@ -149,6 +169,30 @@ test('(g) the per-op applyOp dispatch payload carries ONLY category_id + address
   }
 });
 
+test('(g) the BULK bulkApplyOp dispatch payload carries ONLY { id, category_id } entries — dirty fields never leak', async () => {
+  // Two "dirty" ops whose before/after carry non-category fields; drive them through
+  // the REAL bulk dispatch port and assert every entry is field-isolated end-to-end.
+  const dirtyA = op({ id: 'op-1', transaction_id: 't-a', before: { category_id: 'c-old', payee_name: 'Whole Foods', amount: -54990 }, after: { category_id: 'c-a', category_name: 'A', payee_id: 'p-evil', amount: -54990, account_id: 'acct-1' } });
+  const dirtyB = op({ id: 'op-2', transaction_id: 't-b', before: { category_id: null }, after: { category_id: 'c-b', category_name: 'B', transfer_account_id: 'x', date: '2026-06-01' } });
+  const callTool = bulkAwareCallTool();
+  const bulkApplyOp = makeCategorizeBulkApplyOp({ callTool });
+  await bulkApplyOp(BULK_TOOL, [dirtyA, dirtyB]);
+
+  const [toolName, payload] = callTool.calls[0];
+  assert.equal(toolName, BULK_TOOL);
+  assert.deepEqual(Object.keys(payload).sort(), ['budget_id', 'transactions']);
+  assert.deepEqual(payload.transactions, [
+    { id: 't-a', category_id: 'c-a' },
+    { id: 't-b', category_id: 'c-b' },
+  ]);
+  for (const entry of payload.transactions) {
+    assert.deepEqual(Object.keys(entry).sort(), ['category_id', 'id']);
+    for (const forbidden of ['payee_id', 'payee_name', 'account_id', 'amount', 'date', 'transfer_account_id']) {
+      assert.ok(!(forbidden in entry), `bulk entry must not carry ${forbidden}`);
+    }
+  }
+});
+
 // --- (a) single-txn first-time categorization -------------------------------
 
 test('(a) single-txn first-time categorization applies via the single tool', async () => {
@@ -184,7 +228,7 @@ test('(b) single-txn recategorization flows through the SAME path (existing befo
 test('(c) multi-txn prefers a single bulk update_transactions call — and still drift-checks + audits each op', async () => {
   const a = op({ id: 'op-1', transaction_id: 't-a', after: { category_id: 'c-a', category_name: 'A' } });
   const b = op({ id: 'op-2', transaction_id: 't-b', after: { category_id: 'c-b', category_name: 'B' } });
-  const callTool = spy(() => ({ ok: true }));
+  const callTool = bulkAwareCallTool(); // real confirmed per-entry bulk shape
   const readLiveState = noDrift();
   const audit = auditSpy();
   const out = await applyCategorize(changeset([a, b]), baseCtx({ dryRun: false, callTool, readLiveState, audit }));
@@ -443,6 +487,42 @@ test('(blocker 2) a schema_invalid executor abort still returns EVERY op result 
   assert.match(byId['op-b'].detail.message, /did not resolve to an id/);
   // op-a (in the aborted run set) is surfaced as an error too, not vanished.
   assert.equal(byId['op-a'].status, STATUS.ERROR);
+});
+
+// --- blocker (this round): a foreign-type op must not poison the valid batch -----
+
+test('(blocker) a mixed-type change-set does NOT poison the valid categorize op — the foreign op errors, categorize still applies', async () => {
+  // The M4-1 schema allows mixed-type envelopes. A foreign (allocate) op has no
+  // categorize tool: forwarding it into the executor batch would abort the WHOLE
+  // batch in the tool pre-flight, reporting the valid categorize op as blocked.
+  const cat = op({ id: 'op-cat', transaction_id: 't-cat', after: { category_id: 'c-a', category_name: 'A' } });
+  const foreign = { id: 'op-alloc', type: 'allocate', budget_id: BUDGET, category_id: 'c-x', month: '2026-06-01', before: { budgeted: 0 }, after: { budgeted: 100000 }, rationale: 'r', risk: 'low' };
+  const callTool = bulkAwareCallTool();
+  const out = await applyCategorize(changeset([cat, foreign]), baseCtx({ dryRun: false, callTool }));
+
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  // The valid categorize op applied — it was NOT dragged down by the foreign op.
+  assert.equal(byId['op-cat'].status, STATUS.APPLIED);
+  // The foreign op got its own terminal routing error (never forwarded, never dispatched).
+  assert.equal(byId['op-alloc'].status, STATUS.ERROR);
+  assert.equal(byId['op-alloc'].detail.phase, 'routing');
+  assert.match(byId['op-alloc'].detail.message, /only processes "categorize"/);
+  // The categorize op WAS dispatched; the foreign op's id/type never hit the tool.
+  assert.ok(callTool.calls.some(([, p]) => (p && p.transaction_id === 't-cat') || (Array.isArray(p.transactions) && p.transactions.some((e) => e.id === 't-cat'))));
+  assert.ok(!callTool.calls.some(([, p]) => p && (p.category_id === 'c-x' || p.month)));
+});
+
+// --- blocker (this round): activeBudgetId is mandatory before any resolution read --
+
+test('(blocker) a name-only op with NO activeBudgetId throws BEFORE any cross-budget listCategories read', async () => {
+  const nameOnly = op({ budget_id: 'SOMEONE-ELSES-BUDGET', after: { category_name: 'Groceries' } });
+  const listCategories = spy(() => [{ id: 'c-g', name: 'Groceries' }]);
+  // activeBudgetId omitted → must throw up front, before resolution runs the READ.
+  await assert.rejects(
+    () => applyCategorize(changeset([nameOnly]), { readLiveState: noDrift(), audit: auditSpy(), sleep: noWait(), listCategories, dryRun: true }),
+    /activeBudgetId/,
+  );
+  assert.equal(listCategories.calls.length, 0); // the cross-budget read never fired
 });
 
 // --- deferred-schema loading (AC7) ------------------------------------------

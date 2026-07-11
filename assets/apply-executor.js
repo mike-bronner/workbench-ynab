@@ -50,10 +50,13 @@
  *    batched. If `bulkApplyOp` throws (the bulk shape was rejected at runtime), the
  *    executor falls back to a per-op `applyOp` call for each op in that group, so a
  *    bulk-capable path is never less safe than a per-op one. A bulk call that
- *    RESOLVES is not assumed to have applied every op: the executor inspects the
- *    result's per-entry `results` (and top-level `success`) and audits any failed
- *    entry as `error`, so the M4-3 trail never records `applied` for a transaction
- *    the tool reported as failed.
+ *    RESOLVES is not assumed to have applied every op, and it is read FAIL-CLOSED:
+ *    the executor confirms `applied` ONLY for an op whose own per-entry `results`
+ *    record reports a written status (created / duplicate / updated). A failed
+ *    entry, an op with no matching entry, a `results` array that does not line up
+ *    one-to-one with the request, or a payload with no `results` array at all are
+ *    ALL audited as `error` — so the M4-3 trail never records `applied` for a
+ *    transaction the tool did not positively confirm.
  *
  * Usage (M4-5 approval command, M4-6..M4-9 write paths):
  *   const { applyChangeset } = require('./assets/apply-executor');
@@ -222,30 +225,53 @@ async function applyOneOp(op, { toolMap, applyOp }) {
 }
 
 /**
- * Read a resolved bulk result and decide each op's real per-entry outcome. A bulk
- * tool that RESOLVES is NOT proof every op was mutated: the vendored
+ * The bulk per-entry statuses that CONFIRM a mutation. The vendored
+ * `ynab_update_transactions` reports one of created / duplicate / updated / failed
+ * per entry; only these three positively confirm the transaction was written.
+ * Anything else (a `failed` entry, an unknown status, or no entry at all) is
+ * unconfirmed and must fail closed — never recorded `applied`.
+ * @type {ReadonlySet<string>}
+ */
+const BULK_APPLIED_STATUSES = new Set(['created', 'duplicate', 'updated']);
+
+/**
+ * Read a resolved bulk result and decide each op's real per-entry outcome, FAILING
+ * CLOSED. A bulk tool that RESOLVES is NOT proof every op was mutated: the vendored
  * `ynab_update_transactions` does not throw on a partial failure — it returns
  * `{ success, summary: { failed }, results: [{ request_index, status,
- * transaction_id, error, error_code, ... }] }`, where a per-entry
- * `status: "failed"` marks a transaction that was NEVER mutated. Each op is
- * correlated to its entry by `request_index` (the index into the request array,
- * which is `ops` order), falling back to `transaction_id`, then position. When the
- * payload carries no per-entry `results`, a top-level `success === false` fails the
- * whole group closed.
+ * transaction_id, error, error_code, ... }] }`, where a per-entry status of
+ * created/duplicate/updated confirms a mutation, `failed` marks one that never
+ * happened, and top-level `success === (summary.failed === 0)`.
+ *
+ * An op is `applied` ONLY when the payload is well-shaped — a `results` array
+ * carrying exactly one entry per requested op — AND that op's own entry reports a
+ * confirmed status. Every other case fails CLOSED (`failed: true`, `unconfirmed`):
+ *  - no `results` array at all (an off-contract / `{}` payload);
+ *  - a `results` array whose length ≠ the request length (entries can't line up);
+ *  - an op with no matching entry, or an entry whose status isn't a confirmed apply.
+ * The audit trail must never record `applied` for a mutation the tool did not
+ * positively confirm — an unshaped-but-resolved payload is the worst failure
+ * direction, so it is treated as an unconfirmed error, never a blanket success.
+ * Each op is correlated to its entry by `request_index` (the index into the request
+ * array, which is `ops` order), falling back to `transaction_id`, then position.
  * @param {unknown} result the resolved bulk-call payload.
- * @returns {(op: object, i: number) => {failed: boolean, entry: object|null}}
+ * @param {number} opsCount how many ops went into the request (the shape cross-check).
+ * @returns {(op: object, i: number) => {failed: boolean, entry: object|null, unconfirmed: boolean}}
  */
-function bulkOutcomeReader(result) {
+function bulkOutcomeReader(result, opsCount) {
   const entries = result && Array.isArray(result.results) ? result.results : null;
-  const overallFailed = result != null && result.success === false;
+  // Fail closed unless the payload lines up one-to-one with the request.
+  const shapeOk = entries != null && entries.length === opsCount;
   return (op, i) => {
-    if (!entries) return { failed: overallFailed, entry: null };
+    if (!shapeOk) return { failed: true, entry: null, unconfirmed: true };
     const entry = entries.find((e) => e && e.request_index === i)
       || entries.find((e) => e && e.transaction_id != null && e.transaction_id === op.transaction_id)
       || entries[i]
       || null;
-    if (!entry) return { failed: overallFailed, entry: null };
-    return { failed: entry.status === 'failed', entry };
+    if (!entry || !BULK_APPLIED_STATUSES.has(entry.status)) {
+      return { failed: true, entry: entry || null, unconfirmed: entry == null };
+    }
+    return { failed: false, entry, unconfirmed: false };
   };
 }
 
@@ -272,17 +298,21 @@ async function applyBulkGroup(ops, { bulkToolMap, bulkApplyOp, toolMap, applyOp 
     for (const op of ops) out.push(await applyOneOp(op, { toolMap, applyOp }));
     return out;
   }
-  // Resolved — but inspect the payload: a resolved bulk result can still report
-  // per-entry FAILURES without throwing.
-  const read = bulkOutcomeReader(result);
+  // Resolved — but inspect the payload FAIL-CLOSED: a resolved bulk result can
+  // still report per-entry failures, omit an op's entry, or be off-contract
+  // entirely, none of which throw. Only a positively-confirmed entry is `applied`.
+  const read = bulkOutcomeReader(result, ops.length);
   return ops.map((op, i) => {
     const opId = op.id == null ? null : op.id;
-    const { failed, entry } = read(op, i);
+    const { failed, entry, unconfirmed } = read(op, i);
     if (failed) {
-      const message = (entry && (entry.error || entry.error_code)) || 'bulk update reported failure without a per-entry error';
+      const message = (entry && (entry.error || entry.error_code))
+        || (unconfirmed
+          ? 'bulk update resolved without confirming this op — no matching per-entry result; recorded error, not applied (fail-closed)'
+          : 'bulk update reported this entry as failed');
       return { op_id: opId, status: STATUS.ERROR, dry_run: false, detail: { phase: 'apply', tool: bulkTool, bulk: true, message, result: entry == null ? (result == null ? null : result) : entry } };
     }
-    return { op_id: opId, status: STATUS.APPLIED, dry_run: false, detail: { tool: bulkTool, bulk: true, result: result == null ? null : result } };
+    return { op_id: opId, status: STATUS.APPLIED, dry_run: false, detail: { tool: bulkTool, bulk: true, result: entry } };
   });
 }
 

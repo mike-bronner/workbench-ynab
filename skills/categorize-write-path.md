@@ -70,6 +70,24 @@ apply (a dry-run preview shows the resolved id, and flags an unresolvable name a
 proposal **should** make unnecessary; an unresolvable name returns an `error`
 result (never a thrown exception) and its op is withheld from the batch.
 
+## Single-type batches and a mandatory active budget
+
+This is the **sole** handler for `categorize` ops; M4-5 routes each op to the handler
+whose op-type matches (the sibling reconcile / allocate handlers assume the same
+single-type contract). A foreign-type op is **never** forwarded into the executor
+batch — it has no categorize tool and would abort the whole batch in the executor's
+tool pre-flight, poisoning the valid ops. A mis-routed op instead gets its own
+terminal per-op `error` result (`phase: 'routing'`) and is withheld from the batch, so
+the valid categorize ops still apply.
+
+`activeBudgetId` is **mandatory in both modes** and validated **up front** — before any
+resolution read. Category resolution runs a cross-budget read guard in dry-run too, so
+without a known active budget a name-only op could otherwise fire a `listCategories`
+read against a proposal-controlled `budget_id` before the guard is in force; the
+handler throws instead. A malformed envelope (`null` / `{}` / `{operations: []}` / a
+non-array `operations`) fails closed with a structured `schema_invalid` outcome up
+front — never a fail-open "nothing to do, all good".
+
 ## Dry-run is the default
 
 `dryRun` defaults to **`true`** — the executor produces a per-op `before → after`
@@ -143,8 +161,11 @@ categorization and recategorization, the multi-txn bulk path (one call, each op
 drift-checked and audited) and the per-transaction fallback, drift skipping one op
 of a bulk batch, a guardrail block aborting the batch, the dry-run diff, category
 name→id resolution in both real apply **and** dry-run, field isolation at the
-dispatch boundary (payee/amount never sent), an unresolvable name returning
-`error`, deferred-schema boot patience with schema **reload** on
+dispatch boundary (payee/amount never sent) on **both** the single and the bulk
+path, an unresolvable name returning `error`, a mixed-type change-set whose foreign
+op errors without poisoning the valid categorize op, a missing `activeBudgetId`
+throwing before any cross-budget read, a malformed envelope failing closed as
+`schema_invalid`, deferred-schema boot patience with schema **reload** on
 `InputValidationError`, and the namespaced-tool enforcement — with tool names taken
 from the guardrail's `ALLOWED_TOOLS`, so the
 test holds no hard-coded name.

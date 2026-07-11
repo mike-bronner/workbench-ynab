@@ -69,8 +69,14 @@ survivors and, when `bulkApplyOp` is wired, `bulkToolMap[type]` is set, and
 applies per-op. If `bulkApplyOp` **throws** (the bulk shape was rejected at
 runtime), the executor **falls back** to a per-op `applyOp` call for each op in the
 group — so a bulk-capable path is never less safe, or less complete, than a per-op
-one. This is the mechanism that keeps `skipped-stale` / `blocked` reachable and the
-M4-3 audit trail intact even on the bulk path. A bulk-capable op type is pre-flighted
+one. A bulk call that **resolves** is read **fail-closed**: an op is recorded
+`applied` only when the payload is well-shaped (a `results` array with one entry per
+requested op) *and* that op's own entry reports a written status
+(created/duplicate/updated). A failed entry, a missing entry, a length mismatch, or a
+payload with no `results` array at all is audited as `error` — the M4-3 trail never
+records `applied` for a transaction the tool did not positively confirm. This is the
+mechanism that keeps `skipped-stale` / `blocked` reachable and the
+M4-3 audit trail honest even on the bulk path. A bulk-capable op type is pre-flighted
 on **both** its per-op tool and its bulk tool (the fallback needs the per-op tool),
 so a denied bulk tool aborts the whole batch before any dispatch.
 

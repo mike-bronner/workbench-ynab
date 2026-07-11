@@ -30,6 +30,13 @@
  * are all reachable through this path.
  *
  * Design rules:
+ *  - SINGLE-TYPE BATCHES. This is the SOLE handler for `categorize` ops (AC1), and
+ *    M4-5 routes each op to the handler whose op_type matches (the sibling reconcile
+ *    / allocate handlers assume the same single-type contract). A foreign-type op is
+ *    never forwarded into the executor batch — it would have no categorize tool and
+ *    would abort the whole batch in the executor's tool pre-flight, poisoning the
+ *    valid categorize ops. A mis-routed op instead gets its own terminal per-op
+ *    `error` result (`phase: 'routing'`) and is kept out of the executor batch.
  *  - DRY-RUN BY DEFAULT. `dryRun` is true unless the caller passes an explicit
  *    `false`; a dry-run produces the executor's per-op before→after diff and calls
  *    NO mutating tool.
@@ -377,7 +384,10 @@ function toCategorizeResult(r, op) {
  *
  * @param {object} changeset the change-set envelope (assets/changeset-schema.json).
  * @param {object} [ctx]
- * @param {string} [ctx.activeBudgetId] MANDATORY on real apply (the executor throws without it).
+ * @param {string} ctx.activeBudgetId MANDATORY in BOTH modes — throws when missing/empty.
+ *   Category resolution runs a cross-budget read guard in dry-run too, and the executor
+ *   fails closed without it, so it is validated up front (before any resolution read),
+ *   not just on real apply.
  * @param {boolean} [ctx.dryRun=true] real apply requires an explicit `false`.
  * @param {(toolName: string, payload: object) => (unknown|Promise<unknown>)} [ctx.callTool]
  *   REQUIRED for real apply — the mutating MCP dispatch.
@@ -404,11 +414,31 @@ async function applyCategorize(changeset, ctx = {}) {
     throw new TypeError('applyCategorize real apply (dryRun: false) requires a callTool(toolName, payload) function');
   }
 
+  const operations = Array.isArray(changeset && changeset.operations) ? changeset.operations : [];
+
+  // A valid change-set requires >=1 operation (schema `minItems`). An empty / non-array
+  // `operations` envelope (`null` / `{}` / `{operations: []}` / a non-array) is
+  // MALFORMED — fail CLOSED with `schema_invalid` up front (a structured outcome M4-5
+  // renders, matching the executor's own shape), before the activeBudgetId guard and
+  // any resolution read, so garbage input never reports a fail-open "success".
+  if (operations.length === 0) {
+    return { ok: false, dry_run: dryRun, aborted: true, reason: OUTCOME.SCHEMA_INVALID, validation: validateChangeset(changeset), results: [] };
+  }
+
+  // activeBudgetId is MANDATORY in BOTH modes — validate it BEFORE any resolution read.
+  // Category resolution runs ahead of the executor and, when a name-only op needs a
+  // lookup, issues `listCategories(op.budget_id)`; its cross-budget guard no-ops
+  // without a known active budget. Absent this check, a name-only op could fire a real
+  // READ against a proposal-controlled budget_id before the executor's own
+  // activeBudgetId assertion ever runs. Fail closed here so no cross-budget read can
+  // precede the guard (the executor asserts the same, but only after resolution).
+  if (typeof activeBudgetId !== 'string' || activeBudgetId.length === 0) {
+    throw new TypeError('applyCategorize requires a non-empty activeBudgetId — the cross-budget read guard and the executor both fail closed without it');
+  }
+
   // Load the deferred tool schemas before the FIRST MCP call, in any mode (AC7).
   const reloadSchemas = () => loadSchemas({ toolSearch, ...patience });
   await reloadSchemas();
-
-  const operations = Array.isArray(changeset && changeset.operations) ? changeset.operations : [];
 
   // Category resolution — a READ-ONLY prep step BEFORE the executor (module doc).
   const listCategoriesPatient = typeof listCategories === 'function'
@@ -419,7 +449,22 @@ async function applyCategorize(changeset, ctx = {}) {
   const toRun = []; // { index, op } — ops handed to the executor, in original order
   for (let i = 0; i < operations.length; i += 1) {
     const op = operations[i];
-    if (!op || op.type !== CATEGORIZE_TYPE) { toRun.push({ index: i, op }); continue; }
+    // SINGLE-TYPE CONTRACT. This handler is the SOLE handler for `categorize` ops
+    // (AC1); M4-5 routes each op to the handler whose op_type matches (the sibling
+    // reconcile/allocate handlers assume the same). A foreign-type op must NEVER be
+    // forwarded into the batch: it has no categorize tool, so the executor's
+    // real-apply tool pre-flight would find no tool for it, block, and ABORT the
+    // whole batch — reporting the perfectly valid categorize ops as blocked. Instead
+    // give the mis-routed op its own terminal per-op `error` result and keep it out
+    // of the executor batch, so it can't poison the valid ops.
+    if (!op || op.type !== CATEGORIZE_TYPE) {
+      const seen = op ? JSON.stringify(op.type) : 'a null/undefined op';
+      merged[i] = catResult(op, STATUS.ERROR, dryRun, {
+        phase: 'routing',
+        message: `categorize handler received a non-categorize op (type: ${seen}) — this handler only processes "${CATEGORIZE_TYPE}" ops; M4-5 must route each op to its own-type handler.`,
+      });
+      continue;
+    }
     const resolved = await resolveCategory(op, { listCategories: listCategoriesPatient, activeBudgetId });
     if (resolved.error) {
       merged[i] = catResult(op, STATUS.ERROR, dryRun, { phase: 'resolve', message: resolved.error });
@@ -429,21 +474,13 @@ async function applyCategorize(changeset, ctx = {}) {
     toRun.push({ index: i, op: alreadyResolved ? op : enrichAfter(op, resolved) });
   }
 
-  // Nothing reached the executor. Two very different reasons:
+  // Nothing reached the executor, yet the envelope carried operations (an empty /
+  // malformed envelope already returned `schema_invalid` up top). So every op was
+  // either a mis-routed foreign-type op or a categorize op that errored in resolution
+  // (e.g. an unresolvable name). Both are per-op errors, not a batch abort (mirroring
+  // the executor's per-op error semantics), so the batch still "completes" with those
+  // error results already in `merged`.
   if (toRun.length === 0) {
-    // (a) The envelope carried NO operations (`null` / `{}` / `{operations: []}` /
-    //     a non-array `operations`). A valid change-set requires >=1 operation
-    //     (schema `minItems`), so this is a MALFORMED envelope — fail CLOSED with
-    //     `schema_invalid` (matching the executor's own shape) rather than
-    //     reporting a fail-open "success" for garbage input. The rest of this
-    //     write path is fail-closed everywhere else; the short-circuit must be too.
-    if (operations.length === 0) {
-      return { ok: false, dry_run: dryRun, aborted: true, reason: OUTCOME.SCHEMA_INVALID, validation: validateChangeset(changeset), results: [] };
-    }
-    // (b) Every op was a categorize op that errored in resolution (e.g. an
-    //     unresolvable name). A resolution failure is a per-op error, not a batch
-    //     abort (mirroring the executor's per-op error semantics), so the batch
-    //     still "completes" with those error results.
     return {
       ok: true,
       dry_run: dryRun,
