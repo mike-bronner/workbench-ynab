@@ -186,7 +186,7 @@ Report output configuration.
 | `template_path` | string \| null | optional | Path to the frozen HTML report template. When `null`, the plugin's bundled template under `assets/` is used (frozen in Sprint 3, issue #42). |
 
 ```json
-"report": { "output_dir": "~/Documents/YNAB Reports", "template_path": null }
+"report": { "output_dir": "~/Documents/Claude/Reports", "template_path": null }
 ```
 
 `output_dir` lives **outside the repo** (this whole `config.json` does — see the

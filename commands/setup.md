@@ -149,7 +149,7 @@ absent). Collect, in order:
 | 9 | Quarterly due dates | `.tax_profile.quarterly_due_dates` | `04-15, 06-15, 09-15, 01-15` |
 | 10 | Schedules that apply | `.tax_profile.schedules` | `C, A, SE, 1` |
 | 11 | Persona name | `.persona.name` | `$PERSONA_DEFAULT` (the default voice) |
-| 12 | Report output directory | `.report.output_dir` | `~/Documents/YNAB Reports` |
+| 12 | Report output directory | `.report.output_dir` | `~/Documents/Claude/Reports` |
 
 Notes for the walk:
 
