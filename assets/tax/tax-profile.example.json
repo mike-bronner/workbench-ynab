@@ -1,4 +1,11 @@
 {
+  "$readme": [
+    "This is the TEMPLATE, not a live profile. Every value below is a placeholder — never a real name, institution, account, or budget.",
+    "Your live profile belongs OUTSIDE this repo at ~/.claude/plugins/data/workbench-ynab-claude-workbench/tax-profile.json so it survives plugin updates and is never committed (this repo is PUBLIC).",
+    "To create it: mkdir -p ~/.claude/plugins/data/workbench-ynab-claude-workbench && cp assets/tax/tax-profile.example.json ~/.claude/plugins/data/workbench-ynab-claude-workbench/tax-profile.json — then replace these placeholders with your real numbers.",
+    "Do NOT put your YNAB Personal Access Token here. It lives in the macOS Keychain (service ynab-mcp) only; the launcher injects it. Tax config and the token are never co-located.",
+    "This $readme key is a $-prefixed annotation: the profile loader strips it before merging, so it never reaches any tax calculation."
+  ],
   "schemaVersion": "1",
   "filingStatus": "mfj",
   "taxYear": 2025,
@@ -15,9 +22,11 @@
       "displayName": "Business A",
       "schedule": "C",
       "scheduleLineMap": {
-        "note": "Detailed shape is defined by issue M3-2; placeholder content only.",
+        "note": "Detailed shape is owned by the mapping engine (issue #23); placeholder content only. categoryGroups / accounts declare this entity's business YNAB structure so the engine can route those transactions to Schedule C — use placeholder names here, never real ones.",
         "advertising": "Category Group Placeholder 1",
-        "officeExpense": "Category Group Placeholder 2"
+        "officeExpense": "Category Group Placeholder 2",
+        "categoryGroups": ["Category Group Placeholder 1", "Category Group Placeholder 2"],
+        "accounts": ["Account Placeholder — Business Checking"]
       }
     }
   ],
@@ -47,14 +56,52 @@
     "saltCap": 10000
   },
   "quarterlyEstimatedDueDates": [
-    { "quarter": 1, "month": 4, "day": 15 },
-    { "quarter": 2, "month": 6, "day": 15 },
-    { "quarter": 3, "month": 9, "day": 15 },
-    { "quarter": 4, "month": 1, "day": 15 }
+    { "quarter": 1, "month": 4, "day": 15, "periodStartMonth": 1, "periodStartDay": 1, "periodEndMonth": 3, "periodEndDay": 31 },
+    { "quarter": 2, "month": 6, "day": 15, "periodStartMonth": 4, "periodStartDay": 1, "periodEndMonth": 5, "periodEndDay": 31 },
+    { "quarter": 3, "month": 9, "day": 15, "periodStartMonth": 6, "periodStartDay": 1, "periodEndMonth": 8, "periodEndDay": 31 },
+    { "quarter": 4, "month": 1, "day": 15, "periodStartMonth": 9, "periodStartDay": 1, "periodEndMonth": 12, "periodEndDay": 31 }
   ],
+  "incomeTaxBracketsByYear": {
+    "mfj": {
+      "2025": [
+        { "upTo": 23850, "rate": 0.10 },
+        { "upTo": 96950, "rate": 0.12 },
+        { "upTo": 206700, "rate": 0.22 },
+        { "upTo": 394600, "rate": 0.24 },
+        { "upTo": 501050, "rate": 0.32 },
+        { "upTo": 751600, "rate": 0.35 },
+        { "rate": 0.37 }
+      ]
+    }
+  },
+  "estimatedTaxPayments": {
+    "payeeKeywords": ["irs", "us treasury", "estimated tax", "1040-es", "eftps"],
+    "categoryNames": ["Estimated Taxes Placeholder"],
+    "categoryGroups": [],
+    "accounts": []
+  },
   "overrides": {
     "thresholds": {
       "saltCap": 10000
-    }
+    },
+    "mappingRules": [
+      {
+        "id": "my-accountant-fees",
+        "match": { "payeeKeywords": ["bookkeeping placeholder", "accountant placeholder"], "amountSign": "outflow" },
+        "taxLineId": "schedC.17",
+        "businessEntityId": "biz-a",
+        "priority": 40,
+        "confidence": 0.9,
+        "reason": "Payee '{payee}' is my bookkeeper; classifying as Schedule C legal and professional services."
+      },
+      {
+        "id": "charitable-tithing",
+        "enabled": false,
+        "match": { "payeeKeywords": ["unused"] },
+        "taxLineId": "schedA.charitable",
+        "priority": 50,
+        "reason": "Disable the bundled charitable rule by overlaying its id with enabled:false."
+      }
+    ]
   }
 }

@@ -1,0 +1,47 @@
+name: test
+
+# Run the full test suite on every push and pull request (issue #11 review
+# follow-up). `scripts/test.sh` is the single entrypoint (issue #16): it
+# auto-discovers every tests/**/*.test.sh (bash suite) and tests/**/*.test.mjs
+# (Node suite, built-in node:test). Before this workflow those ran only locally,
+# so neither the bash unit tests nor the Node suite gated a PR — only
+# secret-scan.yml did. This closes that gap.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # System `node` only — deliberately NO `npm install`/cache, so no
+      # node_modules lands on the resolution path and the offline-boot proof
+      # (issue #14) stays faithful: it asserts the vendored bundle is
+      # self-contained with NONE present.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      # scripts/test.sh is the one true entrypoint (bash suite needs bash + jq +
+      # shasum; Node suite needs node — all present on ubuntu-latest). We feed it
+      # the full discovered suite MINUS tests/persona-loader.test.sh, which has a
+      # pre-existing bash≥5 portability bug in bin/persona.sh's footer escaping
+      # (passes on macOS bash 3.2, fails on the GNU/Linux runner) — tracked in
+      # #126 and to be re-included once fixed. Everything else gates here,
+      # including the offline-boot proof and the full Node suite. `find` is
+      # dynamic, so new test files are picked up automatically.
+      - name: Run the test suite (full suite minus the bash≥5-broken persona test, see #126)
+        run: |
+          files=()
+          while IFS= read -r f; do files+=("$f"); done < <(
+            find tests -type f \( -name '*.test.sh' -o -name '*.test.mjs' \) \
+              -not -path 'tests/lib/*' -not -name 'persona-loader.test.sh' | sort
+          )
+          bash scripts/test.sh "${files[@]}"

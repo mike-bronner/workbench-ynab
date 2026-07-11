@@ -237,12 +237,68 @@ test('accessors: business entities, schedule line maps, thresholds, quarterly da
   assert.equal(r.getThreshold('seTaxRate'), 0.153);
 });
 
+test('accessors (issue #82): income-tax brackets, estimated-payment matchers, period passthrough', () => {
+  // Defaults-only: the bundled US ruleset supplies brackets, due-date period
+  // boundaries, and the generic estimated-payment payee keywords.
+  const r = loadProfile({ profilePath: ABSENT });
+  const brackets = r.getIncomeTaxBrackets(2025, 'mfj');
+  assert.ok(Array.isArray(brackets) && brackets.length > 0);
+  assert.equal(brackets[0].rate, 0.10);
+  assert.equal(brackets.at(-1).upTo, undefined); // top bracket is unbounded
+  assert.equal(r.getIncomeTaxBrackets(1900, 'mfj'), undefined); // unknown year
+
+  // No-arg fallback to the profile's own year + filing status — needs a USER
+  // profile (the bundled defaults carry no taxYear / filingStatus, those are
+  // per-user required fields), so write one.
+  const up = loadProfile({ profilePath: writeProfile({ ...validBase(), filingStatus: 'mfj', taxYear: 2025 }) });
+  assert.deepEqual(up.getIncomeTaxBrackets(), up.getIncomeTaxBrackets(2025, 'mfj'));
+
+  const matchers = r.getEstimatedTaxPaymentMatchers();
+  assert.ok(matchers.payeeKeywords.includes('irs'));
+  // Always the four arrays, even when the user configured none.
+  assert.deepEqual(Object.keys(matchers).sort(), ['accounts', 'categoryGroups', 'categoryNames', 'payeeKeywords']);
+
+  // getQuarterlyDueDates passes the uneven income-attribution boundaries through.
+  const q2 = r.getQuarterlyDueDates(2025).find((d) => d.quarter === 2);
+  assert.equal(q2.periodStartMonth, 4);
+  assert.equal(q2.periodEndMonth, 5);
+});
+
 // --- validator vouches for the canonical example ---------------------------
 
 test('validateAgainstSchema accepts the bundled example instance', () => {
   const example = JSON.parse(readFileSync(join(ROOT, 'assets', 'tax', 'tax-profile.example.json'), 'utf8'));
   const { valid, errors } = validateAgainstSchema(example, SCHEMA);
   assert.equal(valid, true, `example should validate; got: ${JSON.stringify(errors)}`);
+});
+
+// --- M3-5: the example carries an onboarding $readme that the loader strips ---
+// The example doubles as the populate-from template, so it must explain (in the
+// file itself) where the live instance belongs and that it is never committed —
+// AC #8. The note is a $-prefixed annotation: declared in the schema so the
+// example still satisfies additionalProperties:false, then stripped pre-merge so
+// it never reaches the resolved profile or any tax math.
+test('(M3-5) the example carries a non-empty $readme onboarding note', () => {
+  const example = JSON.parse(readFileSync(join(ROOT, 'assets', 'tax', 'tax-profile.example.json'), 'utf8'));
+  assert.ok(Array.isArray(example.$readme) && example.$readme.length > 0, 'example must carry a $readme note');
+  const note = example.$readme.join('\n');
+  assert.match(note, /\.claude\/plugins\/data\/workbench-ynab-claude-workbench/, 'note must say where the live instance belongs');
+  // Pin the never-committed claim distinctly. The location assertion above already
+  // owns "where it belongs", so this must match the commit-status clause itself —
+  // not a placement word like "outside" that survives even if the "never committed
+  // (this repo is PUBLIC)" sentence were deleted (AC #8(b)).
+  assert.match(note, /never committed|not committed|never in git/i, 'note must say it is never committed');
+  assert.match(note, /cp /, 'note must show how to copy/populate it');
+});
+
+test('(M3-5) the example $readme is stripped from the resolved profile', () => {
+  const example = readFileSync(join(ROOT, 'assets', 'tax', 'tax-profile.example.json'), 'utf8');
+  const p = join(TMP, 'example-instance.json');
+  writeFileSync(p, example);
+  const r = loadProfile({ profilePath: p });
+  assert.equal(r.ok, true, `example must load cleanly; got: ${JSON.stringify(r.error)}`);
+  assert.equal(Object.prototype.hasOwnProperty.call(r.profile, '$readme'), false, '$readme leaked into the resolved profile');
+  assert.ok(Object.keys(r.provenance).every((k) => !k.includes('$')), 'no $-annotation provenance leaf');
 });
 
 test('validateAgainstSchema rejects an unknown top-level property (additionalProperties:false)', () => {
@@ -397,7 +453,7 @@ test('(blocker) $-prefixed keys in overrides never leak into the frozen profile'
   writeFileSync(
     p,
     '{"schemaVersion":"1","filingStatus":"single","taxYear":2025,' +
-      '"overrides":{"$pwn":"leak","customBucket":{"$note":"x","real":1}}}',
+      '"overrides":{"$pwn":"leak","customBucket":{"$note":"x","$readme":["y"],"real":1}}}',
   );
   const r = loadProfile({ profilePath: p });
   assert.equal(r.ok, true);

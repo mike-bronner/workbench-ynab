@@ -195,6 +195,17 @@
           }
         }
       }
+    },
+    "apply": {
+      "type": "object",
+      "description": "Optional configuration for the /workbench-ynab:ynab-apply approval command (M4-5). Omit entirely to use the shipped defaults.",
+      "additionalProperties": false,
+      "properties": {
+        "proposal_path": {
+          "type": "string",
+          "description": "Override for the directory the approval command reads pending change-set proposals from. When omitted, defaults to the proposals/ subdir of the plugin data dir. The weekly review (M4-10) writes proposals here; coordinate the exact filename when M4-10 lands."
+        }
+      }
     }
   }
 }

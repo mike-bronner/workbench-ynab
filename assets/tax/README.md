@@ -16,6 +16,27 @@ become one *instance* of this schema, stored outside the repo (see
 | [`tax-profile.d.ts`](./tax-profile.d.ts) | TypeScript declaration (`TaxProfile` + supporting types) for the engine to import. Zero runtime overhead. |
 | [`tax-profile.example.json`](./tax-profile.example.json) | A valid instance built entirely from placeholder values. |
 | [`us-tax-lines.json`](./us-tax-lines.json) | The **default US ruleset**: the Schedule C / A / 1 / SE line catalog the mapping engine maps onto, plus the default `standardDeductionByYear` table and `thresholds`. Purely declarative data; no per-taxpayer numbers. |
+| [`mapping-rules.schema.json`](./mapping-rules.schema.json) | Canonical JSON Schema (draft 2020-12) for the payee/category → tax-line **mapping ruleset** (issue #23). |
+| [`mapping-rules.json`](./mapping-rules.json) | The **default US mapping ruleset**: generic, ordered rules that classify a YNAB transaction to a tax line by payee keyword, category, account, or amount. Purely declarative data; no owner-specific names. |
+
+## The mapping engine — payee/category → tax line
+
+[`lib/tax/classifyTransaction.mjs`](../../lib/tax/classifyTransaction.mjs)
+(issue #23) turns an already-fetched YNAB transaction into a suggested tax line.
+It evaluates the bundled [`mapping-rules.json`](./mapping-rules.json) defaults,
+overlaid by the user's own rules, in ascending `priority`; the first matching
+rule wins, and nothing matching yields an explicit `unclassified` result (never
+a wrong guess). Users add, disable, or re-prioritize rules by putting them under
+`overrides.mappingRules` in their profile instance — a user rule with the same
+`id` as a bundled rule replaces it (set `enabled: false` to disable a default),
+a new `id` is appended. See
+[`docs/mapping-engine.md`](../../docs/mapping-engine.md) for the precedence,
+tie-breaking, milliunit handling, and the `$profile` business-scoping mechanism.
+
+> **YNAB namespacing.** The transactions the engine classifies are fetched by
+> the consuming skill with the vendored MCP tools namespaced
+> `mcp__plugin_workbench-ynab_ynab__*` (e.g. `ynab_list_transactions`) — **not**
+> `mcp__ynab__*`. The engine itself is MCP-agnostic: it only reads plain objects.
 
 ## Generic and shareable — a locked decision
 
@@ -95,8 +116,13 @@ amount under each filing status; no code change.
 | `itemized` | object | Schedule A: `medical`, `salt` (with `saltCap`), `interest`, `charitable`. |
 | `adjustments` | object | Schedule 1: `seTaxHalfDeduction`, `studentLoanInterest`, `iraContributions`. |
 | `thresholds` | object | `medicalAgiPercent` (0.075), `seTaxRate` (0.153), `saltCap` (10000). |
-| `quarterlyEstimatedDueDates[]` | array | `{ quarter, month, day }` parts; Q4 falls in January of the following year. |
+| `quarterlyEstimatedDueDates[]` | array | `{ quarter, month, day }` due-date parts (Q4 falls in January of the following year) plus optional `period*` income-attribution boundaries (Q1 Jan–Mar, Q2 Apr–May, Q3 Jun–Aug, Q4 Sep–Dec). |
+| `incomeTaxBracketsByYear` | object | `filingStatus → year → [{ upTo?, rate }]` marginal brackets; the top bracket omits `upTo`. Used by the estimated-tax tracker (#82). |
+| `estimatedTaxPayments` | object | Detection matchers (`payeeKeywords`, `categoryNames`, `categoryGroups`, `accounts`) for estimated-tax payments already recorded in YNAB (#82). |
 | `overrides` | object | User-override layer merged over the default ruleset by M3-3. |
+
+The **estimated-tax tracker** that consumes the last three fields is documented
+in [`docs/estimated-tax-tracker.md`](../../docs/estimated-tax-tracker.md).
 
 The schema is the authoritative reference — see
 [`tax-profile.schema.json`](./tax-profile.schema.json) for every field's
