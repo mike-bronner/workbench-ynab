@@ -87,14 +87,18 @@ JSON
 
 # (c) AC: missing required slot (not marked `no findings`) → non-zero, no file.
 test_missing_slot_fails_and_writes_nothing() {
-  local dir="$SANDBOX/should-stay-empty" rc=0 err
+  local dir="$SANDBOX/should-stay-empty" rc=0 out err
   # Only two of the fixture's three block slots supplied — footer-persona omitted.
-  err="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" bash "$WRITER" \
+  # stdout and stderr captured SEPARATELY so we can assert the error text AND
+  # that no success path leaked to stdout.
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" bash "$WRITER" \
             --template "$FIXTURE_TEMPLATE" --output-dir "$dir" \
             --tier Weekly --date 2026-06-22 \
             --slot 'kpi-dashboard=<div>x</div>' \
-            --slot 'section-1-classification=<div>y</div>' 2>&1 )" || rc=$?
+            --slot 'section-1-classification=<div>y</div>' 2>"$SANDBOX/missing.err" )" || rc=$?
+  err="$(cat "$SANDBOX/missing.err")"
   assert_eq "1" "$rc" "exit code is non-zero (1) on a missing required slot"
+  assert_eq "" "$out" "no success path leaked to stdout on a missing slot"
   assert_contains "$err" "footer-persona" "error names the missing slot"
   # No file — and the writer must not even create the output file.
   [ -e "$dir/YNAB-Weekly-Review-2026-06-22.html" ] \
@@ -104,18 +108,39 @@ test_missing_slot_fails_and_writes_nothing() {
 
 # An empty value (without the sentinel) is treated as missing — no partial files.
 test_empty_value_is_treated_as_missing() {
-  local rc=0 err
-  err="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" bash "$WRITER" \
+  local rc=0 out err
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" bash "$WRITER" \
             --template "$FIXTURE_TEMPLATE" --output-dir "$SANDBOX/empties" \
             --tier Weekly --date 2026-06-22 \
             --slot 'kpi-dashboard=<div>x</div>' \
             --slot 'section-1-classification=<div>y</div>' \
-            --slot 'footer-persona=' 2>&1 )" || rc=$?
+            --slot 'footer-persona=' 2>"$SANDBOX/empty.err" )" || rc=$?
+  err="$(cat "$SANDBOX/empty.err")"
   assert_eq "1" "$rc" "empty slot value (no sentinel) is rejected"
+  assert_eq "" "$out" "no success path leaked to stdout on an empty slot"
   assert_contains "$err" "footer-persona" "error names the empty slot"
   # "no partial files" must hold for an empty value too — assert nothing written.
   [ -e "$SANDBOX/empties/YNAB-Weekly-Review-2026-06-22.html" ] \
     && fail "writer wrote a file despite an empty (un-sentineled) slot"
+  return 0
+}
+
+# A whitespace-only value ("   ") is trimmed and judged empty — the completeness
+# guard must reject it (no silently-blank section), exactly like an empty value.
+test_whitespace_only_slot_is_treated_as_missing() {
+  local dir="$SANDBOX/whitespace" rc=0 out err
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" bash "$WRITER" \
+            --template "$FIXTURE_TEMPLATE" --output-dir "$dir" \
+            --tier Weekly --date 2026-06-22 \
+            --slot 'kpi-dashboard=<div>x</div>' \
+            --slot 'section-1-classification=<div>y</div>' \
+            --slot 'footer-persona=   ' 2>"$SANDBOX/ws.err" )" || rc=$?
+  err="$(cat "$SANDBOX/ws.err")"
+  assert_eq "1" "$rc" "a whitespace-only slot value is rejected as missing"
+  assert_eq "" "$out" "no success path leaked to stdout on a whitespace-only slot"
+  assert_contains "$err" "footer-persona" "error names the blank slot"
+  [ -e "$dir/YNAB-Weekly-Review-2026-06-22.html" ] \
+    && fail "writer wrote a file despite a whitespace-only slot"
   return 0
 }
 
@@ -203,17 +228,19 @@ test_real_template_all_slots() {
 # A typo'd required-slot name must surface as an UNKNOWN name, not silently hide
 # behind the real slot's "missing" report — else the caller never sees the typo.
 test_slot_typo_surfaces_unknown_name() {
-  local dir="$SANDBOX/typo" rc=0 err
+  local dir="$SANDBOX/typo" rc=0 out err
   # kpi-dashboard MISSPELLED kpi-dashboad: the real slot is now unfilled, and the
   # typo'd name is unknown to the template. (Neither name is a substring of the
   # other, so each assertion below is unambiguous.)
-  err="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" bash "$WRITER" \
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" bash "$WRITER" \
             --template "$FIXTURE_TEMPLATE" --output-dir "$dir" \
             --tier Weekly --date 2026-06-22 \
             --slot 'kpi-dashboad=<div>x</div>' \
             --slot 'section-1-classification=<div>y</div>' \
-            --slot 'footer-persona=Hobbes' 2>&1 )" || rc=$?
+            --slot 'footer-persona=Hobbes' 2>"$SANDBOX/typo.err" )" || rc=$?
+  err="$(cat "$SANDBOX/typo.err")"
   assert_eq "1" "$rc" "a missing real slot still sets exit 1 even with a typo present"
+  assert_eq "" "$out" "no success path leaked to stdout on a typo'd slot"
   assert_contains "$err" "kpi-dashboad" "error surfaces the unknown (typo'd) slot name"
   assert_contains "$err" "kpi-dashboard" "error still names the genuinely-missing slot"
   [ -e "$dir/YNAB-Weekly-Review-2026-06-22.html" ] \
@@ -243,6 +270,132 @@ JSON
   err="$( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 2>&1 )" || rc=$?
   assert_eq "2" "$rc" "output dir resolving to empty → usage error (exit 2)"
   assert_contains "$err" "output dir resolved to empty" "error explains the empty output dir"
+}
+
+# Regression for the write-failure gate (prior round's blocker #1): when the
+# output dir cannot be created — its parent is a regular FILE, so `mkdir -p`
+# fails deterministically for any user — the writer must exit non-zero, write NO
+# file, and print NOTHING to stdout. Every "writes nothing" test above stops at
+# the pre-write completeness check; this one exercises the write path itself.
+test_write_failure_gate() {
+  local blocker="$SANDBOX/not-a-dir" rc=0 out
+  : > "$blocker"                       # a regular file where a directory is needed
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" bash "$WRITER" \
+            --template "$FIXTURE_TEMPLATE" --output-dir "$blocker/sub" \
+            --tier Weekly --date 2026-06-22 \
+            --slot 'kpi-dashboard=<div>k</div>' \
+            --slot 'section-1-classification=<div>s</div>' \
+            --slot 'footer-persona=Hobbes' 2>/dev/null )" || rc=$?
+  [ "$rc" -ne 0 ] || fail "writer must exit non-zero when the output dir can't be created"
+  assert_eq "" "$out" "no success path leaked to stdout on a write failure"
+  [ -e "$blocker/sub/YNAB-Weekly-Review-2026-06-22.html" ] \
+    && fail "writer wrote a file despite a write failure"
+  return 0
+}
+
+# Multiple trailing slashes collapse to a single separator (the pre-fix
+# `${out_dir%/}` only stripped one — this guards the loop that strips them all).
+test_multi_trailing_slash_collapsed() {
+  local out
+  out="$( HOME="$SANDBOX" YNAB_CONFIG_FILE="$SANDBOX/none.json" \
+          run_writer_fixture --tier Weekly --date 2026-06-22 \
+            --output-dir "$SANDBOX/multi///" )"
+  assert_eq "$SANDBOX/multi/YNAB-Weekly-Review-2026-06-22.html" "$out" \
+    "multiple trailing slashes collapsed to a single path separator"
+  assert_file_exists "$out"
+}
+
+# .report.template_path is resolved from config when --template is absent.
+test_template_path_from_config() {
+  local cfg="$SANDBOX/tmpl.json" out args=()
+  cat > "$cfg" <<JSON
+{ "report": { "template_path": "$FIXTURE_TEMPLATE" } }
+JSON
+  while IFS= read -r -d '' a; do args+=("$a"); done < <(fixture_slots)
+  out="$( YNAB_CONFIG_FILE="$cfg" bash "$WRITER" \
+            --output-dir "$SANDBOX/tmpl-out" \
+            --tier Weekly --date 2026-06-22 "${args[@]}" )"
+  assert_eq "$SANDBOX/tmpl-out/YNAB-Weekly-Review-2026-06-22.html" "$out" \
+    ".report.template_path used when --template is absent"
+  assert_file_exists "$out"
+}
+
+# With neither --template nor .report.template_path, the bundled asset template
+# (assets/report/template.html) is the fallback — pass its full real slot set.
+test_bundled_default_template_fallback() {
+  local dir="$SANDBOX/bundled" out args=() s
+  for s in kpi-dashboard \
+           section-1-classification section-2-income section-3-spending \
+           section-4-budget-adherence section-5-cash-flow section-6-categories \
+           section-7-accounts section-8-goals section-9-net-worth \
+           section-10-anomalies section-11-recommendations section-12-tax-summary \
+           footer-persona; do
+    args+=( --slot "$s=<!-- filled:$s -->" )
+  done
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" bash "$WRITER" \
+            --output-dir "$dir" --tier Weekly --date 2026-06-22 "${args[@]}" )"
+  assert_eq "$dir/YNAB-Weekly-Review-2026-06-22.html" "$out" \
+    "bundled default template used when neither flag nor config sets one"
+  assert_file_exists "$out"
+}
+
+# A configured/flag template that does not exist is a usage error (exit 2).
+test_template_not_found_is_usage_error() {
+  local rc=0 err
+  # The trailing --template overrides run_writer_fixture's fixture path.
+  err="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" \
+          run_writer_fixture --template "$SANDBOX/does-not-exist.html" \
+            --tier Weekly --date 2026-06-22 2>&1 )" || rc=$?
+  assert_eq "2" "$rc" "a nonexistent template → usage error (exit 2)"
+  assert_contains "$err" "template not found" "error explains the missing template"
+}
+
+# {{tier}} renders the friendly display name (Quarterly-Tax → "Quarterly Tax"),
+# while the filename keeps the hyphenated enum.
+test_quarterly_tax_display_name() {
+  local dir="$SANDBOX/qt" out body
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" \
+          run_writer_fixture --tier Quarterly-Tax --date 2026-04-15 \
+            --output-dir "$dir" )"
+  assert_eq "$dir/YNAB-Quarterly-Tax-Review-2026-04-15.html" "$out" \
+    "filename keeps the hyphenated Quarterly-Tax enum"
+  body="$(cat "$out")"
+  assert_contains "$body" "Quarterly Tax YNAB Review" "{{tier}} renders the friendly 'Quarterly Tax'"
+  case "$body" in *"Quarterly-Tax YNAB Review"*) fail "hyphenated enum leaked into the {{tier}} display" ;; esac
+}
+
+# The writer HTML-escapes {{output_path}} — a configured path with HTML
+# metacharacters must never break out of the meta attribute / inject an element.
+test_output_path_is_html_escaped() {
+  local danger='inj"><script>x' dir out body
+  dir="$SANDBOX/$danger"               # a single dir component (no '/'), dangerous chars
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" \
+          run_writer_fixture --tier Weekly --date 2026-06-22 --output-dir "$dir" )"
+  assert_file_exists "$out"
+  body="$(cat "$out")"
+  assert_contains "$body" 'inj&quot;&gt;&lt;script&gt;x' "output path is HTML-escaped in the report"
+  case "$body" in
+    *'"><script>x'*) fail "unescaped output path broke out of the attribute (element injection)" ;;
+  esac
+}
+
+# An output dir resolving to the bare filesystem root is refused (exit 2), never
+# written to as "/YNAB-…html".
+test_root_output_dir_is_rejected() {
+  local rc=0 err
+  err="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" \
+          run_writer_fixture --tier Weekly --date 2026-06-22 --output-dir '/' 2>&1 )" || rc=$?
+  assert_eq "2" "$rc" "output dir resolving to '/' → usage error (exit 2)"
+  assert_contains "$err" "filesystem root" "error explains the root refusal"
+}
+
+# Out-of-range dates (month 13, day 39) are rejected, not just malformed shapes.
+test_out_of_range_date_is_rejected() {
+  local rc
+  rc=0; YNAB_CONFIG_FILE="$SANDBOX/none.json" run_writer_fixture --tier Weekly --date 2026-13-01 >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "month 13 → exit 2"
+  rc=0; YNAB_CONFIG_FILE="$SANDBOX/none.json" run_writer_fixture --tier Weekly --date 2026-06-39 >/dev/null 2>&1 || rc=$?
+  assert_eq "2" "$rc" "day 39 → exit 2"
 }
 
 run_tests

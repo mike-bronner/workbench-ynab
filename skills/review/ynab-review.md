@@ -318,13 +318,20 @@ Once every block slot's fragment is computed and **escaped**, do **not** stitch
 the HTML yourself — the assembly is owned by one helper so the chrome is never
 regenerated. Call the report writer as the review's **final** step:
 
+<!-- Comments live on their own lines ABOVE the command: a `#` after a trailing
+     `\` escapes the space, not the newline, and silently breaks the line
+     continuation — so keep the backslash the last character on each line. -->
+
 ```bash
+# --tier is one of: Weekly | Monthly | Quarterly-Tax | Annual
+# --date is the report date in YYYY-MM-DD
+# Pass ONE --slot per block slot the template declares (full list in SLOTS.md);
+# the elided slots between the first and last below follow the same pattern.
 report_path="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/report-writer.sh" \
-  --tier "$tier" \                       # Weekly | Monthly | Quarterly-Tax | Annual
-  --date "$report_date" \                # YYYY-MM-DD
+  --tier "$tier" \
+  --date "$report_date" \
   --slot "kpi-dashboard=$kpi_html" \
   --slot "section-1-classification=$s1_html" \
-  …                                       # ONE --slot per block slot in SLOTS.md
   --slot "section-12-tax-summary=$s12_html" \
   --slot "footer-persona=$persona_html")"
 ```

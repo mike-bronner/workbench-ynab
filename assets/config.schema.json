@@ -160,11 +160,10 @@
       "type": "object",
       "description": "Report output configuration.",
       "additionalProperties": false,
-      "required": ["output_dir"],
       "properties": {
         "output_dir": {
           "type": "string",
-          "description": "Directory where generated HTML reports are written. Supports ~ and environment-variable expansion at use time."
+          "description": "Directory where generated HTML reports are written. Supports ~ and environment-variable expansion at use time. OPTIONAL — when absent or empty the writer (bin/report-writer.sh) applies the shipped default ~/Documents/Claude/Reports, so the loader and tests deliberately exercise the field-absent path. Not marked required here to match that default behaviour."
         },
         "template_path": {
           "type": ["string", "null"],

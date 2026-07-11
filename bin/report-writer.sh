@@ -111,6 +111,31 @@ expand_path() {
   printf '%s' "$p"
 }
 
+# html_escape <string> — escape the four HTML metacharacters so a scalar the
+# writer injects into the report (the output path, the tier, the date) can never
+# break out of an attribute or inject an element. The writer OWNS escaping the
+# scalars it places; fragment values are escaped by their producer (the review
+# skill's trust-boundary rule). '&' is replaced first so entities it introduces
+# are not double-escaped.
+html_escape() {
+  local s="$1"
+  s="${s//&/&amp;}"
+  s="${s//</&lt;}"
+  s="${s//>/&gt;}"
+  s="${s//\"/&quot;}"
+  printf '%s' "$s"
+}
+
+# trim <string> — strip leading and trailing whitespace. Used so a whitespace-only
+# --slot value ("   ") is judged empty (hence missing) rather than passing the
+# completeness guard and rendering a silently-blank section.
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
 # --- parse args -------------------------------------------------------------
 tier=""
 date=""
@@ -158,11 +183,14 @@ case "$tier" in
   "") usage_err "--tier is required (one of: Weekly, Monthly, Quarterly-Tax, Annual)" ;;
   *)  usage_err "invalid --tier '$tier' (expected: Weekly, Monthly, Quarterly-Tax, Annual)" ;;
 esac
-case "$date" in
-  [0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]) : ;;
-  "") usage_err "--date is required (YYYY-MM-DD)" ;;
-  *)  usage_err "invalid --date '$date' (expected YYYY-MM-DD)" ;;
-esac
+# Shape AND range: month 01-12, day 01-31 (a real calendar day-of-month check —
+# e.g. Feb 30 — is beyond the AC and left to the caller, but obviously-invalid
+# values like month 13 / day 39 are rejected here rather than baked into a filename).
+if [ -z "$date" ]; then
+  usage_err "--date is required (YYYY-MM-DD)"
+elif [[ ! "$date" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$ ]]; then
+  usage_err "invalid --date '$date' (expected YYYY-MM-DD, month 01-12, day 01-31)"
+fi
 
 # --- resolve template -------------------------------------------------------
 template="$cli_template"
@@ -185,6 +213,10 @@ out_dir="$(expand_path "$out_dir")"
 while [ "$out_dir" != "/" ] && [ "${out_dir%/}" != "$out_dir" ]; do
   out_dir="${out_dir%/}"
 done
+# Refuse the filesystem root outright — a report belongs in a directory, never at
+# "/YNAB-…html". (The write gates below fail safe on a permissioned "/", but the
+# symmetric guard names the real problem instead of a cryptic mkdir/mv error.)
+[ "$out_dir" != "/" ] || usage_err "output dir resolved to the filesystem root '/' — refusing to write there; check .report.output_dir"
 
 # --- build the output path: YNAB-{Tier}-Review-YYYY-MM-DD.html --------------
 out_path="${out_dir}/YNAB-${tier}-Review-${date}.html"
@@ -218,7 +250,9 @@ missing=()
 for (( r = 0; r < ${#required_slots[@]}; r++ )); do
   rs="${required_slots[$r]}"
   if idx="$(slot_index "$rs")"; then
-    [ -z "${slot_values[$idx]}" ] && missing+=("$rs")
+    # Trim first: a whitespace-only value ("   ") is as empty as "" — treat it
+    # as missing rather than let it render a silently-blank section.
+    [ -z "$(trim "${slot_values[$idx]}")" ] && missing+=("$rs")
   else
     missing+=("$rs")
   fi
@@ -256,28 +290,61 @@ if [ "${#missing[@]}" -gt 0 ] || [ "${#unknown[@]}" -gt 0 ]; then
   exit 2
 fi
 
-# --- assemble: constant template + variable fragments + scalar slots --------
-# Literal bash substitution (the persona.sh idiom): the needle is quoted so it is
-# matched literally (no glob), and the replacement is taken verbatim — safe for
-# arbitrary HTML in a fragment value.
-html="$(cat "$template")"
+# --- assemble: constant template + scalar slots + variable fragments --------
+# Read the (already-validated) template. Gate the read: if the file vanished or
+# became unreadable between the slot-grep above and now, `html` would be empty
+# and we would silently write an empty report — the same "no partial reports"
+# failure the write gates guard against, one step upstream.
+if ! html="$(cat "$template")"; then
+  err "could not read template: $template"
+  exit 1
+fi
+
+# Scalar slots FIRST, before the block fragments are spliced in — for two reasons:
+#   1. A fragment's own text may legitimately contain the literal `{{output_path}}`
+#      / `{{tier}}` / `{{report_date}}` (e.g. a YNAB payee or memo). Substituting
+#      the scalars first leaves that fragment text intact instead of a later
+#      scalar pass silently overwriting it (and leaking the local save path).
+#   2. Each scalar value is enum/regex-validated (tier/date) or HTML-escaped
+#      (out_path), so no scalar substitution can introduce a `<!-- SLOT:name -->`
+#      needle for the block pass below to mis-splice.
+# Every scalar the writer injects is HTML-escaped — the writer OWNS escaping the
+# values it places into the report (out_path is neither enum- nor regex-bounded).
+# {{tier}} renders the friendly display form (`Quarterly-Tax` → `Quarterly Tax`,
+# matching the review skill's promise); the hyphenated enum stays in the filename.
+tier_display="$tier"
+[ "$tier" = "Quarterly-Tax" ] && tier_display="Quarterly Tax"
+html="${html//\{\{tier\}\}/$(html_escape "$tier_display")}"
+html="${html//\{\{report_date\}\}/$(html_escape "$date")}"
+html="${html//\{\{output_path\}\}/$(html_escape "$out_path")}"
+
+# Block slots. Literal bash substitution (the persona.sh idiom): the needle is
+# quoted so it is matched literally (no glob), and the replacement is verbatim —
+# safe for arbitrary HTML in a fragment value.
 for (( i = 0; i < ${#slot_names[@]}; i++ )); do
   n="${slot_names[$i]}"
   v="${slot_values[$i]}"
-  [ "$v" = "no findings" ] && v=""     # explicit-empty sentinel → empty section
+  [ "$(trim "$v")" = "no findings" ] && v=""   # explicit-empty sentinel → empty section
   needle="<!-- SLOT:${n} -->"
   html="${html//"$needle"/$v}"
 done
-# Scalar slots. {{output_path}} is decided here (never hardcoded in the template).
-html="${html//\{\{tier\}\}/$tier}"
-html="${html//\{\{report_date\}\}/$date}"
-html="${html//\{\{output_path\}\}/$out_path}"
 
 # --- write + emit the path --------------------------------------------------
-# Gate BOTH writes: a helper whose contract is "no partial/empty reports" must
-# never print a success path for a file it failed to create. Without `set -e`,
-# an unchecked mkdir/redirect failure would still fall through to the final
-# printf and report success (exit 0 + path) for a file that does not exist.
+# Gate every step: a helper whose contract is "no partial/empty reports" must
+# never print a success path for a file it failed to create. Write to a temp
+# file in the destination dir, then mv it into place — an atomic swap, so a
+# failed same-day rerun (same tier+date → same path) can never destroy a prior
+# good report, and a partially-written file is never observable at the final path.
 mkdir -p "$out_dir" || { err "could not create output directory: $out_dir"; exit 1; }
-printf '%s\n' "$html" > "$out_path" || { err "could not write report: $out_path"; exit 1; }
+tmp="$(mktemp "${out_dir}/.report-writer.XXXXXX")" || { err "could not create a temp file in: $out_dir"; exit 1; }
+if ! printf '%s\n' "$html" > "$tmp"; then
+  err "could not write report: $out_path"
+  rm -f "$tmp"
+  exit 1
+fi
+if ! mv "$tmp" "$out_path"; then
+  err "could not move report into place: $out_path"
+  rm -f "$tmp"
+  exit 1
+fi
 printf '%s\n' "$out_path"

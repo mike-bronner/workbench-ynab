@@ -64,15 +64,27 @@ report-writer.sh \
   metachar can never reach the literal substitution.
 - The three **scalar slots** are filled by the writer, not the caller: `{{tier}}`
   and `{{report_date}}` from the flags, and `{{output_path}}` from the path the
-  writer itself decides (never hardcoded in the template).
+  writer itself decides (never hardcoded in the template). All three are
+  **HTML-escaped** before substitution — the writer owns escaping the scalars it
+  injects — and are substituted **before** the block fragments, so a fragment
+  whose own text happens to contain `{{output_path}}` / `{{tier}}` /
+  `{{report_date}}` is left intact rather than silently overwritten. `{{tier}}`
+  renders the **friendly display form**: the `Quarterly-Tax` enum shows as
+  `Quarterly Tax` in the report body while the filename keeps the hyphen
+  (`YNAB-Quarterly-Tax-Review-…`).
 - **`~` and `$VAR` / `${VAR}`** in the configured/flag path are expanded (no
   `eval`; command and arithmetic substitution are never executed). Any number of
   **trailing slashes** on the directory is tolerated. A path that expands to
-  **empty** (e.g. `.report.output_dir` referencing an unset variable) is
-  **refused** — the writer never writes to the filesystem root.
+  **empty** (e.g. `.report.output_dir` referencing an unset variable) — or to the
+  bare filesystem **root `/`** — is **refused**; the writer never writes to the
+  filesystem root.
 - The directory is created with **`mkdir -p`** before writing (no error if it
-  already exists), and both the `mkdir` and the write are checked — a failure
-  exits non-zero and prints **no** success path.
+  already exists). The report is written to a **temp file in the destination dir
+  and `mv`'d into place** — an atomic swap, so a failed same-day rerun (same
+  tier+date → same path) never destroys a prior good report and a
+  partially-written file is never observable at the final path. Every step
+  (`mkdir`, the write, the `mv`) is checked; a failure exits non-zero and prints
+  **no** success path.
 
 On success the writer prints the **absolute path** of the written file to
 stdout — a single line, directly usable as `report_path="$(report-writer.sh …)"`.
@@ -88,7 +100,9 @@ hardcoded list here.
 
 If a required slot is **unsupplied or supplied empty** (without the `no findings`
 sentinel), the writer prints the offending slot names to stderr and **exits
-non-zero without writing any file**. A partial report can never reach the user.
+non-zero without writing any file**. A **whitespace-only** value (`"   "`) is
+trimmed first and counts as empty, so it is rejected the same way — it can never
+render a silently-blank section. A partial report can never reach the user.
 Any **unknown** slot names are reported **alongside** the missing ones, so a
 typo (which shows up as both a missing real slot and an unknown name) is always
 visible rather than masquerading as a plain "missing slot".
@@ -99,7 +113,7 @@ visible rather than masquerading as a plain "missing slot".
 |---|---|
 | `0` | Report written; the absolute path is on stdout. |
 | `1` | A required slot was missing or empty — **no file written**. |
-| `2` | Usage error: bad flag, bad `--tier`, bad `--date`, an unknown or invalid slot name, an output dir that resolves to empty, or a missing template. |
+| `2` | Usage error: bad flag, bad `--tier`, an out-of-range or malformed `--date`, an unknown or invalid slot name, an output dir that resolves to empty or to the filesystem root `/`, or a missing template. |
 
 ## Portability
 
