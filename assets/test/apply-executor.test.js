@@ -54,6 +54,41 @@ const noDrift = () => spy((op) => clone(op.before));
 /** A no-op audit sink spy. */
 const auditSpy = () => spy(() => undefined);
 
+// --- opt-in bulk dispatch fixtures -----------------------------------------
+
+const BUDGET = 'b1f2c3d4-1111-4a2b-9c3d-000000000001'; // the shared fixtures' budget
+const SINGLE_TOOL = pick('_update_transaction');
+const BULK_TOOL = pick('_update_transactions');
+/** A group of ≥2 ops each carrying a resolved category_id may go through one bulk call. */
+const bulkFits = (ops) => ops.length >= 2 && ops.every((o) => o.after && typeof o.after.category_id === 'string');
+
+/** A schema-valid change-set with two categorize ops sharing the fixtures' budget. */
+const twoCategorize = () => ({
+  schema_version: '1.0.0',
+  generated_at: '2026-06-19T14:30:00Z',
+  budget_id: BUDGET,
+  budget_name: 'Family Budget',
+  source: 'manual',
+  money_movement: false,
+  operations: [
+    { id: 'op-1', type: 'categorize', budget_id: BUDGET, transaction_id: 't-a', before: { category_id: null, category_name: null }, after: { category_id: 'c-a', category_name: 'A' }, rationale: 'r', risk: 'low' },
+    { id: 'op-2', type: 'categorize', budget_id: BUDGET, transaction_id: 't-b', before: { category_id: null, category_name: null }, after: { category_id: 'c-b', category_name: 'B' }, rationale: 'r', risk: 'low' },
+  ],
+});
+
+const bulkCtx = (over = {}) => ({
+  activeBudgetId: BUDGET,
+  dryRun: false,
+  toolMap: { categorize: SINGLE_TOOL },
+  bulkToolMap: { categorize: BULK_TOOL },
+  bulkApplyOp: spy(() => ({ ok: true })),
+  bulkFits,
+  readLiveState: noDrift(),
+  applyOp: spy(() => ({ ok: true })),
+  audit: auditSpy(),
+  ...over,
+});
+
 // --- helpers: deepEqual / isStale -----------------------------------------
 
 test('deepEqual compares integer milliunits exactly and never coerces to float', () => {
@@ -427,4 +462,93 @@ test('a missing or empty activeBudgetId throws (fail-closed, never a silent enve
     () => applyChangeset(cs, { activeBudgetId: '', readLiveState: noDrift(), audit: auditSpy() }),
     /activeBudgetId/,
   );
+});
+
+// --- opt-in bulk dispatch (M4-6 Option 1) ----------------------------------
+
+test('bulk dispatch: same-type survivors go through ONE bulkApplyOp call; each op is still drift-checked and audited', async () => {
+  const cs = twoCategorize();
+  const read = noDrift();
+  const bulk = spy(() => ({ ok: true }));
+  const apply = spy();
+  const audit = auditSpy();
+  const out = await applyChangeset(cs, bulkCtx({ readLiveState: read, bulkApplyOp: bulk, applyOp: apply, audit }));
+
+  assert.equal(bulk.calls.length, 1); // exactly one bulk call for the group
+  assert.equal(bulk.calls[0][0], BULK_TOOL);
+  assert.equal(bulk.calls[0][1].length, 2); // the whole group of ops
+  assert.equal(apply.calls.length, 0); // no per-op dispatch
+  for (const r of out.results) {
+    assert.equal(r.status, STATUS.APPLIED);
+    assert.equal(r.detail.bulk, true);
+    assert.equal(r.detail.tool, BULK_TOOL);
+  }
+  assert.equal(read.calls.length, 2); // drift-checked each op individually
+  assert.equal(audit.calls.length, 2); // audited each op individually
+  for (const [rec] of audit.calls) assert.equal(rec.result.tool, BULK_TOOL); // audit records the tool that ran
+});
+
+test('bulk dispatch falls back to per-op applyOp when bulkApplyOp throws (rejected bulk shape)', async () => {
+  const cs = twoCategorize();
+  const bulk = spy(() => { throw new Error('bulk shape rejected'); });
+  const apply = spy(() => ({ ok: true }));
+  const out = await applyChangeset(cs, bulkCtx({ bulkApplyOp: bulk, applyOp: apply }));
+
+  assert.equal(bulk.calls.length, 1);
+  assert.equal(apply.calls.length, 2); // fell back to a per-op call for each op in the group
+  for (const r of out.results) assert.equal(r.status, STATUS.APPLIED);
+});
+
+test('bulkFits=false keeps the group on the per-op path (no bulk call)', async () => {
+  const cs = twoCategorize();
+  const bulk = spy(() => ({ ok: true }));
+  const apply = spy(() => ({ ok: true }));
+  await applyChangeset(cs, bulkCtx({ bulkFits: () => false, bulkApplyOp: bulk, applyOp: apply }));
+
+  assert.equal(bulk.calls.length, 0);
+  assert.equal(apply.calls.length, 2);
+});
+
+test('a stale op in a bulk group is skipped; only the survivors are bulk-dispatched', async () => {
+  const cs = twoCategorize();
+  // op-2 drifted from its `before`; only op-1 survives → 1 survivor, bulkFits=false → per-op.
+  const read = spy((op) => (op.id === 'op-2' ? { category_id: 'moved', category_name: 'x' } : clone(op.before)));
+  const bulk = spy(() => ({ ok: true }));
+  const apply = spy(() => ({ ok: true }));
+  const out = await applyChangeset(cs, bulkCtx({ readLiveState: read, bulkApplyOp: bulk, applyOp: apply }));
+
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId['op-2'].status, STATUS.SKIPPED_STALE);
+  assert.equal(byId['op-1'].status, STATUS.APPLIED);
+  // One survivor doesn't fit bulk → per-op; the stale op is never dispatched at all.
+  assert.equal(bulk.calls.length, 0);
+  assert.equal(apply.calls.length, 1);
+});
+
+test('a denied / un-namespaced bulk tool aborts the whole batch in pre-flight (tool_block, before any dispatch)', async () => {
+  const cs = twoCategorize();
+  const bulk = spy();
+  const apply = spy();
+  const out = await applyChangeset(cs, bulkCtx({
+    bulkToolMap: { categorize: 'mcp__ynab__ynab_create_transactions' }, // bare, off the allow-list
+    bulkApplyOp: bulk,
+    applyOp: apply,
+  }));
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, OUTCOME.TOOL_BLOCK);
+  assert.equal(bulk.calls.length, 0);
+  assert.equal(apply.calls.length, 0);
+});
+
+test('dry-run ignores the bulk config entirely — every op is simulated, no bulk/per-op dispatch', async () => {
+  const cs = twoCategorize();
+  const bulk = spy();
+  const apply = spy();
+  const out = await applyChangeset(cs, bulkCtx({ dryRun: true, bulkApplyOp: bulk, applyOp: apply }));
+  assert.equal(bulk.calls.length, 0);
+  assert.equal(apply.calls.length, 0);
+  for (const r of out.results) {
+    assert.equal(r.status, STATUS.APPLIED);
+    assert.equal(r.detail.simulated, true);
+  }
 });
