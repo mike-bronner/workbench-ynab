@@ -67,6 +67,15 @@ never lands in the repo), at `$PROPOSAL_DIR` — the canonical default
 the `.apply.proposal_path` config key. The most recent `*.json` there is the pending
 proposal.
 
+> **Interim selection — superseded by the lifecycle spec.** The `ls -t | head -1`
+> pick below is the placeholder selection. Proposal **selection** (newest *unapplied*
+> by envelope `generated_at`, explicit-path override), the **global staleness gate**
+> (reject a whole proposal that is too old or supplanted, before any op is processed),
+> **retention** (`applied/` and `superseded/` subdirs), and the **proposal-status
+> model** are specified in [`assets/changeset-lifecycle.md`](../assets/changeset-lifecycle.md)
+> (GAP-10) and wired when the lifecycle follow-up lands. Until then the top-level
+> `*.json` glob already excludes retired proposals in those subdirs.
+
 ```bash
 PROPOSAL="$(ls -t "$PROPOSAL_DIR"/*.json 2>/dev/null | head -1)"
 if [ -z "$PROPOSAL" ]; then

@@ -47,6 +47,12 @@ human approval gates the transition from proposal to any write:
 The `id` on every operation is stable, so apply can be **idempotent on resume**:
 a re-run skips operations already recorded as applied in the audit log.
 
+The stages above are the lifecycle of a *single* change-set. The lifecycle of the
+proposal **files** around it — which proposal apply selects when several exist,
+when a proposal is too stale to apply, how applied/superseded proposals are
+retired, and the proposal-status model — is defined in
+[`changeset-lifecycle.md`](./changeset-lifecycle.md) (GAP-10).
+
 ---
 
 ## 2. Money is always milliunits
