@@ -47,6 +47,8 @@ function spy(impl) {
 /** readLiveState that echoes each op's own `before` snapshot → never stale. */
 const noDrift = () => spy((op) => clone(op.before));
 const auditSpy = () => spy(() => undefined);
+/** authPreflight that succeeds — a valid, write-capable token (real apply only, #50). */
+const okPreflight = () => spy(() => ({ budgets: [{ id: 'b1' }] }));
 
 // --- registration point ----------------------------------------------------
 
@@ -186,6 +188,7 @@ test('a delete_duplicate op whose victim has drifted is marked stale and skipped
     dryRun: false,
     readLiveState: read,
     applyOp: apply,
+    authPreflight: okPreflight(),
     audit,
   });
 
@@ -233,6 +236,7 @@ test('real apply dispatches exactly the registered delete tool for the victim', 
     dryRun: false,
     readLiveState: noDrift(),
     applyOp: apply,
+    authPreflight: okPreflight(),
     audit: auditSpy(),
   });
   assert.equal(out.results[0].status, STATUS.APPLIED);
@@ -255,6 +259,7 @@ test('the full before-snapshot is audited BEFORE the irreversible delete, not af
     dryRun: false,
     readLiveState: (o) => clone(o.before),
     applyOp: apply,
+    authPreflight: okPreflight(),
     audit,
   });
 
@@ -298,6 +303,7 @@ test('a delete op missing risk:destructive is blocked by the guardrail through t
     dryRun: false,
     readLiveState: noDrift(),
     applyOp: spy(),
+    authPreflight: okPreflight(),
     audit: auditSpy(),
   });
   // Either the schema (risk const) or the guardrail rejects it — never applied.

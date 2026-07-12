@@ -310,11 +310,13 @@ function makeAuditingDeleteApplyOp({ applyOp, audit, changeset, dryRun = false }
  * @param {boolean} [options.dryRun=true] real apply requires an explicit false.
  * @param {Function} options.readLiveState async (op) => live victim state (wire to ynab_get_transaction).
  * @param {Function} [options.applyOp] async (toolName, op) => mcp result — required for real apply.
+ * @param {Function} [options.authPreflight] async () => read-only YNAB result — required for real apply;
+ *   the executor's pre-mutation auth check (#50). Forwarded verbatim to applyChangeset.
  * @param {Function} options.audit async ({operation, result, dryRun}) => void — the M4-3 audit sink.
  * @returns {Promise<object>} the executor outcome, or the twin_evidence_missing abort.
  */
 async function applyDeleteDuplicates(changeset, options = {}) {
-  const { activeBudgetId, dryRun = true, readLiveState, applyOp, audit } = options;
+  const { activeBudgetId, dryRun = true, readLiveState, applyOp, authPreflight, audit } = options;
 
   const ops = changeset && Array.isArray(changeset.operations) ? changeset.operations : [];
   const twinErrors = [];
@@ -344,6 +346,7 @@ async function applyDeleteDuplicates(changeset, options = {}) {
     toolMap: buildToolMap(),
     readLiveState,
     applyOp: wrappedApplyOp,
+    authPreflight,
     audit,
   });
 }
