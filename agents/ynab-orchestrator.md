@@ -43,6 +43,8 @@ The 20s budget covers cold-start scenarios — `bin/launcher.sh` resolving the K
 
 Only emit `ynab_mcp_offline` in `warnings` after exhausting retries on a genuine transport error. A schema miss is never offline; a zero-match `ToolSearch` during the first 20s is never offline.
 
+> **Boot patience is a separate timeout context from rate-limit backoff.** This 20s budget waits for a server that is still *spawning*. A live server that returns HTTP 429 (or throws the bundle's `RateLimitError`) is a different concern with its own bounded backoff, owned by the read path — see [`docs/ynab-read-path.md`](../docs/ynab-read-path.md). A 429 is not a transport error and must never trigger boot-patience retries; the two contexts share no state.
+
 ## What you own
 
 - ✅ Read budget state via `ynab_list_budgets` — resolve the target budget from the budget name supplied in your prompt
