@@ -60,13 +60,22 @@ preapproval_set() {
   preapproval_section | grep '^mcp__' || true
 }
 
-# The full body of the "## Permission notes" section in the capability map —
-# heading to the next "## " heading. The "### (a)/(b)/(c)" subsections do NOT
-# terminate it. Scopes the AC #5 subsection checks so tokens that also occur
-# elsewhere in the map (mcp__ynab__ in Runtime gotchas, M4-8 in the table) can't
-# satisfy them.
-permission_notes_section() {
-  awk '/^## Permission notes/{f=1;next} /^## /{f=0} f' "$MAP"
+# The body of ONE "### (x) …" subsection inside the "## Permission notes" section
+# of the capability map — from that "### (x)" heading to the next "### " or "## "
+# heading. Scoping to the individual subsection (not the whole section) is what
+# makes each AC #5 check non-vacuous: a token that also occurs in a *sibling*
+# subsection — e.g. M4-8 in the "### The exact config snippet" block, or
+# mcp__ynab__ in the Runtime-gotchas section outside "## Permission notes" — is
+# out of scope and cannot satisfy the assertion. Deleting subsection (x) empties
+# this body, so its assertion then fails. `$1` is the parenthesised tag, e.g. (c).
+permission_notes_subsection() {
+  local tag="### $1 "
+  awk -v tag="$tag" '
+    index($0, tag) == 1 { f = 1; next }
+    /^### / { f = 0 }
+    /^## / { f = 0 }
+    f
+  ' "$MAP"
 }
 
 # The SSoT section exists and declares a non-empty pre-approval set.
@@ -157,25 +166,36 @@ test_ssot_documents_delete_exclusion() {
 
 # AC #5: a permission-notes section explains (a) the namespacing, (b) the
 # /ynab-apply gate, and (c) the withheld delete verb. It lives in the allowlisted
-# capability map (the human-readable permission contract). Every subsection
-# assertion is scoped to the section body: `mcp__ynab__` also appears in the
-# Runtime-gotchas section and `M4-8` in the capability-map table, so a whole-file
-# check would keep passing even if subsections (a)/(c) were gutted. Against the
-# scoped section, removing any of (a)/(b)/(c) fails the matching assertion.
+# capability map (the human-readable permission contract). Each subsection check
+# is scoped to ITS OWN "### (x)" body, not the whole "## Permission notes" section:
+#   * a section-wide scope leaked M4-8 from the sibling "### The exact config
+#     snippet" subsection (the `// NOT ynab_delete_transaction … (M4-8 …)` comment),
+#     so deleting subsection (c) entirely still passed the (c) check — vacuous;
+#   * per-subsection scoping fixes that. `mcp__ynab__` lives only inside (a),
+#     `/ynab-apply` and `M4-5` only inside (b), and — now that the config-snippet
+#     M4-8 is out of scope — `M4-8` inside (c) only inside (c). So removing any one
+#     of (a)/(b)/(c) empties that subsection's body and fails its own assertion,
+#     and no sibling subsection can stand in for a deleted one.
 test_permission_notes_present_in_capability_map() {
   assert_file_exists "$MAP"
   grep -qE '^## Permission notes' "$MAP" \
     || fail "capability map is missing the '## Permission notes' section"
-  local section; section="$(permission_notes_section)"
-  [ -n "$section" ] || fail "the Permission notes section is empty"
+  local a b c
+  a="$(permission_notes_subsection '(a)')"
+  b="$(permission_notes_subsection '(b)')"
+  c="$(permission_notes_subsection '(c)')"
+  [ -n "$a" ] || fail "permission notes subsection (a) is missing or empty"
+  [ -n "$b" ] || fail "permission notes subsection (b) is missing or empty"
+  [ -n "$c" ] || fail "permission notes subsection (c) is missing or empty"
   # (a) namespace rationale — the bare, non-resolving form is named here.
-  assert_contains "$section" "mcp__ynab__" \
+  assert_contains "$a" "mcp__ynab__" \
     "permission notes (a) explain why the bare mcp__ynab__ form must NOT be used"
   # (b) the human-approval gate.
-  assert_contains "$section" "/ynab-apply" "permission notes (b) name the /ynab-apply approval gate"
-  assert_contains "$section" "M4-5" "permission notes (b) tie the human gate to M4-5"
-  # (c) the withheld delete verb.
-  assert_contains "$section" "M4-8" "permission notes (c) tie the withheld delete verb to M4-8"
+  assert_contains "$b" "/ynab-apply" "permission notes (b) name the /ynab-apply approval gate"
+  assert_contains "$b" "M4-5" "permission notes (b) tie the human gate to M4-5"
+  # (c) the withheld delete verb — M4-8 here is subsection (c)'s own reference,
+  # not the config-snippet comment's (that sibling subsection is out of scope).
+  assert_contains "$c" "M4-8" "permission notes (c) tie the withheld delete verb to M4-8"
 }
 
 run_tests
