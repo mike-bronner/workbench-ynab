@@ -39,12 +39,16 @@ re-vendor or MCP swap (see the capability map's swap procedure).
 set is `accounts, budgets, categories, months, payees, transactions` — confirmed
 against `vendor/ynab-mcp/index.cjs` and the repo's canonical registry
 [`skills/protocol/ynab-tools.md`](../skills/protocol/ynab-tools.md). Scheduled
-transactions are exposed only **inside the full `get_budget` BudgetDetail**
-(`scheduled_transactions[]`), never via a list endpoint. Pulling the entire budget
-detail solely for them would duplicate the per-resource list pulls above, so **v1
-defers scheduled-transactions analysis** to a later milestone — which can adopt a
-wholesale `get_budget` strategy or a transport that lists them. They are therefore
-not a cacheable list resource in v1 (absent from `CACHEABLE_RESOURCES` and §4).
+transactions are exposed only **inside the full `get_budget` BudgetDetail** — and
+the bundle's `ynab_get_budget` handler **strips `scheduled_transactions[]` at the
+tool boundary**, projecting the detail down to counts, so a `get_budget` call
+yields no scheduled transactions either. The vendored MCP therefore exposes **no
+read path** to them. Sourcing them requires an architecture change (patch the
+frozen bundle or add a raw-REST path); that is the **authorized follow-up
+[#157](https://github.com/mike-bronner/workbench-ynab/issues/157)**, carved out of
+this read-path-reliability layer. They are therefore not a cacheable list resource
+here (absent from `CACHEABLE_RESOURCES` and §4); `createReadCache` carries the
+forward-compat hook so #157 slots a source in without a shape change.
 
 ## 2. The read strategy (fetch-once)
 
@@ -99,8 +103,9 @@ heavier-than-typical budget so the total is a true ceiling, not a best case.
 | `get_month` | 1 per month | 1–3 | one per in-scope month (weekly review ⇒ 1) |
 | **Total** | | **≈ 16 (≈ 18 worst-case)** | **well under the ~200 requests/hour limit** |
 
-Scheduled transactions are **not** in this budget — they have no list tool and v1
-defers them (§1). The page count scales with budget size, but even a large budget
+Scheduled transactions are **not** in this budget — the vendored MCP exposes no
+read path to them, so they are carved into the authorized follow-up #157 (§1). The
+page count scales with budget size, but even a large budget
 lands near ~16 calls — roughly **10×** headroom against 200/hr, and a re-run inside
 the same hour stays well within it. The 12 sections add **zero** calls beyond this
 set — they read the cache, which is the point of fetch-once.
