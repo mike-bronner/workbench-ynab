@@ -125,6 +125,33 @@ function remediation(errorClass) {
   return REMEDIATION[errorClass] || REMEDIATION[ERROR_CLASS.UNKNOWN];
 }
 
+/**
+ * Unwrap a resolved MCP tool result, THROWING when it is an error envelope. The
+ * vendored YNAB MCP surfaces auth / rate-limit / 5xx failures as a RESOLVED
+ * `{ isError: true, content: [{ type: 'text', text }] }` result — NOT a rejected
+ * promise — so a port wrapper that returns it verbatim fails OPEN: a 401 preflight
+ * would silently "pass" and a mid-batch 401 would look like a success. Every
+ * write-path port wrapper runs its `callTool` result through this before returning
+ * to the executor, whose classify / auth-abort machinery only runs inside a `catch`.
+ * The thrown Error preserves the envelope's error text — which carries the
+ * `(HTTP <status>)` the vendored MCP embeds — so `classifyError` recovers the status.
+ * @template T
+ * @param {T} result the resolved MCP tool result.
+ * @returns {T} the same result, unchanged, when it is not an error envelope.
+ */
+function throwOnErrorResult(result) {
+  if (result && typeof result === 'object' && result.isError) {
+    const text = Array.isArray(result.content)
+      && result.content[0] && typeof result.content[0].text === 'string'
+      ? result.content[0].text
+      : JSON.stringify(result);
+    const err = new Error(`YNAB MCP returned an error result: ${text}`);
+    err.mcpResult = result;
+    throw err;
+  }
+  return result;
+}
+
 module.exports = {
   ERROR_CLASS,
   APPLIED_STATE,
@@ -133,4 +160,5 @@ module.exports = {
   extractStatus,
   classifyError,
   remediation,
+  throwOnErrorResult,
 };

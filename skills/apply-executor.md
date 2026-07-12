@@ -197,6 +197,11 @@ and audit log:
   compare them field-for-field.
 - **`applyOp(toolName, op)`** — invokes the single namespaced mutating tool the
   executor resolved from `toolMap`. Only called on the real-apply path.
+- **`bulkApplyOp(toolName, ops)`** — invokes the namespaced BULK tool for a whole
+  group of same-type survivors in one call (opt-in; see the bulk section above).
+  Only called on the real-apply path, and subject to the same isError→throw contract
+  as `applyOp` — a resolved `{ isError: true }` bulk envelope must throw so the
+  executor aborts / falls back fail-closed instead of reading it as a payload.
 - **`authPreflight()`** — a read-only YNAB call (resolve `ynab_list_budgets` from
   [`ynab-tools.md`](protocol/ynab-tools.md)) run once before the first mutation to
   confirm the token is valid and write-capable. It must **throw** on a non-2xx (a
@@ -217,9 +222,11 @@ and audit log:
 > on the ports **throwing**: `classifyError` only runs inside the executor's
 > `catch` blocks. But the vendored YNAB MCP (`vendor/ynab-mcp/index.cjs`) surfaces
 > auth / rate-limit / 5xx failures as a **resolved** `{ isError: true, … }` result,
-> not a rejected promise. So each wrapper for `readLiveState`, `applyOp`, and
-> `authPreflight` **must inspect `result.isError` and `throw`** (rethrowing the
-> structured error, preserving the HTTP status) before returning to the executor.
+> not a rejected promise. So each wrapper for `readLiveState`, `applyOp`,
+> `authPreflight`, and `bulkApplyOp` **must inspect `result.isError` and `throw`**
+> (rethrowing the structured error, preserving the HTTP status) before returning to
+> the executor. The shared `throwOnErrorResult` helper (`assets/write-error.js`) does
+> exactly this — wrap every `callTool` result in it.
 > A wrapper that returns the MCP result verbatim fails **open** — a 401 preflight
 > would silently "pass" and a mid-batch 401 would look like a success. Mirrored in
 > [`ynab-tools.md`](protocol/ynab-tools.md).

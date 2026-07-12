@@ -84,6 +84,7 @@
 const { STATUS, OUTCOME, applyChangeset } = require('./apply-executor');
 const { validateChangeset } = require('./validate-changeset');
 const { ALLOWED_TOOLS } = require('./write-safety-guardrail');
+const { throwOnErrorResult } = require('./write-error');
 
 /** The op type this handler is the sole registered handler for (M4-4 registration). */
 const CATEGORIZE_TYPE = 'categorize';
@@ -320,8 +321,11 @@ function categorizeBulkFits(ops) {
  * @param {{callTool: Function, reloadSchemas?: Function, sleep?: Function, retries?: number, delayMs?: number}} deps
  */
 function makeCategorizeApplyOp({ callTool, reloadSchemas, sleep, retries, delayMs }) {
+  // Route the resolved result through throwOnErrorResult so a vendored `{ isError:
+  // true }` auth / rate / 5xx envelope THROWS (the executor's classify/abort machinery
+  // only runs on a throw) instead of fooling the executor into reading a "success".
   return (toolName, op) => withBootPatience(
-    () => callTool(toolName, buildSingleUpdate(op, op.after.category_id)),
+    async () => throwOnErrorResult(await callTool(toolName, buildSingleUpdate(op, op.after.category_id))),
     { onRetry: reloadSchemas, sleep, retries, delayMs },
   );
 }
@@ -339,7 +343,13 @@ function makeCategorizeBulkApplyOp({ callTool, reloadSchemas, sleep, retries, de
       budget_id: ops[0].budget_id,
       transactions: ops.map((op) => buildBulkEntry(op, op.after.category_id)),
     };
-    return withBootPatience(() => callTool(toolName, payload), { onRetry: reloadSchemas, sleep, retries, delayMs });
+    // Same isError→throw contract as the per-op wrapper: a resolved `{ isError: true }`
+    // bulk envelope (a 401/403/429/5xx that did NOT reject the promise) must throw, so
+    // the executor aborts / falls back fail-closed rather than reading it as a payload.
+    return withBootPatience(
+      async () => throwOnErrorResult(await callTool(toolName, payload)),
+      { onRetry: reloadSchemas, sleep, retries, delayMs },
+    );
   };
 }
 
@@ -507,15 +517,34 @@ async function applyCategorize(changeset, ctx = {}) {
   );
 
   // Map each executor per-op result back to its original slot in the categorize
-  // contract. On a normal run and on the guardrail-block / tool-block aborts the
-  // executor returns one result per run op (a BLOCKED per op). A `schema_invalid`
-  // abort returns `results: []` (no per-op results, nothing audited) — fill those
-  // run slots with a per-op schema error so the abort is surfaced WITHOUT
-  // discarding the resolve-phase error slots already computed in `merged`. Either
-  // way every op the caller handed us gets exactly one result (AC8), and the
-  // top-level outcome (`ok` / `aborted` / `reason`) is preserved from the executor.
+  // contract. Three cases, so every op the caller handed us gets exactly one result
+  // (AC8) while the top-level outcome (`ok` / `aborted` / `reason`) is preserved:
+  //  - EQUAL length (normal run, guardrail-block, tool-block, or an abort on the LAST
+  //    op): one executor result per run op, in order — map positionally, statuses intact.
+  //  - AUTH ABORT (mid-batch 401/403, or a failed preflight): the executor returns a
+  //    PARTIAL results array (only the ops it processed before the fail-closed stop; the
+  //    un-run tail is deliberately left un-audited, #50 AC #2). Map each processed result
+  //    back to its slot BY op_id — never positionally, since a mixed read/dispatch abort
+  //    can leave a gap — PRESERVING each op's real status (an APPLIED op stays applied),
+  //    then mark every un-processed run op as not-attempted. Clobbering the applied ops as
+  //    schema errors here (the old behaviour) made the M4-5 command report "No changes
+  //    applied." when an earlier op actually applied (#50 AC #6/#7).
+  //  - SCHEMA INVALID (empty results, nothing audited): fill every run slot with a per-op
+  //    schema error, without discarding the resolve-phase error slots already in `merged`.
   if (outcome.results.length === toRun.length) {
     outcome.results.forEach((r, k) => { merged[toRun[k].index] = toCategorizeResult(r, toRun[k].op); });
+  } else if (outcome.reason === OUTCOME.AUTH_ABORT || outcome.reason === OUTCOME.AUTH_PREFLIGHT_FAIL) {
+    const runById = new Map(toRun.map((entry) => [entry.op.id, entry]));
+    const processed = new Set();
+    for (const r of outcome.results) {
+      const entry = runById.get(r.op_id);
+      if (entry) { merged[entry.index] = toCategorizeResult(r, entry.op); processed.add(r.op_id); }
+    }
+    for (const { index, op } of toRun) {
+      if (!processed.has(op.id)) {
+        merged[index] = catResult(op, STATUS.ERROR, dryRun, { phase: 'auth_abort', reason: outcome.reason, message: 'not attempted — the batch aborted on an auth failure before this op ran' });
+      }
+    }
   } else {
     for (const { index, op } of toRun) {
       merged[index] = catResult(op, STATUS.ERROR, dryRun, { phase: 'schema', reason: outcome.reason, validation: outcome.validation });

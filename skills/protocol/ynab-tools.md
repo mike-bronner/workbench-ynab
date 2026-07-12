@@ -142,9 +142,9 @@ approval-gated `/ynab-apply` command (Sprint 4), not the orchestrator.
 ## Port wrappers must throw on failure — check `result.isError`
 
 Every wrapper that hands a YNAB tool call to the apply executor's injected ports
-(`readLiveState`, `applyOp`, `authPreflight` — see
-[`skills/apply-executor.md`](../apply-executor.md)) **must inspect `result.isError`
-and `throw`** before returning. The vendored MCP surfaces auth / rate-limit / 5xx
+(`readLiveState`, `applyOp`, `authPreflight`, and the bulk-dispatch `bulkApplyOp` —
+see [`skills/apply-executor.md`](../apply-executor.md)) **must inspect
+`result.isError` and `throw`** before returning. The vendored MCP surfaces auth / rate-limit / 5xx
 failures as a **resolved** `{ isError: true, … }` result, not a rejected promise —
 and the executor's error-classification and auth-abort machinery only runs inside a
 `catch`. A wrapper that returns the MCP result verbatim fails **open**: a 401

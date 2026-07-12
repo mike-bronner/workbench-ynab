@@ -92,6 +92,7 @@ const {
   evaluateTool,
 } = require('./write-safety-guardrail');
 const {
+  APPLIED_STATE,
   classifyError,
   isAuthFailure,
   remediation,
@@ -335,7 +336,19 @@ async function applyBulkGroup(ops, { bulkToolMap, bulkApplyOp, toolMap, applyOp 
         || (unconfirmed
           ? 'bulk update resolved without confirming this op — no matching per-entry result; recorded error, not applied (fail-closed)'
           : 'bulk update reported this entry as failed');
-      return { op_id: opId, status: STATUS.ERROR, dry_run: false, detail: { phase: 'apply', tool: bulkTool, bulk: true, message, result: entry == null ? (result == null ? null : result) : entry } };
+      // AC #4: a bulk per-entry failure still needs an audit-grade error_class /
+      // applied_state — never null. A RESOLVED bulk call means the HTTP request itself
+      // succeeded, so a per-entry failure is a data-level rejection, never an auth /
+      // rate class — hence classifyError stamps `unknown` here. applied_state comes from
+      // what the payload proves (the classifier can't see it on a non-thrown envelope):
+      // an entry YNAB positively marked `failed` did NOT apply → not_applied; an
+      // unconfirmed / off-contract / missing entry is indeterminate → unknown (the safe
+      // resume direction for #48).
+      const { error_class } = classifyError(entry);
+      const applied_state = entry && entry.status === 'failed'
+        ? APPLIED_STATE.NOT_APPLIED
+        : APPLIED_STATE.UNKNOWN;
+      return { op_id: opId, status: STATUS.ERROR, dry_run: false, detail: { phase: 'apply', tool: bulkTool, bulk: true, message, error_class, applied_state, result: entry == null ? (result == null ? null : result) : entry } };
     }
     return { op_id: opId, status: STATUS.APPLIED, dry_run: false, detail: { tool: bulkTool, bulk: true, result: entry } };
   });
@@ -527,21 +540,26 @@ async function applyChangeset(changeset, options = {}) {
   //    whole batch fail-closed: stop preparing immediately — the remaining ops are then
   //    never read, never dispatched, and never audited (#50 AC #2/#3, phase-agnostic).
   const prepared = new Array(operations.length);
-  let authFailure = null;
-  let stopIndex = null;
+  // A read-phase auth failure during PREPARE stops at the FIRST bad read. It is tracked
+  // SEPARATELY from a dispatch-phase auth failure (step 5): both are genuine failures
+  // that must EACH be audited (#50 AC #4), so neither may clobber the other out of the
+  // audit range. A read abort is always at a HIGHER index than any dispatch abort —
+  // dispatch only walks the survivors BEFORE the bad read.
+  let readAuthFailure = null;
+  let readAuthFailIndex = null;
   for (let i = 0; i < operations.length; i += 1) {
     const prep = await prepareOp(operations[i], { activeBudgetId, dryRun, toolMap, readLiveState });
     prepared[i] = prep;
     if (!dryRun && prep.result && prep.result.status === STATUS.ERROR
       && isAuthFailure(prep.result.detail.error_class)) {
       const { op_id, detail } = prep.result;
-      authFailure = { phase: detail.phase, op_id, index: i, error_class: detail.error_class, applied_state: detail.applied_state };
-      stopIndex = i;
+      readAuthFailure = { phase: detail.phase, op_id, index: i, error_class: detail.error_class, applied_state: detail.applied_state };
+      readAuthFailIndex = i;
       break;
     }
   }
   // Everything through `lastPrepared` has a prep; ops past a read-abort were never read.
-  const lastPrepared = stopIndex == null ? operations.length - 1 : stopIndex;
+  const lastPrepared = readAuthFailIndex == null ? operations.length - 1 : readAuthFailIndex;
 
   // 5. DISPATCH the survivors in array order. Two mutually-exclusive failure policies
   //    (#50 AC #5): a mid-batch AUTH failure (401/403 — the token is bad) aborts the
@@ -555,11 +573,16 @@ async function applyChangeset(changeset, options = {}) {
     if (prepared[i].result) resultByIndex[i] = prepared[i].result; // terminal: no dispatch
   }
 
-  // Record an apply-phase auth failure at `index`; returns true to signal the abort.
+  // Record a dispatch-phase (mutation) auth failure at `index`; returns true to signal
+  // the abort. Tracked SEPARATELY from the prepare-phase read abort (above) so a later
+  // read failure isn't dropped from the audit when an earlier mutation aborts at a
+  // lower index (#50 AC #4).
+  let dispatchAuthFailure = null;
+  let dispatchStopIndex = null;
   const isApplyAuthAbort = (res, index) => {
     if (res.status === STATUS.ERROR && isAuthFailure(res.detail.error_class)) {
-      authFailure = { phase: res.detail.phase, op_id: res.op_id, index, error_class: res.detail.error_class, applied_state: res.detail.applied_state };
-      stopIndex = index;
+      dispatchAuthFailure = { phase: res.detail.phase, op_id: res.op_id, index, error_class: res.detail.error_class, applied_state: res.detail.applied_state };
+      dispatchStopIndex = index;
       return true;
     }
     return false;
@@ -607,15 +630,24 @@ async function applyChangeset(changeset, options = {}) {
   }
 
   // 6. Audit every PROCESSED op once, in array order — dry-run and real, applied and
-  //    skipped. On an auth abort only ops through `stopIndex` ran, so only those are
-  //    audited; the untouched tail leaves no paper trail (#50 AC #2).
-  const lastProcessed = stopIndex == null ? operations.length - 1 : stopIndex;
+  //    skipped. A dispatch abort bounds the contiguous audited range; the tail past it
+  //    leaves no paper trail (#50 AC #2) — EXCEPT the op whose READ auth-failed during
+  //    prepare, which genuinely failed and must still be recorded (#50 AC #4) even when
+  //    an earlier mutation aborted at a lower index. Un-dispatched survivors in the tail
+  //    have no result and are naturally skipped.
+  const contiguousStop = dispatchStopIndex == null ? lastPrepared : dispatchStopIndex;
   const results = [];
-  for (let i = 0; i <= lastProcessed; i += 1) {
+  for (let i = 0; i <= lastPrepared; i += 1) {
+    const isTailReadAuthFail = i === readAuthFailIndex;
+    if (i > contiguousStop && !isTailReadAuthFail) continue; // aborted tail, un-audited
+    if (resultByIndex[i] === undefined) continue; // survivor never dispatched
     await recordAudit(audit, operations[i], resultByIndex[i], changeset, toolMap, dryRun);
     results.push(resultByIndex[i]);
   }
 
+  // The dispatch abort (the lower index — where the mutation halt actually occurred) is
+  // the primary stop for the user message; a read-only abort falls back to its own index.
+  const authFailure = dispatchAuthFailure || readAuthFailure;
   if (authFailure) {
     return {
       ok: false,

@@ -607,9 +607,10 @@ test('mid-batch 401 stops the batch and audits the failed op (auth_revoked / not
   assert.equal(failedRec.result.applied_state, 'not_applied');
 });
 
-test('mid-batch 403 stops the batch and records insufficient_scope', async () => {
+test('mid-batch 403 stops the batch and records insufficient_scope (load-bearing: later ops never dispatched)', async () => {
   const cs = loadFixture('combined.example.json');
-  const failId = cs.operations[0].id; // fail on the FIRST op → nothing applies
+  const failId = cs.operations[1].id; // fail on the SECOND op → the first still applies, the third must NOT
+  const apply = applyFailingOn(failId, httpError(403, 'not authorized (scope)'));
   const audit = auditSpy();
 
   const out = await applyChangeset(cs, {
@@ -617,16 +618,22 @@ test('mid-batch 403 stops the batch and records insufficient_scope', async () =>
     dryRun: false,
     toolMap: TOOL_MAP,
     readLiveState: noDrift(),
-    applyOp: applyFailingOn(failId, httpError(403, 'not authorized (scope)')),
+    applyOp: apply,
     authPreflight: okPreflight(),
     audit,
   });
 
   assert.equal(out.reason, OUTCOME.AUTH_ABORT);
-  assert.equal(out.stopped_at_index, 0);
-  assert.equal(out.results.length, 1);
-  assert.equal(out.results[0].detail.error_class, 'insufficient_scope');
-  assert.equal(audit.calls.length, 1);
+  assert.equal(out.stopped_at_index, 1);
+  assert.equal(out.results.length, 2);
+  assert.equal(out.results[1].detail.error_class, 'insufficient_scope');
+  assert.equal(out.results[1].detail.applied_state, 'not_applied');
+  // Load-bearing (mirrors the 401 sibling): capture the spy and prove op 2's port was
+  // NEVER called — remove `break dispatch` and this assertion fails directly, rather
+  // than passing on post-hoc array lengths derived from `stopIndex`.
+  assert.equal(apply.calls.length, 2);
+  assert.ok(!apply.calls.some(([, op]) => op.id === cs.operations[2].id));
+  assert.equal(audit.calls.length, 2);
 });
 
 test('mid-batch 401 on the READ phase also aborts the batch (phase-agnostic fail-closed)', async () => {
@@ -674,6 +681,47 @@ test('mid-batch 401 on the READ phase also aborts the batch (phase-agnostic fail
   assert.equal(failedRec.result.status, STATUS.ERROR);
   assert.equal(failedRec.result.error_class, 'auth_revoked');
   assert.equal(failedRec.result.applied_state, 'not_applied');
+});
+
+test('a mixed read/dispatch auth interleaving audits BOTH failed ops — neither abort clobbers the other (#50 AC#4)', async () => {
+  // The token dies MID-prepare: a LATER op's READ auth-fails during prepare (stops the
+  // read pass at that higher index), and then an EARLIER survivor's MUTATION auth-fails
+  // during dispatch (stops at a lower index). Both ops genuinely failed and must EACH be
+  // audited — the earlier dispatch abort must not clobber the later read failure out of
+  // the trail. Regression guard: the old truncate-to-a-single-stopIndex audit dropped the
+  // read-failed op → results.length === 1 when two ops failed.
+  const cs = loadFixture('combined.example.json');
+  const readFailId = cs.operations[2].id; // op 2's READ auth-fails during prepare (higher index)
+  const applyFailId = cs.operations[0].id; // op 0's MUTATION auth-fails during dispatch (lower index)
+  const apply = applyFailingOn(applyFailId, httpError(401, 'unauthorized (mutation)'));
+  const audit = auditSpy();
+
+  const out = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: readFailingOn(readFailId, httpError(403, 'insufficient scope (read)')),
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit,
+  });
+
+  assert.equal(out.reason, OUTCOME.AUTH_ABORT);
+  // Primary stop is the dispatch abort (the lower index — where the mutation halted).
+  assert.equal(out.stopped_at_index, 0);
+  // BOTH failures are recorded — the dispatch-failed op 0 AND the read-failed op 2 (the
+  // bug dropped op 2, returning length 1). The middle survivor (op 1) is NOT dispatched.
+  assert.equal(out.results.length, 2);
+  assert.equal(audit.calls.length, 2);
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId[cs.operations[0].id].detail.phase, 'apply');
+  assert.equal(byId[cs.operations[0].id].detail.error_class, 'auth_revoked');
+  assert.equal(byId[cs.operations[2].id].detail.phase, 'read');
+  assert.equal(byId[cs.operations[2].id].detail.error_class, 'insufficient_scope');
+  // Op 1 (the un-run middle survivor) is neither returned nor audited.
+  assert.ok(!(cs.operations[1].id in byId));
+  const auditedIds = audit.calls.map(([rec]) => rec.operation.id).sort();
+  assert.deepEqual(auditedIds, [cs.operations[0].id, cs.operations[2].id].sort());
 });
 
 test('a single-op 422 skips that op and CONTINUES the rest (data-error policy)', async () => {
@@ -867,9 +915,18 @@ test('bulk dispatch: a RESOLVED but partially-failed bulk envelope audits each f
   assert.equal(byId['op-1'].status, STATUS.APPLIED); // t-a updated
   assert.equal(byId['op-2'].status, STATUS.ERROR); // t-b failed — NOT applied
   assert.match(byId['op-2'].detail.message, /insufficient scope/);
-  // The audit trail must NOT lie: the failed op is audited as error, not applied.
+  // AC #4: the failed entry carries an audit-grade class, NEVER null — a RESOLVED bulk
+  // call means the HTTP request itself succeeded, so a per-entry failure is a data-level
+  // rejection (unknown) that YNAB positively marked `failed` → not_applied.
+  assert.equal(byId['op-2'].detail.error_class, 'unknown');
+  assert.equal(byId['op-2'].detail.applied_state, 'not_applied');
+  // The audit trail must NOT lie: the failed op is audited as error, not applied — and
+  // its record carries the same non-null error_class / applied_state (never null/null).
   const auditByStatus = audit.calls.map(([rec]) => rec.result.status).sort();
   assert.deepEqual(auditByStatus, ['applied', 'error']);
+  const failedAudit = audit.calls.map(([rec]) => rec.result).find((r) => r.status === STATUS.ERROR);
+  assert.equal(failedAudit.error_class, 'unknown');
+  assert.equal(failedAudit.applied_state, 'not_applied');
 });
 
 test('bulk dispatch fails CLOSED on a resolved-but-off-contract payload: no op is recorded applied', async () => {
