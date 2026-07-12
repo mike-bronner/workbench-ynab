@@ -112,7 +112,10 @@ expand_path() {
   # Literal ~ in these case patterns is intentional: we MATCH an input that
   # begins with a literal tilde and rewrite it to $HOME. (Not a tilde meant to
   # shell-expand — that is exactly what this function exists to do by hand.)
-  # The guard caps iterations so a self-referential value can never loop forever.
+  # The guard caps iterations, and each pass resolves only the FIRST reference
+  # (single-occurrence replace, not global — see below), so a self-referential
+  # value grows only LINEARLY: it exhausts the cap in bounded time and is then
+  # refused by the post-loop guard, rather than looping — or ballooning — forever.
   # shellcheck disable=SC2088
   while [ "$guard" -lt 64 ]; do
     before="$p"
@@ -127,7 +130,13 @@ expand_path() {
       match="${BASH_REMATCH[1]}"
       name="${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}"
       value="${!name:-}"
-      p="${p//"$match"/$value}"
+      # Replace only the FIRST occurrence (single `/`, not global `//`). A global
+      # replace lets a value that names itself TWICE (FOO='$FOO$FOO') DOUBLE the
+      # occurrence count every pass — exponential growth that pegs CPU/memory and
+      # hangs long before the iteration cap, never reaching the refuse-loudly guard.
+      # One-at-a-time keeps a self-referential value LINEAR: it hits the cap and is
+      # refused. Repeated legitimate references still fully resolve over more passes.
+      p="${p/"$match"/$value}"
     fi
     # Nothing changed this pass → settled (fully resolved, or stuck on a
     # self-reference the checks below will reject).

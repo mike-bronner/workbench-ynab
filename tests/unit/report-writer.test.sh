@@ -670,6 +670,51 @@ JSON
     || fail "writer wrote a report despite an unresolvable output dir"
 }
 
+# Regression (blocker, ratified option-3 completeness bar — the $VAR half): a
+# self-referential value that names itself TWICE (FOO='$FOO$FOO' — a copy-paste
+# doubling, e.g. OUTPUT_DIR='$OUTPUT_DIR/$OUTPUT_DIR-old') USED to defeat the
+# guard: with a GLOBAL replace every pass DOUBLED the occurrence count, growing
+# the string exponentially until it pegged CPU/memory and HUNG — never reaching
+# the post-loop "refuse loudly" check. In automation/cron a hang is strictly
+# worse than the bad-write the guard exists to prevent. Resolving only the FIRST
+# reference per pass makes this grow LINEARLY (like the single-occurrence shape
+# above), so it hits the cap and is refused loudly: exit 2, empty stdout, no file.
+#
+# This test pins BOTH properties at once. A `perl alarm` watchdog (GNU `timeout`
+# is absent on macOS runners) bounds the run: if expand_path hangs (the pre-fix
+# global replace), SIGALRM kills bash with a non-2 exit and the exit-2 assertion
+# goes red — so the test is mutation-gated on BOUNDED COMPLETION, not merely on
+# the refusal. Under the fix the writer refuses in well under the alarm window,
+# so the watchdog never fires. A fresh CWD proves a broken guard's relative write
+# lands nowhere. Single-quoted config + heredoc so $VAR reaches the writer UNEXPANDED.
+test_double_self_referential_var_in_output_dir_is_refused_in_bounded_time() {
+  local cfg="$SANDBOX/double-selfref.json" cwd="$SANDBOX/double-selfref-cwd" rc=0 out err args=()
+  mkdir -p "$cwd"
+  cat > "$cfg" <<'JSON'
+{ "report": { "output_dir": "$YNAB_DBL_SELFREF/reports" } }
+JSON
+  # The value references its OWN name TWICE — the exponential-growth shape.
+  # shellcheck disable=SC2016
+  export YNAB_DBL_SELFREF='$YNAB_DBL_SELFREF$YNAB_DBL_SELFREF'
+  while IFS= read -r -d '' a; do args+=("$a"); done < <(fixture_slots)
+  # perl alarm watchdog (portable; macOS runners have no GNU `timeout`). `exec`
+  # keeps the alarm timer, and bash has no SIGALRM trap so its default action
+  # terminates the process → a hang exits ~142 (128+SIGALRM), never 2.
+  out="$( cd "$cwd" && YNAB_CONFIG_FILE="$cfg" \
+            perl -e 'alarm 5; exec @ARGV' bash "$WRITER" \
+              --template "$FIXTURE_TEMPLATE" --tier Weekly --date 2026-06-22 "${args[@]}" \
+            2>"$SANDBOX/double-selfref.err" )" || rc=$?
+  unset YNAB_DBL_SELFREF
+  err="$(cat "$SANDBOX/double-selfref.err")"
+  # rc==2 pins BOTH bounded completion (a hang → watchdog SIGALRM → rc≠2 → red)
+  # AND the loud refusal (a silent bad-write would be exit 0).
+  assert_eq "2" "$rc" "a doubly-self-referential \$VAR output dir refuses in bounded time (exit 2, not a hang)"
+  assert_eq "" "$out" "no success path leaked to stdout for an exponential self-referential output dir"
+  assert_contains "$err" "did not fully resolve" "the error explains the unresolved output dir"
+  [ -z "$(find "$cwd" -name '*.html')" ] \
+    || fail "writer wrote a report despite an unresolvable (self-referential) output dir"
+}
+
 # Follow-up: the TEMPLATE path is resolved through the SAME expand_path, so the
 # `~`-after-expansion fix must hold there too. A $VAR template_path whose value
 # begins with `~` must resolve to $HOME/… (the sandbox, where the fixture lives) —
