@@ -77,17 +77,21 @@ report-writer.sh \
 - **`~` and `$VAR` / `${VAR}`** in the configured/flag path are expanded (no
   `eval`; command and arithmetic substitution are never executed; `$VAR`
   expansion is transitive — a value that itself contains `$OTHER` expands too).
-  A leading `~` is resolved **even when a variable's value introduces it** (e.g.
-  `$ALIAS` where `ALIAS='~/reports'` resolves to `$HOME/reports`), not only when
-  typed literally at the front. The template path (`--template` /
+  The **current-user** leading `~`/`~/` is resolved **even when a variable's
+  value introduces it** (e.g. `$ALIAS` where `ALIAS='~/reports'` resolves to
+  `$HOME/reports`), not only when typed literally at the front. A `~user` form
+  (another user's home) is **not** expanded — it is refused, see below. The
+  template path (`--template` /
   `.report.template_path`) is resolved the same way. Any number of **trailing
   slashes** on the directory is tolerated. A path that resolves to **empty**
   (e.g. an unset variable) — or to the bare filesystem **root `/`** — is
   **refused**; the writer never writes to the filesystem root. A path that
-  **cannot be fully resolved** — a leading `~` or a `$VAR` that survives
-  expansion (a self-referential value like `FOO='$FOO/x'`, or one the shell
-  cannot expand) — is also **refused** (usage error, no file) rather than
-  written to a wrong location. A **relative** resolved directory is made
+  **cannot be fully resolved** — a `$VAR` that survives expansion (a
+  self-referential value like `FOO='$FOO/x'`, or one the shell cannot expand),
+  or a `~` that still begins **any** path component (a `~user` form the helper
+  does not expand, or a `~` a variable's value shoved mid-path such as
+  `prefix/$VAR` with `VAR='~/x'` → `prefix/~/x`) — is also **refused** (usage
+  error, no file) rather than written to a wrong location. A **relative** resolved directory is made
   absolute against the current working directory, so the emitted path is always
   absolute.
 - The directory is created with **`mkdir -p`** before writing (no error if it
@@ -128,7 +132,7 @@ visible rather than masquerading as a plain "missing slot".
 |---|---|
 | `0` | Report written; the absolute path is on stdout. |
 | `1` | A required slot was missing or empty — **no file written**. |
-| `2` | Usage error: bad flag, bad `--tier`, an out-of-range or malformed `--date`, an unknown, invalid, or **duplicate** slot name, an output dir or template path that resolves to empty, to the filesystem root `/`, or that **does not fully resolve** (a surviving leading `~` or `$VAR`), or a **missing or malformed** template. |
+| `2` | Usage error: bad flag, bad `--tier`, an out-of-range or malformed `--date`, an unknown, invalid, or **duplicate** slot name, an output dir or template path that resolves to empty, to the filesystem root `/`, or that **does not fully resolve** (a surviving component-leading `~` — including a `~user` form — or `$VAR`), or a **missing or malformed** template. |
 
 ## Portability
 

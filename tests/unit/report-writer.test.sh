@@ -650,19 +650,24 @@ JSON
 # literal `$YNAB_SELFREF` in the string. The writer must REFUSE loudly (exit 2, no
 # file, empty stdout) rather than write to that garbled path with exit 0.
 test_self_referential_var_in_output_dir_is_refused() {
-  local cfg="$SANDBOX/selfref.json" rc=0 out err
+  local cfg="$SANDBOX/selfref.json" cwd="$SANDBOX/selfref-cwd" rc=0 out err
+  mkdir -p "$cwd"
   cat > "$cfg" <<'JSON'
 { "report": { "output_dir": "$YNAB_SELFREF/reports" } }
 JSON
   # shellcheck disable=SC2016
   export YNAB_SELFREF='$YNAB_SELFREF/x'
-  out="$( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 \
+  out="$( cd "$cwd" && YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 \
             2>"$SANDBOX/selfref.err" )" || rc=$?
   unset YNAB_SELFREF
   err="$(cat "$SANDBOX/selfref.err")"
   assert_eq "2" "$rc" "a self-referential \$VAR output dir → usage error (exit 2)"
   assert_eq "" "$out" "no success path leaked to stdout for an unresolvable output dir"
   assert_contains "$err" "did not fully resolve" "the error explains the unresolved output dir"
+  # No file written — the refusal fires before any mkdir/write; a broken guard's
+  # relative write would land under this fresh CWD, which must stay empty.
+  [ -z "$(find "$cwd" -name '*.html')" ] \
+    || fail "writer wrote a report despite an unresolvable output dir"
 }
 
 # Follow-up: the TEMPLATE path is resolved through the SAME expand_path, so the
@@ -710,6 +715,57 @@ JSON
   assert_eq "2" "$rc" "a self-referential \$VAR template path → usage error (exit 2)"
   assert_eq "" "$out" "no success path leaked to stdout for an unresolvable template path"
   assert_contains "$err" "template path did not fully resolve" "the error explains the unresolved template path"
+  # No file written to the (valid) output dir — the template refusal fires first.
+  [ -e "$SANDBOX/selfref-tmpl-out/YNAB-Weekly-Review-2026-06-22.html" ] \
+    && fail "writer wrote a report despite an unresolvable template path"
+  return 0
+}
+
+# Regression (blocker, ratified option-3 completeness bar): a ~USER form
+# (`~mike/…`) is a tilde this helper deliberately does NOT expand — resolving
+# another user's home would need eval or passwd parsing, both barred by the
+# no-eval design. Before the symmetric guard it was neither resolved nor refused,
+# falling through to a LITERAL `~mike` directory created under the CWD at exit 0.
+# The residual-tilde guard now refuses ANY `~` beginning a path component, so a
+# ~user output dir → usage error (exit 2), empty stdout, no file. A fresh CWD is
+# used so a broken guard's relative write lands somewhere this test proves empty.
+test_user_tilde_in_output_dir_is_refused() {
+  local cwd="$SANDBOX/tilde-user-cwd" rc=0 out err
+  mkdir -p "$cwd"
+  # shellcheck disable=SC2088
+  out="$( cd "$cwd" && run_writer_fixture --output-dir '~mike/reportsdir' \
+            --tier Weekly --date 2026-06-22 2>"$SANDBOX/tilde-user.err" )" || rc=$?
+  err="$(cat "$SANDBOX/tilde-user.err")"
+  assert_eq "2" "$rc" "a ~user output dir → usage error (exit 2), not a literal ~mike write"
+  assert_eq "" "$out" "no success path leaked to stdout for a ~user output dir"
+  assert_contains "$err" "did not fully resolve" "the error explains the unresolved ~user output dir"
+  [ -z "$(find "$cwd" -name '*.html')" ] \
+    || fail "writer wrote a report to a literal ~user directory"
+}
+
+# Regression (blocker, same class): a `~` a variable's VALUE shoves into the
+# MIDDLE of the path (`prefix/$VAR` with VAR='~/x' → `prefix/~/x`) is not a
+# leading current-user tilde, so the loop never resolves it; before the symmetric
+# guard it wrote to a LITERAL mid-string `~` directory at exit 0. The guard now
+# refuses a `~` right after a `/` too. Single-quoted config + heredoc so $VAR and
+# the ~ in its value reach the writer UNEXPANDED.
+test_var_introducing_mid_string_tilde_in_output_dir_is_refused() {
+  local cfg="$SANDBOX/mid-tilde.json" cwd="$SANDBOX/tilde-mid-cwd" rc=0 out err
+  mkdir -p "$cwd"
+  cat > "$cfg" <<'JSON'
+{ "report": { "output_dir": "prefix-dir/$YNAB_MID_TILDE" } }
+JSON
+  # shellcheck disable=SC2016,SC2088
+  export YNAB_MID_TILDE='~/embedded-reports'
+  out="$( cd "$cwd" && YNAB_CONFIG_FILE="$cfg" run_writer_fixture \
+            --tier Weekly --date 2026-06-22 2>"$SANDBOX/mid-tilde.err" )" || rc=$?
+  unset YNAB_MID_TILDE
+  err="$(cat "$SANDBOX/mid-tilde.err")"
+  assert_eq "2" "$rc" "a var-introduced mid-string ~ output dir → usage error (exit 2)"
+  assert_eq "" "$out" "no success path leaked to stdout for a mid-string ~ output dir"
+  assert_contains "$err" "did not fully resolve" "the error explains the unresolved mid-string ~ output dir"
+  [ -z "$(find "$cwd" -name '*.html')" ] \
+    || fail "writer wrote a report to a literal mid-string ~ directory"
 }
 
 run_tests

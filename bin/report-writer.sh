@@ -100,7 +100,8 @@ usage_err() { err "$1"; exit 2; }
 # at the front) is resolved as well, which a single pre-loop tilde check missed.
 #
 # A partially-resolved path is NEVER emitted. If the result still carries a
-# leading ~ or an unresolved $VAR after the loop settles — a self-referential
+# component-leading ~ (a `~user`, or a `~` a variable's value introduced mid-path)
+# or an unresolved $VAR after the loop settles — a self-referential
 # value like FOO='$FOO/x' that exhausts the guard, or any value the shell cannot
 # fully expand — the function returns 1 WITHOUT printing, and the caller turns
 # that into a usage_err (exit 2, no file). Silently writing to `$PWD/~/…` or a
@@ -133,11 +134,23 @@ expand_path() {
     [ "$p" = "$before" ] && break
     guard=$((guard + 1))
   done
-  # Refuse a still-partial path rather than emit it: a surviving leading ~ (belt-
-  # and-braces — the loop resolves it in normal flow) or an unresolved $VAR means
-  # the caller must fail loudly, not write to the wrong place.
+  # Refuse a still-partial path rather than emit it. The tilde and $VAR guards are
+  # SYMMETRIC — each rejects its token wherever it survives the loop, not just at
+  # the front:
+  #   * A `~` that begins ANY path component (start-of-string OR right after a `/`)
+  #     is refused. The loop resolves a LEADING current-user `~`/`~/`; every other
+  #     tilde form is one this helper deliberately does NOT expand — a `~user`
+  #     (another user's home; expanding it needs eval or passwd parsing, both barred
+  #     by the no-eval design) or a `~` a variable's value shoved mid-string
+  #     (`prefix/$VAR` with VAR='~/x' → `prefix/~/x`). Emitting either would write to
+  #     a LITERAL `~mike`/`~` directory at exit 0 — the falsely-successful report
+  #     this helper exists to prevent. A `~` MID-component (a literal char in a name
+  #     like `file~backup`) is not a tilde form and is left untouched.
+  #   * A surviving $VAR/${VAR} anywhere (a self-referential value that exhausts the
+  #     guard, or any value the shell cannot expand) is likewise refused.
+  # The caller turns the non-zero return into a usage_err (exit 2, no file).
   # shellcheck disable=SC2088
-  case "$p" in "~"|"~/"*) return 1 ;; esac
+  case "$p" in "~"* | *"/~"*) return 1 ;; esac
   [[ "$p" =~ (\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*) ]] && return 1
   printf '%s' "$p"
 }
@@ -193,9 +206,12 @@ while [ "$#" -gt 0 ]; do
       esac
       slot_name="${2%%=*}"         # name = before the FIRST '='
       # Validate the name at PARSE time (allowed: lowercase letters, digits,
-      # hyphen) so a glob metachar (e.g. kpi-*) can never reach the literal
-      # ${html//"$needle"/…} substitution below — safety no longer depends on
-      # the missing/unknown check ordering.
+      # hyphen) — the exact charset a template `<!-- SLOT:name -->` marker uses.
+      # The single-pass block-slot walk below matches each marker name against the
+      # supplied names (via slot_index, an exact string compare); rejecting a glob
+      # metachar or other stray character here keeps a supplied name from ever
+      # masquerading as — or failing to match — a declared marker, so the
+      # completeness check and the walk agree on exactly one value per slot.
       case "$slot_name" in
         ""|*[!a-z0-9-]*) usage_err "invalid --slot name '$slot_name' (allowed: lowercase letters, digits, hyphen)" ;;
       esac
