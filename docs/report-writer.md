@@ -73,11 +73,14 @@ report-writer.sh \
   `Quarterly Tax` in the report body while the filename keeps the hyphen
   (`YNAB-Quarterly-Tax-Review-…`).
 - **`~` and `$VAR` / `${VAR}`** in the configured/flag path are expanded (no
-  `eval`; command and arithmetic substitution are never executed). Any number of
-  **trailing slashes** on the directory is tolerated. A path that expands to
-  **empty** (e.g. `.report.output_dir` referencing an unset variable) — or to the
-  bare filesystem **root `/`** — is **refused**; the writer never writes to the
-  filesystem root.
+  `eval`; command and arithmetic substitution are never executed; `$VAR`
+  expansion is transitive — a value that itself contains `$OTHER` expands too).
+  Any number of **trailing slashes** on the directory is tolerated. A path that
+  expands to **empty** (e.g. `.report.output_dir` referencing an unset variable)
+  — or to the bare filesystem **root `/`** — is **refused**; the writer never
+  writes to the filesystem root. A **relative** resolved directory is made
+  absolute against the current working directory, so the emitted path is always
+  absolute.
 - The directory is created with **`mkdir -p`** before writing (no error if it
   already exists). The report is written to a **temp file in the destination dir
   and `mv`'d into place** — an atomic swap, so a failed same-day rerun (same

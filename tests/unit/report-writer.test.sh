@@ -30,6 +30,13 @@ REAL_TEMPLATE="$REPO_ROOT/assets/report/template.html"
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
+# Sandbox HOME for the WHOLE file (not just the default-path tests): every writer
+# invocation inherits it, so a resolution regression can only ever fall back to
+# $SANDBOX/Documents/Claude/Reports — never the developer's real ~/Documents. The
+# handful of tests that also set HOME inline (they assert on the ~-default) keep
+# doing so for local clarity; this is the belt-and-braces guarantee.
+export HOME="$SANDBOX"
+
 # A tiny fixture template with three block slots + the three scalar slots, so the
 # behavioural tests are not coupled to the real template's full slot list. The
 # writer derives "required" from whatever the template declares.
@@ -396,6 +403,42 @@ test_out_of_range_date_is_rejected() {
   assert_eq "2" "$rc" "month 13 → exit 2"
   rc=0; YNAB_CONFIG_FILE="$SANDBOX/none.json" run_writer_fixture --tier Weekly --date 2026-06-39 >/dev/null 2>&1 || rc=$?
   assert_eq "2" "$rc" "day 39 → exit 2"
+}
+
+# Regression: when the target path already exists as a DIRECTORY, `mv file dir`
+# on BSD/macOS moves the temp file *into* it and exits 0 — a false success. The
+# writer must refuse (non-zero), print no path, and leave no report file at the
+# target. Gating test for the pre-`mv` "not a regular file" guard.
+test_pre_existing_dir_at_target_is_refused() {
+  local dir="$SANDBOX/dir-target" rc=0 out err target
+  target="$dir/YNAB-Weekly-Review-2026-06-22.html"
+  mkdir -p "$target"                   # the exact deterministic filename, as a directory
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" bash "$WRITER" \
+            --template "$FIXTURE_TEMPLATE" --output-dir "$dir" \
+            --tier Weekly --date 2026-06-22 \
+            --slot 'kpi-dashboard=<div>k</div>' \
+            --slot 'section-1-classification=<div>s</div>' \
+            --slot 'footer-persona=Hobbes' 2>"$SANDBOX/dir-target.err" )" || rc=$?
+  err="$(cat "$SANDBOX/dir-target.err")"
+  [ "$rc" -ne 0 ] || fail "writer must exit non-zero when the target path is a pre-existing directory"
+  assert_eq "" "$out" "no success path leaked to stdout when the target is a directory"
+  assert_contains "$err" "not a regular file" "error explains the directory-at-target refusal"
+  assert_dir_exists "$target"          # untouched — still the directory we created
+  [ -f "$target" ] && fail "writer must not have created a regular file at the directory target"
+  return 0
+}
+
+# A relative .report.output_dir must still yield an ABSOLUTE emitted path (AC #7):
+# the writer resolves it against the CWD.
+test_relative_output_dir_is_made_absolute() {
+  local sub="rel-reports-$$" out
+  # Run from inside SANDBOX so the relative dir resolves under it (and is cleaned
+  # up with SANDBOX). A subshell keeps the cd local to this test.
+  out="$( cd "$SANDBOX" && YNAB_CONFIG_FILE="$SANDBOX/none.json" \
+          run_writer_fixture --tier Weekly --date 2026-06-22 --output-dir "$sub" )"
+  assert_eq "$SANDBOX/$sub/YNAB-Weekly-Review-2026-06-22.html" "$out" \
+    "relative output dir resolved to an absolute path against the CWD"
+  assert_file_exists "$out"
 }
 
 run_tests

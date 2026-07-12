@@ -83,8 +83,10 @@ usage_err() { err "$1"; exit 2; }
 
 # expand_path <path> — resolve a leading ~ and $VAR / ${VAR} references WITHOUT
 # eval (no command/arithmetic substitution is ever executed — a config path is
-# data, not code). Only simple variable references expand; a literal ~ appears
-# only as the leading component.
+# data, not code). Expansion is iterative and therefore TRANSITIVE: the loop
+# re-scans the rewritten string, so a $VAR whose value itself contains $OTHER is
+# expanded too (bounded by the guard below). A literal ~ appears only as the
+# leading component.
 expand_path() {
   local p="$1" guard=0 match name value
   # Literal ~ in these case patterns is intentional: we MATCH an input that
@@ -169,7 +171,9 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     -h|--help)
-      sed -n '2,60p' "$0"
+      # Print the whole leading comment block (line 2 → the first blank line) so a
+      # header that grows can never be truncated the way a hardcoded end-line was.
+      sed -n '2,/^$/p' "$0"
       exit 0
       ;;
     --*) usage_err "unknown flag: $1" ;;
@@ -217,9 +221,26 @@ done
 # "/YNAB-…html". (The write gates below fail safe on a permissioned "/", but the
 # symmetric guard names the real problem instead of a cryptic mkdir/mv error.)
 [ "$out_dir" != "/" ] || usage_err "output dir resolved to the filesystem root '/' — refusing to write there; check .report.output_dir"
+# Make the resolved directory absolute so the emitted path is absolute for EVERY
+# input (AC #7 — "prints that absolute path"), not just ~-rooted / absolute
+# configs. A bare-relative .report.output_dir would otherwise print a path that
+# silently points elsewhere once a caller `cd`s away from this CWD.
+case "$out_dir" in
+  /*) : ;;
+  *)  out_dir="${PWD}/${out_dir}" ;;
+esac
 
 # --- build the output path: YNAB-{Tier}-Review-YYYY-MM-DD.html --------------
 out_path="${out_dir}/YNAB-${tier}-Review-${date}.html"
+# Refuse when the target path already exists as anything but a regular file. On
+# BSD/macOS `mv file existing_dir` moves the file *into* the directory and exits
+# 0, so without this guard the writer would print $out_path and exit 0 while no
+# file exists there — the exact falsely-successful report the atomic write exists
+# to prevent. A pre-existing regular file is fine: the mv replaces it in place.
+if [ -e "$out_path" ] && [ ! -f "$out_path" ]; then
+  err "refusing to write — output path exists and is not a regular file (a directory?): $out_path"
+  exit 1
+fi
 
 # --- required block slots are whatever the (frozen) template declares -------
 # Deriving the set from the template keeps the writer swap-ready: a template
