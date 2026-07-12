@@ -104,7 +104,7 @@ None contains `scheduled` (`grep 'name:"[a-z_]*scheduled[a-z_]*"'` → no match)
 The string `scheduled_transactions` **does** appear in the bundle, but every
 occurrence is internal SDK plumbing, never a registered MCP tool:
 
-- JSON (de)serializers — `ScheduledTransactionBaseFromJSON` / `…ToJSON` and the
+- JSON (de)serializers — `ScheduledTransactionFromJSON` / `ScheduledTransactionToJSON` and the
   `scheduled_transactions:` object mappers.
 - The raw request path template — `"/plans/{plan_id}/scheduled_transactions"`.
 - A cache-TTL constant — `SCHEDULED_TRANSACTIONS: 300*1e3`.
