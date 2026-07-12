@@ -91,33 +91,54 @@ usage_err() { err "$1"; exit 2; }
 
 # expand_path <path> — resolve a leading ~ and $VAR / ${VAR} references WITHOUT
 # eval (no command/arithmetic substitution is ever executed — a config path is
-# data, not code). Expansion is iterative and therefore TRANSITIVE: the loop
-# re-scans the rewritten string, so a $VAR whose value itself contains $OTHER is
-# expanded too (bounded by the guard below). A literal ~ appears only as the
-# leading component.
+# data, not code), returning the FULLY resolved path or FAILING (non-zero, no
+# output) rather than a partially-resolved one. The tilde and the variable
+# substitution run in ONE fixpoint loop: each pass resolves a leading ~ AND the
+# first $VAR/${VAR}, then repeats until the string stops changing. Expansion is
+# therefore TRANSITIVE — a $VAR whose value itself contains $OTHER expands too —
+# and a leading ~ introduced by a variable's VALUE (not just one typed literally
+# at the front) is resolved as well, which a single pre-loop tilde check missed.
+#
+# A partially-resolved path is NEVER emitted. If the result still carries a
+# leading ~ or an unresolved $VAR after the loop settles — a self-referential
+# value like FOO='$FOO/x' that exhausts the guard, or any value the shell cannot
+# fully expand — the function returns 1 WITHOUT printing, and the caller turns
+# that into a usage_err (exit 2, no file). Silently writing to `$PWD/~/…` or a
+# path still holding a literal `$FOO` is exactly the falsely-successful report
+# this helper exists to prevent.
 expand_path() {
-  local p="$1" guard=0 match name value
+  local p="$1" guard=0 before match name value
   # Literal ~ in these case patterns is intentional: we MATCH an input that
   # begins with a literal tilde and rewrite it to $HOME. (Not a tilde meant to
   # shell-expand — that is exactly what this function exists to do by hand.)
+  # The guard caps iterations so a self-referential value can never loop forever.
   # shellcheck disable=SC2088
-  case "$p" in
-    "~")   p="$HOME" ;;
-    "~/"*) p="${HOME}/${p#\~/}" ;;
-  esac
-  # Expand $NAME and ${NAME}. The guard caps iterations so a value that itself
-  # contains a literal '$' can never loop forever.
   while [ "$guard" -lt 64 ]; do
+    before="$p"
+    # Resolve a leading ~ — including one a variable's value introduced on an
+    # earlier pass (the old single pre-loop check never saw those).
+    case "$p" in
+      "~")   p="$HOME" ;;
+      "~/"*) p="${HOME}/${p#\~/}" ;;
+    esac
+    # Resolve the first $NAME / ${NAME} reference (an unset name → empty).
     if [[ "$p" =~ (\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)) ]]; then
       match="${BASH_REMATCH[1]}"
       name="${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}"
       value="${!name:-}"
       p="${p//"$match"/$value}"
-    else
-      break
     fi
+    # Nothing changed this pass → settled (fully resolved, or stuck on a
+    # self-reference the checks below will reject).
+    [ "$p" = "$before" ] && break
     guard=$((guard + 1))
   done
+  # Refuse a still-partial path rather than emit it: a surviving leading ~ (belt-
+  # and-braces — the loop resolves it in normal flow) or an unresolved $VAR means
+  # the caller must fail loudly, not write to the wrong place.
+  # shellcheck disable=SC2088
+  case "$p" in "~"|"~/"*) return 1 ;; esac
+  [[ "$p" =~ (\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*) ]] && return 1
   printf '%s' "$p"
 }
 
@@ -221,14 +242,14 @@ fi
 template="$cli_template"
 [ -z "$template" ] && template="$(_cfg '.report.template_path')"
 [ -z "$template" ] && template="$DEFAULT_TEMPLATE"
-template="$(expand_path "$template")"
+template="$(expand_path "$template")" || usage_err "template path did not fully resolve (a leading ~ or a \$VAR expand_path could not settle — e.g. a self-referential value): check --template / .report.template_path"
 [ -f "$template" ] || usage_err "template not found: $template"
 
 # --- resolve output directory (config → default), tolerate a trailing slash --
 out_dir="$cli_output_dir"
 [ -z "$out_dir" ] && out_dir="$(_cfg '.report.output_dir')"
 [ -z "$out_dir" ] && out_dir="$DEFAULT_OUTPUT_DIR"
-out_dir="$(expand_path "$out_dir")"
+out_dir="$(expand_path "$out_dir")" || usage_err "output dir did not fully resolve (a leading ~ or a \$VAR expand_path could not settle — e.g. a variable whose value is itself unresolvable, or a self-referential value): check .report.output_dir"
 # A path that expands to empty (e.g. .report.output_dir referencing an unset
 # variable) would otherwise make out_path "/YNAB-…html" and write to the
 # filesystem root — refuse it, the symmetric guard to the template's [ -f ] check.

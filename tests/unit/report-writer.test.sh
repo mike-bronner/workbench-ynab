@@ -624,4 +624,92 @@ test_command_substitution_in_output_dir_is_inert() {
   assert_file_exists "$out"
 }
 
+# Regression (blocker, shape 1): a $VAR in .report.output_dir whose VALUE begins
+# with `~`. The tilde is introduced only AFTER $VAR expansion, so the old one-time
+# pre-loop tilde check never saw it — expand_path returned `~/…` and the report was
+# silently written to `$PWD/~/…` (exit 0). The fix resolves a leading `~` inside the
+# expansion loop, so it must land under $HOME (the sandbox here). Single-quoted so
+# both $VAR and the ~ in its value reach the writer UNEXPANDED (the parent shell
+# must not pre-expand them). AC #4 composition — "~ AND environment variables".
+test_var_value_starting_with_tilde_in_output_dir_is_resolved() {
+  local cfg="$SANDBOX/tilde-alias.json" out
+  cat > "$cfg" <<'JSON'
+{ "report": { "output_dir": "$YNAB_DIR_ALIAS" } }
+JSON
+  # shellcheck disable=SC2016,SC2088
+  export YNAB_DIR_ALIAS='~/tilde-reports'
+  out="$( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 )"
+  unset YNAB_DIR_ALIAS
+  assert_eq "$SANDBOX/tilde-reports/YNAB-Weekly-Review-2026-06-22.html" "$out" \
+    "a \$VAR output dir whose value begins with ~ resolves under \$HOME, not \$PWD/~/…"
+  assert_file_exists "$out"
+}
+
+# Regression (blocker, shape 2): a SELF-REFERENTIAL variable (FOO='$FOO/x') can
+# never settle — expand_path grows it until the guard is exhausted, leaving a
+# literal `$YNAB_SELFREF` in the string. The writer must REFUSE loudly (exit 2, no
+# file, empty stdout) rather than write to that garbled path with exit 0.
+test_self_referential_var_in_output_dir_is_refused() {
+  local cfg="$SANDBOX/selfref.json" rc=0 out err
+  cat > "$cfg" <<'JSON'
+{ "report": { "output_dir": "$YNAB_SELFREF/reports" } }
+JSON
+  # shellcheck disable=SC2016
+  export YNAB_SELFREF='$YNAB_SELFREF/x'
+  out="$( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 \
+            2>"$SANDBOX/selfref.err" )" || rc=$?
+  unset YNAB_SELFREF
+  err="$(cat "$SANDBOX/selfref.err")"
+  assert_eq "2" "$rc" "a self-referential \$VAR output dir → usage error (exit 2)"
+  assert_eq "" "$out" "no success path leaked to stdout for an unresolvable output dir"
+  assert_contains "$err" "did not fully resolve" "the error explains the unresolved output dir"
+}
+
+# Follow-up: the TEMPLATE path is resolved through the SAME expand_path, so the
+# `~`-after-expansion fix must hold there too. A $VAR template_path whose value
+# begins with `~` must resolve to $HOME/… (the sandbox, where the fixture lives) —
+# not be left as `~/…` and reported "template not found". Single-quoted so $VAR and
+# ~ both reach the writer unexpanded. (Also pins that the template caller calls
+# expand_path at all: deleting that call leaves this red.)
+test_template_path_var_introducing_tilde_is_resolved() {
+  local cfg="$SANDBOX/tmpl-var.json" out args=()
+  cat > "$cfg" <<'JSON'
+{ "report": { "template_path": "$YNAB_TMPL_ALIAS" } }
+JSON
+  # HOME=$SANDBOX and FIXTURE_TEMPLATE=$SANDBOX/template.html, so ~/template.html
+  # resolves to the fixture.
+  # shellcheck disable=SC2016,SC2088
+  export YNAB_TMPL_ALIAS='~/template.html'
+  while IFS= read -r -d '' a; do args+=("$a"); done < <(fixture_slots)
+  out="$( YNAB_CONFIG_FILE="$cfg" bash "$WRITER" \
+            --output-dir "$SANDBOX/tmpl-var-out" \
+            --tier Weekly --date 2026-06-22 "${args[@]}" )"
+  unset YNAB_TMPL_ALIAS
+  assert_eq "$SANDBOX/tmpl-var-out/YNAB-Weekly-Review-2026-06-22.html" "$out" \
+    "a \$VAR template path whose value begins with ~ is fully resolved (fix holds on the template path)"
+  assert_file_exists "$out"
+}
+
+# Follow-up: the template caller must also FAIL LOUDLY on an unresolvable path.
+# Pins the template caller's `|| usage_err` (a self-referential template_path →
+# exit 2, no file, empty stdout) — the symmetric guard to the output-dir refusal.
+test_self_referential_var_in_template_path_is_refused() {
+  local cfg="$SANDBOX/selfref-tmpl.json" rc=0 out err args=()
+  cat > "$cfg" <<'JSON'
+{ "report": { "template_path": "$YNAB_TMPL_SELFREF/t.html" } }
+JSON
+  # shellcheck disable=SC2016
+  export YNAB_TMPL_SELFREF='$YNAB_TMPL_SELFREF/x'
+  while IFS= read -r -d '' a; do args+=("$a"); done < <(fixture_slots)
+  out="$( YNAB_CONFIG_FILE="$cfg" bash "$WRITER" \
+            --output-dir "$SANDBOX/selfref-tmpl-out" \
+            --tier Weekly --date 2026-06-22 "${args[@]}" \
+            2>"$SANDBOX/selfref-tmpl.err" )" || rc=$?
+  unset YNAB_TMPL_SELFREF
+  err="$(cat "$SANDBOX/selfref-tmpl.err")"
+  assert_eq "2" "$rc" "a self-referential \$VAR template path → usage error (exit 2)"
+  assert_eq "" "$out" "no success path leaked to stdout for an unresolvable template path"
+  assert_contains "$err" "template path did not fully resolve" "the error explains the unresolved template path"
+}
+
 run_tests
