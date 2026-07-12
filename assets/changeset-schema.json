@@ -220,12 +220,13 @@
     "deleteDuplicateOp": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Remove a duplicate transaction. Applied via ynab_delete_transaction (M4-8). Always destructive.",
+      "description": "Remove a duplicate transaction. Applied via ynab_delete_transaction (M4-8). Always destructive. Carries twin (surviving-pair) evidence and a full before-snapshot so the deletion is reviewable, auditable, and reversible-by-reference.",
       "required": [
         "id",
         "type",
         "budget_id",
         "transaction_id",
+        "twin",
         "before",
         "after",
         "rationale",
@@ -246,13 +247,39 @@
         "transaction_id": {
           "type": "string",
           "minLength": 1,
-          "description": "The duplicate transaction to delete."
+          "description": "The duplicate (victim) transaction to delete."
+        },
+        "twin": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The surviving transaction this op is a duplicate OF — the twin that stays. Required pairing evidence: a delete op must prove which record survives so the human (and the dry-run preview) sees the pair, not just the victim. The M4-8 handler rejects any delete op missing complete twin evidence before any read or delete is attempted.",
+          "required": ["id", "payee_name", "amount", "date"],
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The surviving twin's transaction id."
+            },
+            "payee_name": {
+              "type": ["string", "null"],
+              "description": "Surviving twin's payee name, or null if it has no payee."
+            },
+            "amount": {
+              "$ref": "#/$defs/milliunits",
+              "description": "Surviving twin's amount in milliunits (integer)."
+            },
+            "date": {
+              "type": "string",
+              "format": "date",
+              "description": "Surviving twin's date (YYYY-MM-DD)."
+            }
+          }
         },
         "before": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Snapshot of the duplicate transaction before deletion, for audit and undo reference.",
-          "required": ["amount", "date"],
+          "description": "Full snapshot of the duplicate (victim) transaction before deletion. Carries the complete transaction state so the M4-3 audit before-snapshot — written before the irreversible delete — records everything needed to review or reconstruct the removed record. The M4-4 apply-time drift check compares the live transaction against these snapshotted fields.",
+          "required": ["amount", "date", "payee_name", "category_id", "account_id", "cleared", "memo"],
           "properties": {
             "amount": {
               "$ref": "#/$defs/milliunits",
@@ -265,11 +292,24 @@
             },
             "payee_name": {
               "type": ["string", "null"],
-              "description": "Payee name, if any."
+              "description": "Payee name, or null if the transaction has no payee."
             },
-            "category_name": {
+            "category_id": {
               "type": ["string", "null"],
-              "description": "Category name, if any."
+              "description": "Category id, or null if uncategorized."
+            },
+            "account_id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Account the transaction belongs to — needed to project the cleared-balance impact and to audit which account was touched."
+            },
+            "cleared": {
+              "$ref": "#/$defs/clearedStatus",
+              "description": "Cleared status at snapshot time; determines whether the deletion changes the account's cleared balance."
+            },
+            "memo": {
+              "type": ["string", "null"],
+              "description": "Transaction memo, or null."
             },
             "import_id": {
               "type": ["string", "null"],
