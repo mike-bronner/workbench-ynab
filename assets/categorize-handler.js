@@ -406,7 +406,7 @@ function toCategorizeResult(r, op) {
 async function applyCategorize(changeset, ctx = {}) {
   const {
     activeBudgetId, dryRun = true, callTool, listCategories, toolSearch,
-    readLiveState, audit, sleep, retries, delayMs,
+    readLiveState, authPreflight, audit, sleep, retries, delayMs,
   } = ctx;
   const patience = { sleep, retries, delayMs };
 
@@ -501,6 +501,7 @@ async function applyCategorize(changeset, ctx = {}) {
       applyOp: makeCategorizeApplyOp({ callTool, reloadSchemas, ...patience }),
       bulkApplyOp: makeCategorizeBulkApplyOp({ callTool, reloadSchemas, ...patience }),
       readLiveState,
+      authPreflight,
       audit,
     },
   );

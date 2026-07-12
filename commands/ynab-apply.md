@@ -313,8 +313,11 @@ remainder.
 ## Step 5 — Apply the approved ops (the only `dry_run=false` call)
 
 Re-invoke the executor with **`dryRun: false`** for the **approved ops only** — never
-the whole proposal, never the stale or skipped ops. This is the single place in the
-entire plugin that performs a real YNAB write:
+the whole proposal, never the stale or skipped ops. `applyChangeset` is one of the
+plugin's **two** real-write paths — the reconcile write path (`applyReconcile`, M4-9) is
+the other, and it carries the **identical** GAP-8 auth handling (mandatory preflight,
+mid-batch auth-abort, `error_class`/`applied_state` audit stamping). Both perform a real
+YNAB write only here, behind this approval gate and the write-safety guardrail:
 
 ```js
 const live = await applyChangeset(approvedChangeset, {

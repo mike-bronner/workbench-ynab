@@ -113,6 +113,7 @@ const { results } = await applyReconcile(reconcileOps, {
   toolSearch,               // async () => ToolSearch(...) — loads deferred schemas
   readLiveState,            // async (op) => live state (shapes below)
   applyOp,                  // async (toolName, payload, op) => mcp result (real apply only)
+  authPreflight,            // async () => ynab_list_budgets; THROWS on 401/403/network (real apply only)
   audit,                    // async ({ operation, result, dryRun }) => void (M4-3)
 });
 ```
@@ -124,8 +125,27 @@ const { results } = await applyReconcile(reconcileOps, {
     (resolved from `ynab_get_transaction` / `ynab_list_transactions`).
 - **`applyOp(toolName, payload, op)`** invokes the one namespaced mutating tool
   with the minimal `payload` the handler built (real apply only).
+- **`authPreflight()`** is a read-only YNAB call (e.g. `ynab_list_budgets`) that
+  **throws** on a non-2xx / network failure. **Mandatory** on real apply — the
+  handler fails closed (throws) without it, and runs it **before the first
+  mutation** to confirm the token is valid and write-capable.
 - **`audit({ operation, result, dryRun })`** appends one M4-3 record per op —
-  **dry-run attempts included**, flagged.
+  **dry-run attempts included**, flagged. On an errored op the record carries
+  `error_class` / `applied_state` (null on a non-error op), the same substrate
+  the idempotent-resume design (#48) reads.
+
+### Auth fail-closed, both ends (GAP-8 / #50) — identical to the executor
+
+`applyReconcile` mirrors the apply executor's auth handling. The mandatory
+`authPreflight` aborts the whole batch on a bad token **before any mutation**
+(zero writes, no audit records for ops that never ran). Mid-batch, a **401/403**
+on the re-read **or** the mutation stops the batch immediately (fail-closed,
+phase-agnostic); a single-op data error (422), a rate limit (429), or an
+indeterminate 5xx / network fault is recorded per-op and the batch **continues**
+— two mutually-exclusive policies. On an auth abort `applyReconcile` returns the
+executor's outcome shape (`reason: 'auth_preflight_fail' | 'auth_abort'`,
+`authFailure`, `stopped_at_index`, `total_ops`), so M4-5 renders it with the
+executor's `describeAuthFailure(outcome)` helper.
 
 ### Deferred-tool boot-patience — load schemas before the first MCP call
 

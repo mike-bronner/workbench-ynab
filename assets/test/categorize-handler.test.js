@@ -115,7 +115,7 @@ function changeset(ops, over = {}) {
 
 /** Default ctx: the executor's mandatory ports wired to spies + a no-wait sleep. */
 function baseCtx(over = {}) {
-  return { activeBudgetId: BUDGET, readLiveState: noDrift(), audit: auditSpy(), sleep: noWait(), ...over };
+  return { activeBudgetId: BUDGET, readLiveState: noDrift(), authPreflight: spy(async () => ({ budgets: [] })), audit: auditSpy(), sleep: noWait(), ...over };
 }
 
 // --- registration point ----------------------------------------------------

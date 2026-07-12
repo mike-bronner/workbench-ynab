@@ -30,7 +30,7 @@ const {
   applyReconcile,
   reconcileHandler,
 } = require('../reconcile-handler');
-const { STATUS } = require('../apply-executor');
+const { STATUS, OUTCOME, describeAuthFailure } = require('../apply-executor');
 const { ALLOWED_TOOLS } = require('../write-safety-guardrail');
 
 const FIXTURES = path.join(__dirname, '..', 'fixtures');
@@ -458,4 +458,169 @@ test('applyReconcile fails fast on a missing port or activeBudgetId', async () =
     () => applyReconcile([], { activeBudgetId: BUDGET, dryRun: false, readLiveState: spy(), audit: auditSpy() }),
     /applyOp/,
   );
+  // applyOp supplied but authPreflight missing on real apply → the preflight is mandatory too.
+  await assert.rejects(
+    () => applyReconcile([], { activeBudgetId: BUDGET, dryRun: false, readLiveState: spy(), applyOp: spy(), audit: auditSpy() }),
+    /authPreflight/,
+  );
+});
+
+// --- (#50) auth-failure handling on the reconcile write path ----------------
+
+/** authPreflight that succeeds — a valid, write-capable token (real apply only). */
+const okPreflight = () => spy(() => ({ budgets: [{ id: 'b1' }] }));
+/** Build a thrown error carrying an HTTP status, the shape a real MCP port surfaces. */
+const httpError = (status, message) => Object.assign(new Error(message || `HTTP ${status}`), { status });
+/** A mark_cleared op with a unique id and its own single target transaction. */
+const mcOp = (n) => ({ ...markClearedOp([`txn-${n}`]), id: `op-mc-${n}` });
+/** readLiveState echoing each op's targets at the 'uncleared' baseline → never stale. */
+const reconcileNoDrift = () => spy((op) => liveTxns(op.transaction_ids, 'uncleared'));
+/** applyOp that throws `err` for one op id and succeeds for the rest. */
+const applyFailingOn = (failId, err) => spy((_tool, _payload, op) => { if (op.id === failId) throw err; return { ok: true }; });
+/** readLiveState that throws `err` for one op id and echoes the uncleared baseline otherwise. */
+const readFailingOn = (failId, err) => spy((op) => { if (op.id === failId) throw err; return liveTxns(op.transaction_ids, 'uncleared'); });
+
+const authCtx = (over = {}) => ({
+  activeBudgetId: BUDGET,
+  dryRun: false,
+  toolMap: TOOL_MAP,
+  readLiveState: reconcileNoDrift(),
+  applyOp: spy(() => ({ ok: true })),
+  authPreflight: okPreflight(),
+  audit: auditSpy(),
+  ...over,
+});
+
+test('(#50) preflight auth failure aborts before any mutation — zero ops, no audit records', async () => {
+  const apply = spy();
+  const audit = auditSpy();
+  const out = await applyReconcile([mcOp(0), mcOp(1)], authCtx({
+    applyOp: apply,
+    authPreflight: spy(() => { throw httpError(401, 'token revoked'); }),
+    audit,
+  }));
+  assert.equal(out.ok, false);
+  assert.equal(out.aborted, true);
+  assert.equal(out.reason, OUTCOME.AUTH_PREFLIGHT_FAIL);
+  assert.equal(out.authFailure.error_class, 'auth_revoked');
+  assert.equal(out.authFailure.applied_state, 'not_applied');
+  assert.equal(out.authFailure.phase, 'preflight');
+  assert.deepEqual(out.results, []);
+  assert.equal(apply.calls.length, 0); // the mutation port was never reached
+  assert.equal(audit.calls.length, 0); // no op that never ran was audited
+});
+
+test('(#50) a preflight NETWORK failure (statusless) also aborts the whole batch', async () => {
+  const apply = spy();
+  const out = await applyReconcile([mcOp(0), mcOp(1)], authCtx({
+    applyOp: apply,
+    authPreflight: spy(() => { throw new Error('network timeout: socket hang up'); }),
+  }));
+  assert.equal(out.reason, OUTCOME.AUTH_PREFLIGHT_FAIL);
+  assert.equal(out.authFailure.error_class, 'unknown');
+  assert.equal(out.authFailure.applied_state, 'unknown');
+  assert.equal(apply.calls.length, 0);
+});
+
+test('(#50) mid-batch 401 stops the batch and audits the failed op (auth_revoked / not_applied)', async () => {
+  const apply = applyFailingOn('op-mc-1', httpError(401, 'unauthorized'));
+  const audit = auditSpy();
+  const out = await applyReconcile([mcOp(0), mcOp(1), mcOp(2)], authCtx({ applyOp: apply, audit }));
+  assert.equal(out.ok, false);
+  assert.equal(out.aborted, true);
+  assert.equal(out.reason, OUTCOME.AUTH_ABORT);
+  assert.equal(out.stopped_at_index, 1);
+  assert.equal(out.total_ops, 3);
+  // op-mc-0 applied; op-mc-1 errored (auth); op-mc-2 was NEVER processed.
+  assert.equal(out.results.length, 2);
+  assert.equal(out.results[0].status, STATUS.APPLIED);
+  assert.equal(out.results[1].status, STATUS.ERROR);
+  assert.equal(out.results[1].detail.error_class, 'auth_revoked');
+  assert.equal(out.results[1].detail.applied_state, 'not_applied');
+  assert.equal(apply.calls.length, 2); // op-mc-0 + op-mc-1 only, never op-mc-2 (fail-closed stop)
+  assert.ok(!apply.calls.some(([, , op]) => op.id === 'op-mc-2'));
+  assert.equal(audit.calls.length, 2); // exactly the two processed ops
+  assert.equal(audit.calls[1][0].result.error_class, 'auth_revoked');
+  assert.equal(audit.calls[1][0].result.applied_state, 'not_applied');
+});
+
+test('(#50) mid-batch 403 stops the batch and records insufficient_scope', async () => {
+  const audit = auditSpy();
+  const out = await applyReconcile([mcOp(0), mcOp(1)], authCtx({
+    applyOp: applyFailingOn('op-mc-0', httpError(403, 'not authorized (scope)')),
+    audit,
+  }));
+  assert.equal(out.reason, OUTCOME.AUTH_ABORT);
+  assert.equal(out.stopped_at_index, 0);
+  assert.equal(out.results.length, 1);
+  assert.equal(out.results[0].detail.error_class, 'insufficient_scope');
+  assert.equal(audit.calls.length, 1);
+});
+
+test('(#50) mid-batch 401 on the READ phase also aborts the batch (phase-agnostic fail-closed)', async () => {
+  const apply = spy(() => ({ ok: true }));
+  const audit = auditSpy();
+  const out = await applyReconcile([mcOp(0), mcOp(1), mcOp(2)], authCtx({
+    readLiveState: readFailingOn('op-mc-1', httpError(401, 'unauthorized')),
+    applyOp: apply,
+    audit,
+  }));
+  // The abort keys on error_class, not the phase — a 401 on the re-read stops the batch.
+  assert.equal(out.reason, OUTCOME.AUTH_ABORT);
+  assert.equal(out.stopped_at_index, 1);
+  assert.equal(out.authFailure.phase, 'read');
+  assert.equal(out.authFailure.error_class, 'auth_revoked');
+  assert.equal(out.results.length, 2);
+  assert.equal(out.results[1].detail.phase, 'read');
+  assert.equal(out.results[1].detail.error_class, 'auth_revoked');
+  // op-mc-1's read threw BEFORE its mutation, so applyOp ran for op-mc-0 only.
+  assert.equal(apply.calls.length, 1);
+  assert.equal(apply.calls[0][2].id, 'op-mc-0');
+  assert.equal(audit.calls.length, 2);
+});
+
+test('(#50) a single-op 422 skips that op and CONTINUES the rest (data-error policy)', async () => {
+  const apply = applyFailingOn('op-mc-1', httpError(422, 'Unprocessable Entity'));
+  const audit = auditSpy();
+  const out = await applyReconcile([mcOp(0), mcOp(1), mcOp(2)], authCtx({ applyOp: apply, audit }));
+  assert.equal(out.ok, true);
+  assert.equal(out.reason, OUTCOME.APPLY_COMPLETE);
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId['op-mc-1'].status, STATUS.ERROR);
+  assert.equal(byId['op-mc-1'].detail.error_class, 'unknown'); // 422 is not an auth/rate class
+  assert.equal(byId['op-mc-1'].detail.applied_state, 'not_applied'); // YNAB rejected it → no change
+  assert.equal(byId['op-mc-0'].status, STATUS.APPLIED);
+  assert.equal(byId['op-mc-2'].status, STATUS.APPLIED);
+  assert.equal(apply.calls.length, 3); // the 422 didn't stop the batch
+  assert.equal(audit.calls.length, 3);
+});
+
+test('(#50) a network timeout on a mutation records applied_state=unknown and continues', async () => {
+  const apply = applyFailingOn('op-mc-1', new Error('network timeout during mutation'));
+  const out = await applyReconcile([mcOp(0), mcOp(1), mcOp(2)], authCtx({ applyOp: apply }));
+  assert.equal(out.reason, OUTCOME.APPLY_COMPLETE); // indeterminate ≠ auth → not an abort
+  const failed = out.results.find((r) => r.op_id === 'op-mc-1');
+  assert.equal(failed.detail.applied_state, 'unknown'); // may have landed server-side
+  assert.equal(failed.detail.error_class, 'unknown');
+  for (const r of out.results) if (r.op_id !== 'op-mc-1') assert.equal(r.status, STATUS.APPLIED);
+  assert.equal(apply.calls.length, 3);
+});
+
+test('(#50) a normal applied op audits error_class=null and applied_state=null', async () => {
+  const audit = auditSpy();
+  await applyReconcile([mcOp(0)], authCtx({ audit }));
+  const [rec] = audit.calls[0];
+  assert.equal(rec.result.status, STATUS.APPLIED);
+  assert.equal(rec.result.error_class, null);
+  assert.equal(rec.result.applied_state, null);
+});
+
+test('(#50) describeAuthFailure renders a reconcile auth abort identically to the executor', async () => {
+  const out = await applyReconcile([mcOp(0), mcOp(1), mcOp(2)], authCtx({
+    applyOp: applyFailingOn('op-mc-1', httpError(401)),
+  }));
+  const msg = describeAuthFailure(out);
+  assert.match(msg, /1 of 3 op\(s\) applied, batch stopped at op 2/);
+  assert.match(msg, /Applied before the failure: /);
+  assert.match(msg, /re-issue token via \/workbench-ynab:setup/); // auth_revoked remediation
 });
