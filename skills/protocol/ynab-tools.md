@@ -64,19 +64,69 @@ mcp__plugin_workbench-ynab_ynab__ynab_delete_transaction
 mcp__plugin_workbench-ynab_ynab__ynab_reconcile_account
 ```
 
-## Pre-approval glob
+## Pre-approval globs
 
-One glob matches the entire tool family — use it as the source of truth for the
-pre-approval config (Sprint 1 read tools, Sprint 4 write tools):
+Pre-approval removes Claude Code's per-call permission dialog for a matched
+tool. It is **phase-split and scoped tightly** — never blanket the whole family.
+The `ynab_*` family glob (see the next section) would sweep in the
+ledger-*deleting* `delete_transaction` verb, which must always keep its own
+strong-confirmation path (**M4-8**), so it is never used for pre-approval.
+
+### Read phase (Sprints 1–3)
+
+Setup (Step 5) pre-approves the read tools listed under **## Read tools** above.
+Two globs cover the bulk of that read surface:
+
+```
+mcp__plugin_workbench-ynab_ynab__ynab_list_*
+mcp__plugin_workbench-ynab_ynab__ynab_get_*
+```
+
+`ynab_export_transactions` and `ynab_compare_transactions` are the two reads
+those globs don't match; setup seeds them by their explicit names from the read
+list above.
+
+### Write phase (Sprint 4 — M4)
+
+Pre-approve **exactly these four** ledger-write tools, each by its full name —
+never the `ynab_*` family glob:
+
+```
+mcp__plugin_workbench-ynab_ynab__ynab_update_transaction
+mcp__plugin_workbench-ynab_ynab__ynab_update_transactions
+mcp__plugin_workbench-ynab_ynab__ynab_update_category
+mcp__plugin_workbench-ynab_ynab__ynab_reconcile_account
+```
+
+**Deliberately excluded from every pre-approval list:**
+
+- `mcp__plugin_workbench-ynab_ynab__ynab_delete_transaction` — the destructive
+  verb keeps its own strong-confirmation + dry-run preview path (**M4-8**).
+  Never add it to a pre-approval list: do so and a duplicate-fix delete would
+  run without its confirmation gate.
+- `mcp__plugin_workbench-ynab_ynab__ynab_create_transaction` and
+  `mcp__plugin_workbench-ynab_ynab__ynab_create_transactions` — no M4 write path
+  creates transactions, so they are not pre-approved either.
+
+The human-approval gate for a write **batch** is the `/ynab-apply` command
+(**M4-5**) plus the write-safety guardrail — *not* a per-call Claude Code
+dialog. Pre-approving these four tools removes the now-*redundant* per-call
+prompt; it does not remove the approval gate. See
+[`docs/mcp-capability-map.md`](../../docs/mcp-capability-map.md) for the exact
+`~/.claude/settings.json` snippet and the permission notes.
+
+## Family glob (schema loading — NOT pre-approval)
+
+One glob matches the entire tool family:
 
 ```
 mcp__plugin_workbench-ynab_ynab__ynab_*
 ```
 
-When the read-only and write phases must be split (per the read-only permission
-boundary), pre-approve the **read tools** listed above during Sprints 1–3 and
-add the **write tools** behind the write-safety guardrail in Sprint 4. The
-single glob above is the like-for-like default once write-back is approved.
+Use it where the whole family must be *named* at once **without** granting
+standing permission — e.g. loading deferred tool schemas with `ToolSearch` from
+a write path. It is **not** the pre-approval default: pre-approval is the tight,
+phase-split set above, so the delete verb is never blanket-approved.
 
 ## Orchestrator tools list
 
