@@ -68,9 +68,10 @@ Every monetary field — `amount`, `budgeted`, `cleared_balance`,
   path.
 - Negative amounts are outflows; positive amounts are inflows, exactly as YNAB
   reports them.
-- A single shared money helper (centralized milliunits → currency formatting,
-  tracked separately in the backlog) owns display conversion. Change-set
-  artifacts always carry raw milliunits.
+- A single shared money helper — [`format-money.js`](./format-money.js),
+  `formatMoney(milliunits, currency_format)` — owns display conversion,
+  centralizing milliunits → currency formatting driven by the budget's
+  `currency_format` (issue #34). Change-set artifacts always carry raw milliunits.
 
 ---
 

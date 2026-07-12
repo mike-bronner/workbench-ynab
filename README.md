@@ -17,6 +17,8 @@ Two things make this plugin unusual among workbench plugins, and both are front 
 
 > **Not tax advice.** This tool organizes financial data and surfaces tax-relevant signals to help you and your tax professional. It is **not** a substitute for professional tax advice.
 
+> **Currency & tax scope (v1).** The review reads your budget's `currency_format` and renders every amount in that currency — correct symbol, symbol placement, separators, and decimal digits — so a non-USD budget (EUR `1.234,56 €`, JPY `¥1,234`, …) displays correctly via one shared money helper (`assets/format-money.js`). This is a **presentation** capability only: the **tax engine is US-only** and is **not** extended to any other jurisdiction. A non-USD budget gets correct currency display but the same US-only tax logic — the tax sections assume US federal rules regardless of budget currency.
+
 ## Architecture
 
 Mirrors the sibling workbench plugins: a single entry point dispatches a **read-only orchestrator** that plans the review, the **main conversation** drives the interactive review + propose/approve protocol via skills, and a **vendored YNAB MCP** is the only thing that ever talks to the YNAB API.
