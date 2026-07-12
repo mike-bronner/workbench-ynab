@@ -374,15 +374,19 @@ test_quarterly_tax_display_name() {
 # The writer HTML-escapes {{output_path}} — a configured path with HTML
 # metacharacters must never break out of the meta attribute / inject an element.
 test_output_path_is_html_escaped() {
-  local danger='inj"><script>x' dir out body
+  # The leading '&' also guards bash 5.2's patsub_replacement: a literal '&' in a
+  # ${var//pat/repl} replacement must NOT expand to the matched text (which would
+  # yield `<lt;` instead of `&lt;` and defeat the escaping).
+  local danger='inj&"><script>x' dir out body
   dir="$SANDBOX/$danger"               # a single dir component (no '/'), dangerous chars
   out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" \
           run_writer_fixture --tier Weekly --date 2026-06-22 --output-dir "$dir" )"
   assert_file_exists "$out"
   body="$(cat "$out")"
-  assert_contains "$body" 'inj&quot;&gt;&lt;script&gt;x' "output path is HTML-escaped in the report"
+  assert_contains "$body" 'inj&amp;&quot;&gt;&lt;script&gt;x' "output path is HTML-escaped in the report"
   case "$body" in
     *'"><script>x'*) fail "unescaped output path broke out of the attribute (element injection)" ;;
+    *'<lt;'*|*'>gt;'*) fail "patsub_replacement corrupted the HTML entities (& → matched text)" ;;
   esac
 }
 

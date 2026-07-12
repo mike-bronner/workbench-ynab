@@ -62,6 +62,14 @@
 
 set -uo pipefail
 
+# bash 5.2 enables `patsub_replacement` by default, which makes a literal `&` in
+# a `${var//pat/repl}` REPLACEMENT expand to the matched text (sed-style). Every
+# substitution here — html_escape's entities (`&lt;`, `&gt;`, …) and the block/
+# scalar slot fills — intends `&` to be LITERAL, so turn it off for identical
+# behaviour on bash 3.2 (macOS) through 5.2+ (Linux CI). Without this, the
+# security-relevant HTML escaping silently produces `<lt;` instead of `&lt;`.
+shopt -u patsub_replacement 2>/dev/null || true
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
