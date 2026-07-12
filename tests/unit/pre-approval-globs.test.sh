@@ -43,14 +43,30 @@ MAP="$REPO_ROOT/docs/mcp-capability-map.md"
 # names below never appear as a single literal token in this file.
 PREFIX="mcp__plugin_workbench-ynab_ynab__"
 
-# Every line inside the "## Pre-approval globs" section (up to the next "## "
-# heading — the "### Read phase" / "### Write phase" subheadings do NOT terminate
-# it) that starts with `mcp__`. Extracting `^mcp__` rather than `^$PREFIX` is
-# deliberate: a bad bare-form entry (mcp__ynab__…) is captured here and then
-# fails the prefix assertion, which is the whole point.
+# The full body of the "## Pre-approval globs" section — every line from the
+# heading up to the next "## " heading. The "### Read phase" / "### Write phase"
+# subheadings do NOT terminate it (they start with "### ", not "## "). Used both
+# to enumerate the declared globs and to scope the delete-exclusion doc check, so
+# neither can be satisfied by an identical token elsewhere in the file.
+preapproval_section() {
+  awk '/^## Pre-approval globs/{f=1;next} /^## /{f=0} f' "$SSOT"
+}
+
+# Every line inside that section that starts with `mcp__` — the declared
+# pre-approval set. Extracting `^mcp__` rather than `^$PREFIX` is deliberate: a
+# bad bare-form entry (mcp__ynab__…) is captured here and then fails the prefix
+# assertion, which is the whole point.
 preapproval_set() {
-  awk '/^## Pre-approval globs/{f=1;next} /^## /{f=0} f' "$SSOT" \
-    | grep '^mcp__' || true
+  preapproval_section | grep '^mcp__' || true
+}
+
+# The full body of the "## Permission notes" section in the capability map —
+# heading to the next "## " heading. The "### (a)/(b)/(c)" subsections do NOT
+# terminate it. Scopes the AC #5 subsection checks so tokens that also occur
+# elsewhere in the map (mcp__ynab__ in Runtime gotchas, M4-8 in the table) can't
+# satisfy them.
+permission_notes_section() {
+  awk '/^## Permission notes/{f=1;next} /^## /{f=0} f' "$MAP"
 }
 
 # The SSoT section exists and declares a non-empty pre-approval set.
@@ -119,25 +135,47 @@ test_delete_and_family_glob_are_excluded_from_preapproval() {
   fi
 }
 
-# The SSoT documents the delete exclusion inline, pointing at the M4-8 path.
+# AC #3: the SSoT documents the delete exclusion INLINE in the pre-approval
+# section, pointing at the M4-8 path. Two things make this non-vacuous where the
+# old whole-file check was not:
+#   * scope — the check runs against the pre-approval section body, not the whole
+#     file, so the `M4-8` in the read-path rationale (get_transaction) and the
+#     `delete_transaction` in the write-tool catalog can't satisfy it;
+#   * the FULL namespaced delete verb — matched via PREFIX composition, exactly
+#     the swap-guard-safe pattern used above. The full name appears only in the
+#     explicit "Deliberately excluded" bullet (the authoritative exclusion list
+#     AC #3 requires); the section intro mentions delete only in the bare
+#     backticked short form. So deleting that bullet block drops the full name
+#     from the section and fails here — the exact mutation the old check missed.
 test_ssot_documents_delete_exclusion() {
-  local body; body="$(cat "$SSOT")"
-  assert_contains "$body" "delete_transaction" "SSoT names the withheld delete verb"
-  assert_contains "$body" "M4-8" "SSoT points the delete exclusion at the M4-8 confirmation path"
+  local section; section="$(preapproval_section)"
+  assert_contains "$section" "${PREFIX}ynab_delete_transaction" \
+    "the pre-approval section explicitly excludes the full-namespaced delete verb"
+  assert_contains "$section" "M4-8" \
+    "the pre-approval section points the delete exclusion at the M4-8 confirmation path"
 }
 
-# AC: a permission-notes section explains the namespacing, the /ynab-apply gate,
-# and the withheld delete verb. It lives in the allowlisted capability map (the
-# human-readable permission contract), which may hold concrete names/snippets.
+# AC #5: a permission-notes section explains (a) the namespacing, (b) the
+# /ynab-apply gate, and (c) the withheld delete verb. It lives in the allowlisted
+# capability map (the human-readable permission contract). Every subsection
+# assertion is scoped to the section body: `mcp__ynab__` also appears in the
+# Runtime-gotchas section and `M4-8` in the capability-map table, so a whole-file
+# check would keep passing even if subsections (a)/(c) were gutted. Against the
+# scoped section, removing any of (a)/(b)/(c) fails the matching assertion.
 test_permission_notes_present_in_capability_map() {
   assert_file_exists "$MAP"
-  local body; body="$(cat "$MAP")"
-  assert_contains "$body" "Permission notes" "capability map has a Permission notes section"
-  assert_contains "$body" "mcp__ynab__" \
-    "permission notes explain why the bare mcp__ynab__ form must NOT be used"
-  assert_contains "$body" "/ynab-apply" "permission notes name the /ynab-apply approval gate"
-  assert_contains "$body" "M4-5" "permission notes tie the human gate to M4-5"
-  assert_contains "$body" "M4-8" "permission notes tie the withheld delete verb to M4-8"
+  grep -qE '^## Permission notes' "$MAP" \
+    || fail "capability map is missing the '## Permission notes' section"
+  local section; section="$(permission_notes_section)"
+  [ -n "$section" ] || fail "the Permission notes section is empty"
+  # (a) namespace rationale — the bare, non-resolving form is named here.
+  assert_contains "$section" "mcp__ynab__" \
+    "permission notes (a) explain why the bare mcp__ynab__ form must NOT be used"
+  # (b) the human-approval gate.
+  assert_contains "$section" "/ynab-apply" "permission notes (b) name the /ynab-apply approval gate"
+  assert_contains "$section" "M4-5" "permission notes (b) tie the human gate to M4-5"
+  # (c) the withheld delete verb.
+  assert_contains "$section" "M4-8" "permission notes (c) tie the withheld delete verb to M4-8"
 }
 
 run_tests
