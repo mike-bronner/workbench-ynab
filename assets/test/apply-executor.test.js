@@ -54,6 +54,60 @@ const noDrift = () => spy((op) => clone(op.before));
 /** A no-op audit sink spy. */
 const auditSpy = () => spy(() => undefined);
 
+// --- opt-in bulk dispatch fixtures -----------------------------------------
+
+const BUDGET = 'b1f2c3d4-1111-4a2b-9c3d-000000000001'; // the shared fixtures' budget
+const SINGLE_TOOL = pick('_update_transaction');
+const BULK_TOOL = pick('_update_transactions');
+/** A group of ≥2 ops each carrying a resolved category_id may go through one bulk call. */
+const bulkFits = (ops) => ops.length >= 2 && ops.every((o) => o.after && typeof o.after.category_id === 'string');
+
+/**
+ * A well-shaped `ynab_update_transactions` response marking every requested op
+ * `updated` — the REAL vendored shape (`{ success, summary, results:[{ request_index,
+ * status, transaction_id }] }`), not an off-contract `{ ok: true }`. Fed the ops the
+ * bulk port was called with, so `request_index` lines up one-to-one with the request.
+ */
+const bulkAllUpdated = (ops) => ({
+  success: true,
+  summary: { total_requested: ops.length, updated: ops.length, failed: 0 },
+  results: ops.map((op, i) => ({ request_index: i, status: 'updated', transaction_id: op.transaction_id, correlation_key: `k${i}` })),
+});
+
+/** A schema-valid change-set with two categorize ops sharing the fixtures' budget. */
+const twoCategorize = () => ({
+  schema_version: '1.0.0',
+  generated_at: '2026-06-19T14:30:00Z',
+  budget_id: BUDGET,
+  budget_name: 'Family Budget',
+  source: 'manual',
+  money_movement: false,
+  operations: [
+    { id: 'op-1', type: 'categorize', budget_id: BUDGET, transaction_id: 't-a', before: { category_id: null, category_name: null }, after: { category_id: 'c-a', category_name: 'A' }, rationale: 'r', risk: 'low' },
+    { id: 'op-2', type: 'categorize', budget_id: BUDGET, transaction_id: 't-b', before: { category_id: null, category_name: null }, after: { category_id: 'c-b', category_name: 'B' }, rationale: 'r', risk: 'low' },
+  ],
+});
+
+/** A schema-valid change-set with three categorize ops sharing the fixtures' budget. */
+const threeCategorize = () => {
+  const cs = twoCategorize();
+  cs.operations.push({ id: 'op-3', type: 'categorize', budget_id: BUDGET, transaction_id: 't-c', before: { category_id: null, category_name: null }, after: { category_id: 'c-c', category_name: 'C' }, rationale: 'r', risk: 'low' });
+  return cs;
+};
+
+const bulkCtx = (over = {}) => ({
+  activeBudgetId: BUDGET,
+  dryRun: false,
+  toolMap: { categorize: SINGLE_TOOL },
+  bulkToolMap: { categorize: BULK_TOOL },
+  bulkApplyOp: spy((_tool, ops) => bulkAllUpdated(ops)),
+  bulkFits,
+  readLiveState: noDrift(),
+  applyOp: spy(() => ({ ok: true })),
+  audit: auditSpy(),
+  ...over,
+});
+
 // --- helpers: deepEqual / isStale -----------------------------------------
 
 test('deepEqual compares integer milliunits exactly and never coerces to float', () => {
@@ -427,4 +481,171 @@ test('a missing or empty activeBudgetId throws (fail-closed, never a silent enve
     () => applyChangeset(cs, { activeBudgetId: '', readLiveState: noDrift(), audit: auditSpy() }),
     /activeBudgetId/,
   );
+});
+
+// --- opt-in bulk dispatch (M4-6 Option 1) ----------------------------------
+
+test('bulk dispatch: same-type survivors go through ONE bulkApplyOp call; each op is still drift-checked and audited', async () => {
+  const cs = twoCategorize();
+  const read = noDrift();
+  const bulk = spy((_tool, ops) => bulkAllUpdated(ops)); // real, confirmed per-entry shape
+  const apply = spy();
+  const audit = auditSpy();
+  const out = await applyChangeset(cs, bulkCtx({ readLiveState: read, bulkApplyOp: bulk, applyOp: apply, audit }));
+
+  assert.equal(bulk.calls.length, 1); // exactly one bulk call for the group
+  assert.equal(bulk.calls[0][0], BULK_TOOL);
+  assert.equal(bulk.calls[0][1].length, 2); // the whole group of ops
+  assert.equal(apply.calls.length, 0); // no per-op dispatch
+  for (const r of out.results) {
+    assert.equal(r.status, STATUS.APPLIED);
+    assert.equal(r.detail.bulk, true);
+    assert.equal(r.detail.tool, BULK_TOOL);
+  }
+  assert.equal(read.calls.length, 2); // drift-checked each op individually
+  assert.equal(audit.calls.length, 2); // audited each op individually
+  for (const [rec] of audit.calls) assert.equal(rec.result.tool, BULK_TOOL); // audit records the tool that ran
+});
+
+test('bulk dispatch falls back to per-op applyOp when bulkApplyOp throws (rejected bulk shape)', async () => {
+  const cs = twoCategorize();
+  const bulk = spy(() => { throw new Error('bulk shape rejected'); });
+  const apply = spy(() => ({ ok: true }));
+  const out = await applyChangeset(cs, bulkCtx({ bulkApplyOp: bulk, applyOp: apply }));
+
+  assert.equal(bulk.calls.length, 1);
+  assert.equal(apply.calls.length, 2); // fell back to a per-op call for each op in the group
+  for (const r of out.results) assert.equal(r.status, STATUS.APPLIED);
+});
+
+test('bulk dispatch: a RESOLVED but partially-failed bulk envelope audits each failed entry as error, not applied', async () => {
+  const cs = twoCategorize(); // op-1 → t-a, op-2 → t-b
+  // The vendored ynab_update_transactions does NOT throw on a partial failure — it
+  // RESOLVES with per-entry statuses. t-a updated; t-b failed.
+  const bulk = spy(() => ({
+    success: false,
+    summary: { total_requested: 2, updated: 1, failed: 1 },
+    results: [
+      { request_index: 0, status: 'updated', transaction_id: 't-a', correlation_key: 'k0' },
+      { request_index: 1, status: 'failed', transaction_id: 't-b', correlation_key: 'k1', error: 'insufficient scope' },
+    ],
+  }));
+  const apply = spy(() => ({ ok: true }));
+  const audit = auditSpy();
+  const out = await applyChangeset(cs, bulkCtx({ bulkApplyOp: bulk, applyOp: apply, audit }));
+
+  assert.equal(bulk.calls.length, 1); // one bulk call, no throw → no fallback
+  assert.equal(apply.calls.length, 0);
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId['op-1'].status, STATUS.APPLIED); // t-a updated
+  assert.equal(byId['op-2'].status, STATUS.ERROR); // t-b failed — NOT applied
+  assert.match(byId['op-2'].detail.message, /insufficient scope/);
+  // The audit trail must NOT lie: the failed op is audited as error, not applied.
+  const auditByStatus = audit.calls.map(([rec]) => rec.result.status).sort();
+  assert.deepEqual(auditByStatus, ['applied', 'error']);
+});
+
+test('bulk dispatch fails CLOSED on a resolved-but-off-contract payload: no op is recorded applied', async () => {
+  const cs = twoCategorize();
+  // A resolved payload with NO `results` array (the exact fail-open repro): the tool
+  // returned without throwing, but confirms nothing. Every op must be `error`, not applied.
+  const bulk = spy(() => ({ ok: true }));
+  const apply = spy(() => ({ ok: true }));
+  const audit = auditSpy();
+  const out = await applyChangeset(cs, bulkCtx({ bulkApplyOp: bulk, applyOp: apply, audit }));
+
+  assert.equal(bulk.calls.length, 1);
+  assert.equal(apply.calls.length, 0); // resolved (no throw) → no per-op fallback
+  for (const r of out.results) {
+    assert.equal(r.status, STATUS.ERROR); // fail-closed, never a blanket applied
+    assert.match(r.detail.message, /without confirming this op/);
+  }
+  // The audit trail must NOT lie: an unconfirmed mutation is audited as error.
+  for (const [rec] of audit.calls) assert.equal(rec.result.status, STATUS.ERROR);
+});
+
+test('bulk dispatch fails CLOSED when the results array omits an op entry (partial shape)', async () => {
+  const cs = twoCategorize(); // op-1 → t-a, op-2 → t-b
+  // Only op-1 has an entry; op-2 is missing from `results` → op-2 must be error, not applied.
+  const bulk = spy(() => ({
+    success: true,
+    summary: { total_requested: 2, updated: 1, failed: 0 },
+    results: [{ request_index: 0, status: 'updated', transaction_id: 't-a', correlation_key: 'k0' }],
+  }));
+  const out = await applyChangeset(cs, bulkCtx({ bulkApplyOp: bulk }));
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId['op-1'].status, STATUS.ERROR); // length mismatch fails the whole group closed
+  assert.equal(byId['op-2'].status, STATUS.ERROR);
+});
+
+test('a stale op is excluded from a ≥2-survivor bulk call — the survivors still go through ONE bulk dispatch', async () => {
+  const cs = threeCategorize(); // op-1 (t-a), op-2 (t-b), op-3 (t-c)
+  // op-2 drifted; op-1 + op-3 survive → 2 survivors, bulkFits=true → ONE bulk call for both.
+  const read = spy((op) => (op.id === 'op-2' ? { category_id: 'moved', category_name: 'x' } : clone(op.before)));
+  const bulk = spy((_tool, ops) => bulkAllUpdated(ops));
+  const apply = spy();
+  const out = await applyChangeset(cs, bulkCtx({ readLiveState: read, bulkApplyOp: bulk, applyOp: apply }));
+
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId['op-2'].status, STATUS.SKIPPED_STALE);
+  assert.equal(byId['op-1'].status, STATUS.APPLIED);
+  assert.equal(byId['op-3'].status, STATUS.APPLIED);
+  assert.equal(bulk.calls.length, 1); // exactly ONE bulk call
+  assert.equal(bulk.calls[0][1].length, 2); // carrying only the 2 survivors
+  assert.deepEqual(bulk.calls[0][1].map((o) => o.id).sort(), ['op-1', 'op-3']);
+  assert.equal(apply.calls.length, 0); // the survivors went bulk, not per-op
+});
+
+test('bulkFits=false keeps the group on the per-op path (no bulk call)', async () => {
+  const cs = twoCategorize();
+  const bulk = spy(() => ({ ok: true }));
+  const apply = spy(() => ({ ok: true }));
+  await applyChangeset(cs, bulkCtx({ bulkFits: () => false, bulkApplyOp: bulk, applyOp: apply }));
+
+  assert.equal(bulk.calls.length, 0);
+  assert.equal(apply.calls.length, 2);
+});
+
+test('a stale op in a bulk group is skipped; only the survivors are bulk-dispatched', async () => {
+  const cs = twoCategorize();
+  // op-2 drifted from its `before`; only op-1 survives → 1 survivor, bulkFits=false → per-op.
+  const read = spy((op) => (op.id === 'op-2' ? { category_id: 'moved', category_name: 'x' } : clone(op.before)));
+  const bulk = spy(() => ({ ok: true }));
+  const apply = spy(() => ({ ok: true }));
+  const out = await applyChangeset(cs, bulkCtx({ readLiveState: read, bulkApplyOp: bulk, applyOp: apply }));
+
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId['op-2'].status, STATUS.SKIPPED_STALE);
+  assert.equal(byId['op-1'].status, STATUS.APPLIED);
+  // One survivor doesn't fit bulk → per-op; the stale op is never dispatched at all.
+  assert.equal(bulk.calls.length, 0);
+  assert.equal(apply.calls.length, 1);
+});
+
+test('a denied / un-namespaced bulk tool aborts the whole batch in pre-flight (tool_block, before any dispatch)', async () => {
+  const cs = twoCategorize();
+  const bulk = spy();
+  const apply = spy();
+  const out = await applyChangeset(cs, bulkCtx({
+    bulkToolMap: { categorize: 'mcp__ynab__ynab_create_transactions' }, // bare, off the allow-list
+    bulkApplyOp: bulk,
+    applyOp: apply,
+  }));
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, OUTCOME.TOOL_BLOCK);
+  assert.equal(bulk.calls.length, 0);
+  assert.equal(apply.calls.length, 0);
+});
+
+test('dry-run ignores the bulk config entirely — every op is simulated, no bulk/per-op dispatch', async () => {
+  const cs = twoCategorize();
+  const bulk = spy();
+  const apply = spy();
+  const out = await applyChangeset(cs, bulkCtx({ dryRun: true, bulkApplyOp: bulk, applyOp: apply }));
+  assert.equal(bulk.calls.length, 0);
+  assert.equal(apply.calls.length, 0);
+  for (const r of out.results) {
+    assert.equal(r.status, STATUS.APPLIED);
+    assert.equal(r.detail.simulated, true);
+  }
 });

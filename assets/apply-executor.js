@@ -41,6 +41,23 @@
  * and the guardrail (assets/write-safety-guardrail.js) keep their CLIs; this does
  * not.
  *
+ *  - OPT-IN BULK DISPATCH. By default the executor applies one op per tool call
+ *    (`applyOp`). A write path that can collapse many same-type ops into a single
+ *    call (e.g. categorize → `ynab_update_transactions`) opts in by supplying a
+ *    `bulkToolMap` (op-type → bulk tool), a `bulkApplyOp(toolName, ops)` port, and
+ *    a `bulkFits(ops)` predicate. The executor still drift-checks, guardrails, and
+ *    audits EACH op individually — only the mutating dispatch of the survivors is
+ *    batched. If `bulkApplyOp` throws (the bulk shape was rejected at runtime), the
+ *    executor falls back to a per-op `applyOp` call for each op in that group, so a
+ *    bulk-capable path is never less safe than a per-op one. A bulk call that
+ *    RESOLVES is not assumed to have applied every op, and it is read FAIL-CLOSED:
+ *    the executor confirms `applied` ONLY for an op whose own per-entry `results`
+ *    record reports a written status (created / duplicate / updated). A failed
+ *    entry, an op with no matching entry, a `results` array that does not line up
+ *    one-to-one with the request, or a payload with no `results` array at all are
+ *    ALL audited as `error` — so the M4-3 trail never records `applied` for a
+ *    transaction the tool did not positively confirm.
+ *
  * Usage (M4-5 approval command, M4-6..M4-9 write paths):
  *   const { applyChangeset } = require('./assets/apply-executor');
  *   const outcome = await applyChangeset(changeset, {
@@ -50,6 +67,10 @@
  *     readLiveState: async (op) => ({ ...fields shaped like op.before }),
  *     applyOp: async (toolName, op) => ({ ...mcp result }),  // real apply only
  *     audit: async ({ operation, result, dryRun }) => { ... },
+ *     // Optional bulk capability (categorize / any batchable write path):
+ *     bulkToolMap: { categorize: '<namespaced bulk tool>', ... },
+ *     bulkApplyOp: async (toolName, ops) => ({ ...mcp result }),  // one call for the group
+ *     bulkFits: (ops) => ops.length >= 2 && ops.every(canFormOneBulkEntry),
  *   });
  *   // outcome.results: [{ op_id, status, dry_run, detail }, ...]
  */
@@ -134,13 +155,16 @@ function errMessage(err) {
 }
 
 /**
- * Process a single operation: re-read live state, detect drift, then either
- * produce a simulated diff (dry-run) or dispatch the mutating tool (real apply).
- * Never throws — a read or apply failure becomes a per-op `error` result so the
- * rest of the batch still proceeds.
- * @returns {Promise<{op_id:string|null, status:string, dry_run:boolean, detail:object}>}
+ * PREPARE one operation (both modes): re-read live state and drift-check, plus —
+ * on the real-apply path — the defense-in-depth per-op guardrail. Returns
+ * `{ ready: true }` when the op has survived and should be dispatched, or
+ * `{ result }` carrying a terminal per-op result (`error` / `skipped-stale` /
+ * `blocked`). Never throws — a read failure becomes an `error` result so the rest
+ * of the batch still proceeds. Dispatch (simulate / apply / bulk) is decided by
+ * the caller AFTER every op is prepared, so the survivors can be batched.
+ * @returns {Promise<{ready:true}|{result:{op_id:string|null, status:string, dry_run:boolean, detail:object}}>}
  */
-async function processOp(op, { activeBudgetId, dryRun, toolMap, readLiveState, applyOp }) {
+async function prepareOp(op, { activeBudgetId, dryRun, toolMap, readLiveState }) {
   const opId = op.id == null ? null : op.id;
 
   // Re-read live state before processing (both modes). A read failure is a per-op error.
@@ -148,41 +172,148 @@ async function processOp(op, { activeBudgetId, dryRun, toolMap, readLiveState, a
   try {
     live = await readLiveState(op);
   } catch (err) {
-    return { op_id: opId, status: STATUS.ERROR, dry_run: dryRun, detail: { phase: 'read', message: errMessage(err) } };
+    return { result: { op_id: opId, status: STATUS.ERROR, dry_run: dryRun, detail: { phase: 'read', message: errMessage(err) } } };
   }
 
   // Drift detection — compare live to the op's `before` snapshot.
   if (isStale(op.before, live)) {
-    return { op_id: opId, status: STATUS.SKIPPED_STALE, dry_run: dryRun, detail: { reason: 'stale', before: op.before, live } };
+    return { result: { op_id: opId, status: STATUS.SKIPPED_STALE, dry_run: dryRun, detail: { reason: 'stale', before: op.before, live } } };
   }
 
-  // Dry-run: a per-op simulated diff (expected before/after), no mutating tool invoked.
-  if (dryRun) {
-    return { op_id: opId, status: STATUS.APPLIED, dry_run: true, detail: { simulated: true, diff: { before: op.before, after: op.after } } };
-  }
+  // Dry-run never dispatches — the survivor is simulated in the dispatch phase.
+  if (dryRun) return { ready: true };
 
   // Real apply: re-run the guardrail adjacent to the call site (consumer contract —
   // evaluateOperation AND evaluateTool before each individual tool call). The
   // upfront evaluateChangeset + tool pre-flight already guarantee a pass here, so
   // this is defense-in-depth that must never fire; if it does, refuse the op.
-  const toolName = toolMap[op.type];
   const opVerdict = evaluateOperation(op, { activeBudgetId });
-  const toolVerdict = evaluateTool(toolName);
+  const toolVerdict = evaluateTool(toolMap[op.type]);
   if (opVerdict.verdict === 'block' || toolVerdict.verdict === 'block') {
     return {
-      op_id: opId,
-      status: STATUS.BLOCKED,
-      dry_run: false,
-      detail: { reason: 'guardrail_block', verdict: opVerdict.verdict === 'block' ? opVerdict : toolVerdict },
+      result: {
+        op_id: opId,
+        status: STATUS.BLOCKED,
+        dry_run: false,
+        detail: { reason: 'guardrail_block', verdict: opVerdict.verdict === 'block' ? opVerdict : toolVerdict },
+      },
     };
   }
+  return { ready: true };
+}
 
+/** A dry-run simulated diff for one prepared (survivor) op — no mutating tool invoked. */
+function simulateResult(op, dryRun) {
+  return {
+    op_id: op.id == null ? null : op.id,
+    status: STATUS.APPLIED,
+    dry_run: dryRun,
+    detail: { simulated: true, diff: { before: op.before, after: op.after } },
+  };
+}
+
+/** Dispatch one survivor via the per-op mutating tool. Never throws. */
+async function applyOneOp(op, { toolMap, applyOp }) {
+  const opId = op.id == null ? null : op.id;
+  const toolName = toolMap[op.type];
   try {
     const result = await applyOp(toolName, op);
     return { op_id: opId, status: STATUS.APPLIED, dry_run: false, detail: { tool: toolName, result: result == null ? null : result } };
   } catch (err) {
     return { op_id: opId, status: STATUS.ERROR, dry_run: false, detail: { phase: 'apply', tool: toolName, message: errMessage(err) } };
   }
+}
+
+/**
+ * The bulk per-entry statuses that CONFIRM a mutation. The vendored
+ * `ynab_update_transactions` reports one of created / duplicate / updated / failed
+ * per entry; only these three positively confirm the transaction was written.
+ * Anything else (a `failed` entry, an unknown status, or no entry at all) is
+ * unconfirmed and must fail closed — never recorded `applied`.
+ * @type {ReadonlySet<string>}
+ */
+const BULK_APPLIED_STATUSES = new Set(['created', 'duplicate', 'updated']);
+
+/**
+ * Read a resolved bulk result and decide each op's real per-entry outcome, FAILING
+ * CLOSED. A bulk tool that RESOLVES is NOT proof every op was mutated: the vendored
+ * `ynab_update_transactions` does not throw on a partial failure — it returns
+ * `{ success, summary: { failed }, results: [{ request_index, status,
+ * transaction_id, error, error_code, ... }] }`, where a per-entry status of
+ * created/duplicate/updated confirms a mutation, `failed` marks one that never
+ * happened, and top-level `success === (summary.failed === 0)`.
+ *
+ * An op is `applied` ONLY when the payload is well-shaped — a `results` array
+ * carrying exactly one entry per requested op — AND that op's own entry reports a
+ * confirmed status. Every other case fails CLOSED (`failed: true`, `unconfirmed`):
+ *  - no `results` array at all (an off-contract / `{}` payload);
+ *  - a `results` array whose length ≠ the request length (entries can't line up);
+ *  - an op with no matching entry, or an entry whose status isn't a confirmed apply.
+ * The audit trail must never record `applied` for a mutation the tool did not
+ * positively confirm — an unshaped-but-resolved payload is the worst failure
+ * direction, so it is treated as an unconfirmed error, never a blanket success.
+ * Each op is correlated to its entry by `request_index` (the index into the request
+ * array, which is `ops` order), falling back to `transaction_id`, then position.
+ * @param {unknown} result the resolved bulk-call payload.
+ * @param {number} opsCount how many ops went into the request (the shape cross-check).
+ * @returns {(op: object, i: number) => {failed: boolean, entry: object|null, unconfirmed: boolean}}
+ */
+function bulkOutcomeReader(result, opsCount) {
+  const entries = result && Array.isArray(result.results) ? result.results : null;
+  // Fail closed unless the payload lines up one-to-one with the request.
+  const shapeOk = entries != null && entries.length === opsCount;
+  return (op, i) => {
+    if (!shapeOk) return { failed: true, entry: null, unconfirmed: true };
+    const entry = entries.find((e) => e && e.request_index === i)
+      || entries.find((e) => e && e.transaction_id != null && e.transaction_id === op.transaction_id)
+      || entries[i]
+      || null;
+    if (!entry || !BULK_APPLIED_STATUSES.has(entry.status)) {
+      return { failed: true, entry: entry || null, unconfirmed: entry == null };
+    }
+    return { failed: false, entry, unconfirmed: false };
+  };
+}
+
+/**
+ * Dispatch a group of same-type survivors as a SINGLE bulk call. Two failure modes,
+ * both handled so the mandatory M4-3 audit trail never records `applied` for a
+ * mutation that did not happen:
+ *  - the bulk SHAPE is rejected (a thrown Error) → fall back to per-op `applyOp`
+ *    calls (safe only because a bulk-capable write path opts in for idempotent ops —
+ *    a re-applied categorize is a no-op-equivalent);
+ *  - the bulk call RESOLVES but reports per-entry failures → each failed entry maps
+ *    to an `error` result, not a blanket `applied`.
+ * Each op still got its own drift check, guardrail, and audit in the surrounding
+ * loop — only the mutating dispatch is batched here. Never throws.
+ * @returns {Promise<Array<object>>} one result per op, in the group's order.
+ */
+async function applyBulkGroup(ops, { bulkToolMap, bulkApplyOp, toolMap, applyOp }) {
+  const bulkTool = bulkToolMap[ops[0].type];
+  let result;
+  try {
+    result = await bulkApplyOp(bulkTool, ops);
+  } catch (err) {
+    const out = [];
+    for (const op of ops) out.push(await applyOneOp(op, { toolMap, applyOp }));
+    return out;
+  }
+  // Resolved — but inspect the payload FAIL-CLOSED: a resolved bulk result can
+  // still report per-entry failures, omit an op's entry, or be off-contract
+  // entirely, none of which throw. Only a positively-confirmed entry is `applied`.
+  const read = bulkOutcomeReader(result, ops.length);
+  return ops.map((op, i) => {
+    const opId = op.id == null ? null : op.id;
+    const { failed, entry, unconfirmed } = read(op, i);
+    if (failed) {
+      const message = (entry && (entry.error || entry.error_code))
+        || (unconfirmed
+          ? 'bulk update resolved without confirming this op — no matching per-entry result; recorded error, not applied (fail-closed)'
+          : 'bulk update reported this entry as failed');
+      return { op_id: opId, status: STATUS.ERROR, dry_run: false, detail: { phase: 'apply', tool: bulkTool, bulk: true, message, result: entry == null ? (result == null ? null : result) : entry } };
+    }
+    return { op_id: opId, status: STATUS.APPLIED, dry_run: false, detail: { tool: bulkTool, bulk: true, result: entry } };
+  });
 }
 
 /**
@@ -193,10 +324,16 @@ async function processOp(op, { activeBudgetId, dryRun, toolMap, readLiveState, a
  * so every attempt leaves a paper trail with `dry_run` stamped.
  */
 async function recordAudit(audit, op, result, changeset, toolMap, dryRun) {
+  // Record the tool that ACTUALLY ran when the result names one (a bulk dispatch
+  // records the bulk tool, not the per-op tool); otherwise fall back to the op's
+  // registered per-op tool (dry-run / skipped / blocked ops name no tool).
+  const tool = result && result.detail && typeof result.detail.tool === 'string'
+    ? result.detail.tool
+    : (toolMap[op.type] == null ? null : toolMap[op.type]);
   await audit({
     operation: op,
     result: {
-      tool: toolMap[op.type] == null ? null : toolMap[op.type],
+      tool,
       status: result.status,
       schema_version: changeset.schema_version == null ? null : changeset.schema_version,
       run_id: changeset.source == null ? null : changeset.source,
@@ -223,7 +360,15 @@ async function recordAudit(audit, op, result, changeset, toolMap, dryRun) {
  * @param {(op:object)=>(object|Promise<object>)} options.readLiveState REQUIRED — resolves
  *   live entity state for drift detection (read-only namespaced MCP reads).
  * @param {(toolName:string, op:object)=>(unknown|Promise<unknown>)} [options.applyOp] REQUIRED
- *   when dryRun is false — dispatches the mutating tool.
+ *   when dryRun is false — dispatches the mutating tool for one op.
+ * @param {Record<string,string>} [options.bulkToolMap={}] op-type → namespaced BULK tool.
+ *   Supplying it (with bulkApplyOp + bulkFits) opts an op type into single-call batch
+ *   dispatch of its survivors; every op is still drift-checked, guardrailed, and audited.
+ * @param {(toolName:string, ops:object[])=>(unknown|Promise<unknown>)} [options.bulkApplyOp]
+ *   dispatches one bulk tool call for a group of same-type survivors; a throw falls back
+ *   to per-op applyOp for that group (safe for idempotent writes).
+ * @param {(ops:object[])=>boolean} [options.bulkFits] predicate: may this group of same-type
+ *   survivors go through one bulk call? False → the group applies per-op.
  * @param {(record:{operation:object, result:object, dryRun:boolean})=>(void|Promise<void>)}
  *   options.audit REQUIRED — the append-only audit sink (M4-3).
  * @returns {Promise<{ok:boolean, dry_run:boolean, aborted:boolean, reason:string,
@@ -231,7 +376,10 @@ async function recordAudit(audit, op, result, changeset, toolMap, dryRun) {
  *   results:Array<{op_id:string|null, status:string, dry_run:boolean, detail:object}>}>}
  */
 async function applyChangeset(changeset, options = {}) {
-  const { activeBudgetId, dryRun = true, toolMap = {}, readLiveState, applyOp, audit } = options;
+  const {
+    activeBudgetId, dryRun = true, toolMap = {}, readLiveState, applyOp, audit,
+    bulkToolMap = {}, bulkApplyOp, bulkFits,
+  } = options;
 
   // Contract — fail fast on a misconfigured caller before touching the change-set.
   // activeBudgetId is MANDATORY: the caller resolves the active budget (the one the
@@ -277,12 +425,24 @@ async function applyChangeset(changeset, options = {}) {
   // 3. Real-apply tool pre-flight — resolve and guardrail-check every mutating tool
   //    BEFORE applying anything, so a misconfigured/denied toolMap aborts the whole
   //    batch all-or-nothing (never a partial apply around a tool block). Dry-run
-  //    never dispatches a mutating tool, so it skips this.
+  //    never dispatches a mutating tool, so it skips this. A bulk-capable op type is
+  //    checked on BOTH its per-op tool and its bulk tool — the bulk path falls back to
+  //    the per-op tool, so both must be allow-listed for the group to be safe.
   if (!dryRun) {
-    const toolBlocks = changeset.operations
-      .map((op) => ({ op, verdict: evaluateTool(toolMap[op.type]) }))
-      .filter(({ verdict }) => verdict.verdict === 'block')
-      .map(({ op, verdict }) => ({ op_id: op.id == null ? null : op.id, op_type: op.type, verdict }));
+    const toolBlocks = [];
+    for (const op of changeset.operations) {
+      const opId = op.id == null ? null : op.id;
+      const singleVerdict = evaluateTool(toolMap[op.type]);
+      if (singleVerdict.verdict === 'block') {
+        toolBlocks.push({ op_id: opId, op_type: op.type, verdict: singleVerdict });
+        continue;
+      }
+      const bulkTool = bulkToolMap[op.type];
+      if (bulkTool !== undefined) {
+        const bulkVerdict = evaluateTool(bulkTool);
+        if (bulkVerdict.verdict === 'block') toolBlocks.push({ op_id: opId, op_type: op.type, verdict: bulkVerdict });
+      }
+    }
     if (toolBlocks.length > 0) {
       const blocked = new Map(toolBlocks.map((t) => [t.op_id, t.verdict]));
       const results = changeset.operations.map((op) => {
@@ -298,12 +458,53 @@ async function applyChangeset(changeset, options = {}) {
     }
   }
 
-  // 4. Per-op loop — apply in array order; one audit record per op processed.
-  const results = [];
+  // 4. Prepare every op (read → drift-check → per-op guardrail), preserving array
+  //    order, so the survivors are known before any dispatch and can be batched.
+  const prepared = [];
   for (const op of changeset.operations) {
-    const result = await processOp(op, { activeBudgetId, dryRun, toolMap, readLiveState, applyOp });
-    await recordAudit(audit, op, result, changeset, toolMap, dryRun);
-    results.push(result);
+    prepared.push({ op, prep: await prepareOp(op, { activeBudgetId, dryRun, toolMap, readLiveState }) });
+  }
+
+  // 5. Dispatch the survivors. Terminal (error/skipped-stale/blocked) results are
+  //    already set; each survivor is filled in by index so array order is preserved.
+  const resultByIndex = new Array(prepared.length);
+  const readyIndices = [];
+  prepared.forEach(({ prep }, i) => {
+    if (prep.result) resultByIndex[i] = prep.result;
+    else readyIndices.push(i);
+  });
+
+  if (dryRun) {
+    // No mutating dispatch — every survivor is simulated (diff only).
+    for (const i of readyIndices) resultByIndex[i] = simulateResult(prepared[i].op, true);
+  } else {
+    // Group survivors by op-type; a type with a bulk port whose group `bulkFits`
+    // goes through ONE bulk call, else each op applies per-op. Grouping preserves
+    // each op's original index for order-stable result placement.
+    const groups = new Map();
+    for (const i of readyIndices) {
+      const type = prepared[i].op.type;
+      if (!groups.has(type)) groups.set(type, []);
+      groups.get(type).push(i);
+    }
+    for (const [type, indices] of groups) {
+      const ops = indices.map((i) => prepared[i].op);
+      const canBulk = typeof bulkApplyOp === 'function' && bulkToolMap[type] !== undefined
+        && typeof bulkFits === 'function' && bulkFits(ops);
+      if (canBulk) {
+        const groupResults = await applyBulkGroup(ops, { bulkToolMap, bulkApplyOp, toolMap, applyOp });
+        indices.forEach((i, k) => { resultByIndex[i] = groupResults[k]; });
+      } else {
+        for (const i of indices) resultByIndex[i] = await applyOneOp(prepared[i].op, { toolMap, applyOp });
+      }
+    }
+  }
+
+  // 6. Audit every op once, in array order — dry-run and real, applied and skipped.
+  const results = [];
+  for (let i = 0; i < prepared.length; i += 1) {
+    await recordAudit(audit, prepared[i].op, resultByIndex[i], changeset, toolMap, dryRun);
+    results.push(resultByIndex[i]);
   }
 
   return {
