@@ -511,4 +511,117 @@ test_rerun_into_existing_dir_preserves_prior_report() {
   assert_file_exists "$first"          # the first report survives the second run
 }
 
+# Regression (round-2-since-reset blocker): a MALFORMED template marker must fail
+# LOUDLY (exit 2, no file), never be swallowed into a silently-corrupt exit-0
+# report. Shape 1 — an UNCLOSED opener before a real, supplied marker: the old
+# `%%` name-grab consumed the tail as a composite name, the real slot was never
+# filled, and the writer wrote a byte-identical-to-template report at exit 0.
+test_unclosed_template_marker_is_refused() {
+  local tmpl="$SANDBOX/unclosed.html" dir="$SANDBOX/unclosed-out" rc=0 out err
+  # `<!-- SLOT:foo` is never closed; `<!-- SLOT:bar -->` is a genuine slot. Without
+  # the guard the fill loop drops `bar` and exits 0 (Holmes's exact repro).
+  printf '<!-- SLOT:foo\n<!-- SLOT:bar -->\n' > "$tmpl"
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" bash "$WRITER" \
+            --template "$tmpl" --output-dir "$dir" \
+            --tier Weekly --date 2026-06-22 \
+            --slot 'bar=<p>REAL</p>' 2>"$SANDBOX/unclosed.err" )" || rc=$?
+  err="$(cat "$SANDBOX/unclosed.err")"
+  assert_eq "2" "$rc" "an unclosed SLOT marker → usage error (exit 2)"
+  assert_eq "" "$out" "no success path leaked to stdout for a malformed template"
+  assert_contains "$err" "malformed" "error explains the malformed template"
+  [ -e "$dir/YNAB-Weekly-Review-2026-06-22.html" ] \
+    && fail "writer wrote a file despite a malformed template"
+  return 0
+}
+
+# Shape 2 — a malformed opener BEFORE a real marker on ONE line: the old `%%`
+# match extended the name through the genuine marker's ` -->`, so the real slot
+# was silently never filled (exit 0). The guard rejects it before any write.
+test_malformed_opener_before_real_marker_is_refused() {
+  local tmpl="$SANDBOX/malopener.html" dir="$SANDBOX/malopener-out" rc=0 out err
+  printf '<body>Head <!-- SLOT:oops something <!-- SLOT:real --> Tail</body>\n' > "$tmpl"
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" bash "$WRITER" \
+            --template "$tmpl" --output-dir "$dir" \
+            --tier Weekly --date 2026-06-22 \
+            --slot 'real=REALVALUE' 2>"$SANDBOX/malopener.err" )" || rc=$?
+  err="$(cat "$SANDBOX/malopener.err")"
+  assert_eq "2" "$rc" "a malformed opener before a real marker → usage error (exit 2)"
+  assert_eq "" "$out" "no success path leaked to stdout for a malformed template"
+  assert_contains "$err" "malformed" "error explains the malformed template"
+  [ -e "$dir/YNAB-Weekly-Review-2026-06-22.html" ] \
+    && fail "writer wrote a file despite a malformed template"
+  return 0
+}
+
+# AC #4 (braced form): the BRACED `${VAR}` env-var syntax — not just bare `$VAR` —
+# in .report.output_dir is resolved to the variable's value. Mutation-confirmed
+# gap last round: deleting the `${…}` alternative from expand_path's regex left
+# the bare-$VAR test green. Single-quoted heredoc so `${VAR}` reaches the writer
+# UNEXPANDED (the parent shell must not pre-expand it).
+test_braced_env_var_in_output_dir_is_resolved() {
+  local cfg="$SANDBOX/braced-env-dir.json" out
+  cat > "$cfg" <<'JSON'
+{ "report": { "output_dir": "${YNAB_REPORTS_BRACED}/nested" } }
+JSON
+  export YNAB_REPORTS_BRACED="$SANDBOX/braced-root"
+  out="$( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 )"
+  unset YNAB_REPORTS_BRACED
+  assert_eq "$SANDBOX/braced-root/nested/YNAB-Weekly-Review-2026-06-22.html" "$out" \
+    "braced \${VAR} in output_dir resolved to the variable's value"
+  assert_file_exists "$out"
+}
+
+# Non-blocking follow-up (round 2 since reset): a DUPLICATE --slot name is
+# rejected at PARSE time (exit 2) rather than silently keeping the first value —
+# the opposite of the conventional last-wins idiom, and a near-certain caller bug
+# for a strict one-`--slot`-per-block-slot contract.
+test_duplicate_slot_name_is_rejected() {
+  local rc=0 err
+  err="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" bash "$WRITER" \
+            --template "$FIXTURE_TEMPLATE" --output-dir "$SANDBOX/dup" \
+            --tier Weekly --date 2026-06-22 \
+            --slot 'kpi-dashboard=<div>first</div>' \
+            --slot 'kpi-dashboard=<div>second</div>' \
+            --slot 'section-1-classification=<div>y</div>' \
+            --slot 'footer-persona=Hobbes' 2>&1 )" || rc=$?
+  assert_eq "2" "$rc" "a duplicate --slot name → usage error (exit 2)"
+  assert_contains "$err" "duplicate --slot name" "error explains the duplicate slot"
+  [ -e "$SANDBOX/dup/YNAB-Weekly-Review-2026-06-22.html" ] \
+    && fail "writer wrote a file despite a duplicate --slot name"
+  return 0
+}
+
+# Non-blocking follow-up (defense-in-depth): html_escape also escapes the
+# apostrophe (`&#39;`), so an output path containing a single quote is inert even
+# if a future template ever placed {{output_path}} inside a single-quoted attr.
+test_output_path_single_quote_is_escaped() {
+  local dir="$SANDBOX/quote'd-reports" out body
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" \
+          run_writer_fixture --tier Weekly --date 2026-06-22 --output-dir "$dir" )"
+  assert_file_exists "$out"
+  body="$(cat "$out")"
+  assert_contains "$body" "&#39;" "a single quote in the output path is escaped to &#39;"
+  case "$body" in *"quote'd-reports"*) fail "a raw single quote leaked into the report body" ;; esac
+}
+
+# Security regression (round-1 follow-up): command / arithmetic substitution in
+# .report.output_dir is NEVER executed. expand_path resolves only $VAR / ${VAR},
+# so `$(…)`, backticks, and `$((…))` land as INERT LITERAL directory-name text —
+# an eval would run the payload. Pins the no-eval property (mutation: swapping
+# expand_path for an eval creates $marker → this test goes red).
+test_command_substitution_in_output_dir_is_inert() {
+  local marker="$SANDBOX/PWNED" cfg="$SANDBOX/inert.json" dir out
+  rm -f "$marker"
+  # A dir name embedding $(…), `…`, and $((…)). Backslash-escaped so the PARENT
+  # shell never evaluates them either — only the writer's expand_path sees them.
+  # $marker interpolates to an absolute path (no literal $ left for the writer).
+  dir="$SANDBOX/inert-\$(touch $marker)-\`touch $marker\`-\$((99))"
+  # printf writes the payload LITERALLY into the config (%s), so nothing runs at
+  # config-write time — the writer is the only thing that ever reads it.
+  printf '{ "report": { "output_dir": "%s" } }\n' "$dir" > "$cfg"
+  out="$( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 )"
+  [ -e "$marker" ] && fail "a substitution in output_dir was executed — the no-eval property is broken"
+  assert_file_exists "$out"
+}
+
 run_tests

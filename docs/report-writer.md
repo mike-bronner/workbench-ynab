@@ -61,7 +61,9 @@ report-writer.sh \
   itself contain `=` (HTML attributes are fine). One `--slot` per block slot in
   [`assets/report/SLOTS.md`](../assets/report/SLOTS.md). The **name** is validated
   at parse time — only lowercase letters, digits, and hyphens — so a glob
-  metachar can never reach the literal substitution.
+  metachar can never reach the literal substitution. Supply each block slot
+  **exactly once**: a **duplicate** `--slot name` is a usage error (rather than
+  silently keeping the first value and dropping the rest).
 - The three **scalar slots** are filled by the writer, not the caller: `{{tier}}`
   and `{{report_date}}` from the flags, and `{{output_path}}` from the path the
   writer itself decides (never hardcoded in the template). All three are
@@ -99,7 +101,10 @@ nothing to report is supplied as the literal **`no findings`**, which the writer
 renders as an **empty section** (the surrounding `<section>` stays, per
 [`SLOTS.md`](../assets/report/SLOTS.md)). The required set is derived from the
 template itself (a scan for `<!-- SLOT:name -->`), so it can never drift from a
-hardcoded list here.
+hardcoded list here. A **malformed** `<!-- SLOT:` marker (unclosed, or a name
+outside `[a-z0-9-]`) is rejected as a **usage error before any write** — every
+`<!-- SLOT:` opener must be a well-formed `<!-- SLOT:name -->` marker — so a
+corrupt template can never produce a silently-wrong report.
 
 If a required slot is **unsupplied or supplied empty** (without the `no findings`
 sentinel), the writer prints the offending slot names to stderr and **exits
@@ -116,7 +121,7 @@ visible rather than masquerading as a plain "missing slot".
 |---|---|
 | `0` | Report written; the absolute path is on stdout. |
 | `1` | A required slot was missing or empty — **no file written**. |
-| `2` | Usage error: bad flag, bad `--tier`, an out-of-range or malformed `--date`, an unknown or invalid slot name, an output dir that resolves to empty or to the filesystem root `/`, or a missing template. |
+| `2` | Usage error: bad flag, bad `--tier`, an out-of-range or malformed `--date`, an unknown, invalid, or **duplicate** slot name, an output dir that resolves to empty or to the filesystem root `/`, or a **missing or malformed** template. |
 
 ## Portability
 

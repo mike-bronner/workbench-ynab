@@ -121,18 +121,22 @@ expand_path() {
   printf '%s' "$p"
 }
 
-# html_escape <string> — escape the four HTML metacharacters so a scalar the
-# writer injects into the report (the output path, the tier, the date) can never
-# break out of an attribute or inject an element. The writer OWNS escaping the
-# scalars it places; fragment values are escaped by their producer (the review
-# skill's trust-boundary rule). '&' is replaced first so entities it introduces
-# are not double-escaped.
+# html_escape <string> — escape the five HTML metacharacters (`&`, `<`, `>`, `"`,
+# `'`) so a scalar the writer injects into the report (the output path, the tier,
+# the date) can never break out of an attribute or inject an element. The writer
+# OWNS escaping the scalars it places; fragment values are escaped by their
+# producer (the review skill's trust-boundary rule). '&' is replaced first so
+# entities it introduces are not double-escaped. The apostrophe (`&#39;`) is
+# defense-in-depth: the frozen template only ever places scalars in double-quoted
+# attributes or text nodes, but escaping it too means a future single-quoted
+# attribute could never be broken out of either.
 html_escape() {
   local s="$1"
   s="${s//&/&amp;}"
   s="${s//</&lt;}"
   s="${s//>/&gt;}"
   s="${s//\"/&quot;}"
+  s="${s//\'/&#39;}"
   printf '%s' "$s"
 }
 
@@ -174,6 +178,15 @@ while [ "$#" -gt 0 ]; do
       case "$slot_name" in
         ""|*[!a-z0-9-]*) usage_err "invalid --slot name '$slot_name' (allowed: lowercase letters, digits, hyphen)" ;;
       esac
+      # Reject a DUPLICATE --slot name loudly. Slot resolution keeps the FIRST
+      # occurrence (slot_index returns the earliest match) — the opposite of the
+      # conventional last-wins flag idiom — so a repeated name would silently drop
+      # the caller's later value. For a strict one-`--slot`-per-block-slot contract
+      # a duplicate is a near-certain mistake; fail rather than guess which wins.
+      for (( dup_i = 0; dup_i < ${#slot_names[@]}; dup_i++ )); do
+        [ "${slot_names[$dup_i]}" = "$slot_name" ] \
+          && usage_err "duplicate --slot name '$slot_name' (supply each block slot exactly once)"
+      done
       slot_names+=("$slot_name")
       slot_values+=("${2#*=}")     # value = everything after it (HTML may contain '=')
       shift 2
@@ -248,6 +261,23 @@ out_path="${out_dir}/YNAB-${tier}-Review-${date}.html"
 if [ -e "$out_path" ] && [ ! -f "$out_path" ]; then
   err "refusing to write — output path exists and is not a regular file (a directory?): $out_path"
   exit 1
+fi
+
+# --- reject a MALFORMED template BEFORE deriving slots (fail loud, no write) --
+# The single-pass fill loop below trusts every literal `<!-- SLOT:` opener to be
+# closed by its OWN ` -->`. A malformed opener — unclosed (no ` -->` before EOL),
+# or a name with characters outside [a-z0-9-] — is otherwise swallowed into a
+# composite "name" that never resolves: the loop re-emits the span verbatim and,
+# when the malformed opener precedes a real marker, silently drops that real slot
+# — an exit-0 corrupt report, the one thing this writer must never produce. The
+# required-slot grep below matches only WELL-FORMED markers, so a malformed one
+# never even reaches the completeness gate. Guard it here: the count of raw
+# `<!-- SLOT:` openers must equal the count of well-formed `<!-- SLOT:name -->`
+# markers, or the template is malformed and we refuse loudly (exit 2, no file).
+raw_slot_openers="$(grep -oE '<!-- SLOT:' "$template" | wc -l | tr -d '[:space:]')"
+wellformed_slots="$(grep -oE '<!-- SLOT:[a-z0-9-]+ -->' "$template" | wc -l | tr -d '[:space:]')"
+if [ "$raw_slot_openers" != "$wellformed_slots" ]; then
+  usage_err "malformed <!-- SLOT: --> marker in template — every slot marker must match '<!-- SLOT:name -->' (name: lowercase letters, digits, hyphen): $template"
 fi
 
 # --- required block slots are whatever the (frozen) template declares -------
