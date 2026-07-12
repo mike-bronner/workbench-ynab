@@ -223,6 +223,15 @@ pre-approving the tools. The write tools are approved in **Sprint 4** behind tha
 guardrail. (Writes are ledger-only inside YNAB — categorize / allocate / dedup /
 reconcile — never external money movement.)
 
+> **Write pre-approval is a manual opt-in — setup never seeds a write verb.**
+> Even in Sprint 4, this command only pre-approves reads. To silence the
+> redundant per-call dialog on the gated write tools, follow the permission
+> notes in [`docs/mcp-capability-map.md`](../docs/mcp-capability-map.md): they
+> give the exact tight set (the four write tools by full name, `delete`
+> deliberately withheld to keep its own confirmation path) and the
+> `~/.claude/settings.json` snippet to add. Never blanket-approve the family
+> wildcard, and never add the delete verb.
+
 **Source the names from the SSoT, never inline them.** The concrete read-tool
 names live in `${CLAUDE_PLUGIN_ROOT}/skills/protocol/ynab-tools.md` under
 **## Read tools**; read them at runtime so a namespace change is a one-file edit:
