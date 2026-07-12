@@ -347,16 +347,41 @@ html="${html//\{\{tier\}\}/$(html_escape "$tier_display")}"
 html="${html//\{\{report_date\}\}/$(html_escape "$date")}"
 html="${html//\{\{output_path\}\}/$(html_escape "$out_path")}"
 
-# Block slots. Literal bash substitution (the persona.sh idiom): the needle is
-# quoted so it is matched literally (no glob), and the replacement is verbatim —
-# safe for arbitrary HTML in a fragment value.
-for (( i = 0; i < ${#slot_names[@]}; i++ )); do
-  n="${slot_names[$i]}"
-  v="${slot_values[$i]}"
-  [ "$(trim "$v")" = "no findings" ] && v=""   # explicit-empty sentinel → empty section
-  needle="<!-- SLOT:${n} -->"
-  html="${html//"$needle"/$v}"
+# Block slots — filled in a SINGLE left-to-right pass over the template so a
+# fragment's value is NEVER re-scanned. A per-slot global `${html//needle/value}`
+# re-examines the cumulatively-grown string, so a fragment whose own text
+# contains a *later* slot's marker (`<!-- SLOT:name -->`) would have that marker
+# rewritten by the later pass — splicing one section's content into another. This
+# is the block-vs-block twin of the scalar-first ordering above: the scalars are
+# substituted before fragments for the same reason, but that never protected
+# fragment-vs-fragment. Walking the template once and appending each resolved
+# value into an accumulator that is never re-read leaves an embedded marker inside
+# a fragment verbatim, so arbitrary HTML in a fragment value is genuinely safe.
+assembled=""
+rest="$html"
+while :; do
+  # Everything before the next block marker (or the whole tail if none remain).
+  prefix="${rest%%<!-- SLOT:*}"
+  if [ "$prefix" = "$rest" ]; then
+    assembled="${assembled}${rest}"     # no marker left — emit the tail and stop
+    break
+  fi
+  assembled="${assembled}${prefix}"     # verbatim template text up to the marker
+  after_open="${rest#"$prefix"<!-- SLOT:}"
+  n="${after_open%% -->*}"              # slot name = up to the first " -->"
+  # Resolve this marker's value. Every lowercase name the template declares is a
+  # required slot with a supplied value (the completeness check above guaranteed
+  # it); a marker whose name is unrecognised is emitted verbatim, never dropped.
+  if idx="$(slot_index "$n")"; then
+    v="${slot_values[$idx]}"
+    [ "$(trim "$v")" = "no findings" ] && v=""   # explicit-empty sentinel → empty section
+    assembled="${assembled}${v}"
+  else
+    assembled="${assembled}<!-- SLOT:${n} -->"
+  fi
+  rest="${after_open#"$n" -->}"         # continue after THIS marker only
 done
+html="$assembled"
 
 # --- write + emit the path --------------------------------------------------
 # Gate every step: a helper whose contract is "no partial/empty reports" must
