@@ -2,7 +2,7 @@ name: test
 
 # Run the full test suite on every push and pull request (issue #11 review
 # follow-up). `scripts/test.sh` is the single entrypoint (issue #16): it
-# auto-discovers every tests/**/*.test.sh (bash suite) and tests/**/*.test.mjs
+# auto-discovers every tests/**/*.test.sh (bash suite) and tests/**/*.test.{mjs,js}
 # (Node suite, built-in node:test). Before this workflow those ran only locally,
 # so neither the bash unit tests nor the Node suite gated a PR — only
 # secret-scan.yml did. This closes that gap.
@@ -41,7 +41,35 @@ jobs:
         run: |
           files=()
           while IFS= read -r f; do files+=("$f"); done < <(
-            find tests -type f \( -name '*.test.sh' -o -name '*.test.mjs' \) \
+            find tests -type f \( -name '*.test.sh' -o -name '*.test.mjs' -o -name '*.test.js' \) \
               -not -path 'tests/lib/*' -not -name 'persona-loader.test.sh' | sort
           )
           bash scripts/test.sh "${files[@]}"
+
+  # The assets/ change-set integration suite (M4) exercises the real apply
+  # executor and the Ajv-backed validator end to end (assets/test/*.test.js), so
+  # unlike the dependency-free `test` job above it MUST install assets/ deps
+  # (ajv, ajv-formats) first. Kept a SEPARATE job so the offline-boot proof in
+  # `test` stays pristine — no node_modules ever lands on that job's resolution
+  # path. These tests live OUTSIDE tests/ precisely because they need deps; the
+  # tests/ suite stays node:-built-ins-only (docs/testing.md). Discovery is npm's
+  # built-in `node --test` (assets/package.json `test` script), so new assets
+  # integration tests gate here automatically with no edit.
+  assets-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      # `npm ci` against the committed assets/package-lock.json — a reproducible,
+      # pinned install (matches the repo's supply-chain posture: vendored-bundle
+      # SHA verification, secret scanning).
+      - name: Install assets deps and run the M4 integration suite
+        run: |
+          npm --prefix assets ci
+          npm --prefix assets test

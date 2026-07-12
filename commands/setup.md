@@ -1,5 +1,5 @@
 ---
-description: Configure the workbench-ynab plugin — verify prerequisites, store the YNAB token in the Keychain, collect config interactively, write config.json, pre-approve the read-only YNAB tools, and prove the vendored MCP boots and lists budgets. Idempotent — re-run after a plugin update.
+description: Configure the workbench-ynab plugin — verify prerequisites, store the YNAB token in the Keychain, collect config interactively, write config.json, pre-approve the read-only YNAB tools, prove the vendored MCP boots and lists budgets, and deploy the proactive-monitor scheduled task from config. Idempotent — re-run after a plugin update.
 ---
 
 The user has invoked `/workbench-ynab:setup`. Walk them through the one-time (or
@@ -72,12 +72,15 @@ If anything is missing, **stop here** — do not run any further step.
 ### 1b. Scheduled-tasks MCP probe (report-only, never hard-stops)
 
 Call `mcp__scheduled-tasks__list_scheduled_tasks` to confirm the scheduled-tasks
-MCP is reachable. A later milestone schedules the weekly review through it, so
-this is an early heads-up, not a gate:
+MCP is reachable. Step 7 deploys the proactive-monitor task through it, so this
+is an early heads-up (and the source of the existing-task list Step 7 reuses),
+not a gate:
 
-- **Reachable** → report `✅ scheduled-tasks MCP reachable`.
-- **Unavailable / errors** → report `⚠ scheduled-tasks MCP not reachable — the
-  weekly review can't be scheduled until it is, but setup continues.`
+- **Reachable** → set `SCHEDULING_AVAILABLE=true`, keep the returned task list
+  for Step 7, and report `✅ scheduled-tasks MCP reachable`.
+- **Unavailable / errors** → set `SCHEDULING_AVAILABLE=false` and report
+  `⚠ scheduled-tasks MCP not reachable — the ynab-monitor task can't be deployed
+  until it is, but setup continues.`
 
 Either way, **continue to Step 2** — unavailability never stops setup.
 
@@ -300,7 +303,74 @@ read-only — **no YNAB data is mutated during setup.**
   > (`ynab-mcp / access-token`). Confirm the token is valid and re-run
   > /workbench-ynab:setup."
 
-## Step 7 — Final summary
+## Step 7 — Deploy the monitoring scheduled task (M6)
+
+The proactive between-run monitor runs on its **own** recurring schedule,
+distinct from the weekly review. This step deploys — or removes — the
+`ynab-monitor` scheduled task straight from config, following the unified-task
+pattern in `workbench-bujo` (one task, cadence from config). It is **idempotent**:
+a re-run syncs an existing task instead of duplicating it.
+
+**Gate:** only run this step when the scheduled-tasks MCP was reachable in
+Step 1b (`SCHEDULING_AVAILABLE == true`). If it was not, skip the whole step —
+say `⚠ Skipping ynab-monitor deployment (scheduled-tasks MCP not reachable) — re-run /workbench-ynab:setup once it is.` — and continue to Step 8.
+
+1. **Read the monitor schedule from config** (cadence is config-driven — never
+   hardcode the cron here). Apply the documented defaults when the block or a
+   field is absent: `cron = "0 8 * * *"` (daily 08:00), `enabled = true`:
+
+   ```bash
+   MON_ENABLED="$(jq -r 'if .schedules.monitor.enabled == false then "false" else "true" end' "$CONFIG_FILE" 2>/dev/null)"
+   MON_CRON="$(jq -r '.schedules.monitor.cron // "0 8 * * *"' "$CONFIG_FILE" 2>/dev/null)"
+   ```
+
+   The `enabled` gate must **not** use `jq`'s `//` operator: `//` is the
+   *alternative* operator, falling through on `null` **and on `false`**, so
+   `.schedules.monitor.enabled // true` collapses a literal `false` back to
+   `true` and the disable branch (Step 7.4) becomes dead code. Comparing
+   `== false` directly is what keeps that branch reachable, and it still
+   defaults absent/null to enabled (`null == false` is `false` → `"true"`),
+   mirroring the repo's own `rule.enabled !== false` idiom
+   (`lib/tax/classifyTransaction.mjs`). Only a literal `false` disables.
+
+2. **Resolve the task prompt** from the template at
+   `${CLAUDE_PLUGIN_ROOT}/assets/prompt-templates/ynab-monitor.prompt.md` (read it
+   at runtime — never inline the prompt so a template edit is a one-file change).
+   If the file is somehow missing, fall back to this inline prompt:
+
+   ```text
+   Invoke /workbench-ynab:ynab-monitor — run one proactive between-run
+   monitoring pass. Pause at the first interactive prompt if no user is present
+   (never fabricate, never auto-complete), and exit silently when nothing changed.
+   ```
+
+3. **When `MON_ENABLED` is `true` — deploy or sync.** Look for an existing task
+   with id `ynab-monitor` in the Step 1b task list:
+
+   - **Not present** → call `mcp__scheduled-tasks__create_scheduled_task` with:
+     - `taskId`: `ynab-monitor`
+     - `description`: `YNAB proactive between-run monitoring poll`
+     - `cronExpression`: `$MON_CRON`
+     - `prompt`: the resolved template
+   - **Already present** → call `mcp__scheduled-tasks__update_scheduled_task` for
+     `taskId: ynab-monitor` to sync its `cronExpression` and `prompt`. Re-running
+     setup never creates a duplicate — this is the idempotent path.
+
+   Report `✅ ynab-monitor scheduled — cron "<MON_CRON>"`.
+
+4. **When `MON_ENABLED` is `false` — remove or disable.** If a task with id
+   `ynab-monitor` exists, call `mcp__scheduled-tasks__delete_scheduled_task` with
+   `taskId: ynab-monitor` (or disable it if delete is unavailable) and report
+   `✅ ynab-monitor task removed (schedules.monitor.enabled: false)`. If none
+   exists, do nothing and report `✅ ynab-monitor not scheduled (schedules.monitor.enabled: false)` —
+   never claim "removed" when nothing was deleted.
+
+5. **Never touch the weekly review.** `ynab-monitor` is a **distinct** task id;
+   this step never creates, updates, or deletes the `ynab-review` task (or any
+   other task). Only `taskId: ynab-monitor` is ever passed to a mutating call
+   here.
+
+## Step 8 — Final summary
 
 Print a clean summary block:
 
@@ -313,6 +383,7 @@ Print a clean summary block:
   Keychain:        ynab-mcp / access-token   ✅ confirmed
   Tools approved:  read-only YNAB tools (writes gated until Sprint 4)
   Budgets seen:    <name>, <name>, …
+  Monitor task:    ynab-monitor — cron "<MON_CRON>"   (or "disabled" / "skipped")
 
   Re-run /workbench-ynab:setup any time — it is idempotent and the
   recommended step after a plugin update.
@@ -320,18 +391,23 @@ Print a clean summary block:
 ```
 
 Substitute the actual budget names from Step 6 (or note the MCP wasn't reachable
-if Step 6 failed).
+if Step 6 failed), and the monitor line from Step 7 (`cron "<MON_CRON>"` when
+deployed, `disabled` when `schedules.monitor.enabled: false`, or `skipped` when
+the scheduled-tasks MCP was unreachable).
 
 ## Notes — idempotency & boundaries
 
 - **Idempotent throughout.** Every step checks state first: the token check
   (Step 2) skips the prompt when present, the config read (Step 3) pre-fills
-  defaults, the config write (Step 4) merges rather than overwrites, and the
-  pre-approval (Step 5) de-dupes. Re-running after a plugin update is the
-  intended refresh path.
+  defaults, the config write (Step 4) merges rather than overwrites, the
+  pre-approval (Step 5) de-dupes, and the monitor-task deploy (Step 7) syncs an
+  existing `ynab-monitor` task via `update_scheduled_task` rather than creating a
+  duplicate. Re-running after a plugin update is the intended refresh path.
 - **Token vs. config split.** The Keychain holds the token; `config.json` holds
   budget / business / tax / persona / report settings. The vendored MCP receives
   only the token (via `bin/launcher.sh`) — it never reads `config.json`.
-- **Read-only setup.** The only MCP call setup makes is the budgets-list read in
-  Step 6. Setup never moves money or mutates YNAB data.
+- **No YNAB writes.** The only YNAB MCP call setup makes is the budgets-list
+  read in Step 6 — setup never moves money or mutates YNAB data. The other MCP
+  it touches is the scheduled-tasks MCP in Step 7, and only to deploy/sync/remove
+  the plugin's own `ynab-monitor` task; the `ynab-review` task is never touched.
 - **macOS-only.** Token storage uses the macOS `security` Keychain CLI.

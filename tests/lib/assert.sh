@@ -86,7 +86,7 @@ fail() {
 
 # run_tests — discover and run every test_* function defined by the caller.
 run_tests() {
-  local fns fn failed=0 total=0
+  local fns fn failed=0 total=0 rc
   fns=$(declare -F | awk '{print $3}' | grep '^test_' || true)
   if [ -z "$fns" ]; then
     # A *.test.sh file that defines no test_* functions ran nothing. For a
@@ -98,7 +98,19 @@ run_tests() {
   fi
   for fn in $fns; do
     total=$((total + 1))
-    if ( set -euo pipefail; "$fn" ); then
+    # Run each test in an isolated subshell, but as a STANDALONE command — never
+    # as an `if`/`&&`/`||` condition. Bash ignores `set -e` inside a compound
+    # command that runs in a condition context, *even when -e is re-set inside
+    # it*, so `if ( set -e; "$fn" )` would let a NON-final failed assertion be
+    # swallowed and the test pass on its last command's status. Bracketing the
+    # standalone subshell with `set +e`/`set -e` makes the subshell's own `set -e`
+    # authoritative for every assertion and captures the result in $rc without
+    # aborting this runner.
+    set +e
+    ( set -euo pipefail; "$fn" )
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
       printf '  ✓ %s\n' "$fn"
     else
       printf '  ✗ %s\n' "$fn" >&2

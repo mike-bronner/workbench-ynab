@@ -44,6 +44,7 @@ loader, the JSON Schema, or any default.
 | `mapping_rules` | array | optional | Payee/category → tax-line rules, expressed as data. |
 | `persona` | object | **required** | The financial-review persona (configurable name). |
 | `report` | object | **required** | Report output directory + template path. |
+| `schedules` | object | optional | Scheduled-task cadences for background tasks (e.g. the monitoring poll). |
 
 ---
 
@@ -195,6 +196,30 @@ update-stable source of truth for where reports are saved. The report writer
 ([`bin/report-writer.sh`](report-writer.md)) reads it through `bin/config.sh` with
 the `// empty` idiom and falls back to `~/Documents/Claude/Reports` when it is
 absent or empty.
+
+---
+
+### `schedules` *(object, optional)*
+
+Cadences for the plugin's background scheduled tasks. The **setup step** (or a
+`/workbench-ynab:setup` re-run) reads this block and deploys or syncs each task
+via the scheduled-tasks MCP — cadence is **config-driven, never hardcoded** in a
+skill or in the task deployment. Omit the whole block to accept the defaults.
+
+#### `schedules.monitor` *(object, optional)*
+
+The proactive between-run monitoring poll (M6). It runs more frequently than the
+weekly review and is a **distinct** scheduled task (`ynab-monitor`), so it never
+disturbs the weekly-review task (`ynab-review`).
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `cron` | string | optional | `"0 8 * * *"` | Cron expression for the monitoring poll. Defaults to daily at 08:00 when the block or field is absent. |
+| `enabled` | boolean | optional | `true` | Whether the `ynab-monitor` scheduled task is deployed. Set `false` and re-run setup to remove/disable the task; `ynab-review` is unaffected. |
+
+```json
+"schedules": { "monitor": { "cron": "0 8 * * *", "enabled": true } }
+```
 
 ---
 

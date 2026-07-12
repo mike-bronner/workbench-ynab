@@ -174,5 +174,121 @@
     "medicalAgiPercent": 0.075,
     "seTaxRate": 0.153,
     "saltCap": 10000
+  },
+  "incomeTaxBracketsByYear": {
+    "$comment": "Default US federal income-tax MARGINAL brackets, keyed by filing status then by four-digit tax-year string, mirroring incomeTaxBracketsByYear in tax-profile.schema.json (issue #82). Each bracket is an object with rate (a fraction, 0.22 = 22 percent, never dollars or a percentage) and an OPTIONAL upTo (the inclusive upper bound of taxable income for that bracket, in US DOLLARS not YNAB milliunits). Brackets are ordered ascending; the top bracket OMITS upTo to mean unbounded. The estimated-tax engine (lib/tax/estimatedTax.mjs) sums the tax owed across each bracket slice. Filing-status keys mirror the FilingStatus enum: single, mfj, mfs, hoh, qw. SOURCE: 2024 figures per IRS Rev. Proc. 2023-34; 2025 figures per IRS Rev. Proc. 2024-40. Adding a new tax year is a pure data edit. These are the generic shareable default; a user overrides any year or status in their profile instance. NOT tax advice.",
+    "single": {
+      "2024": [
+        { "upTo": 11600, "rate": 0.10 },
+        { "upTo": 47150, "rate": 0.12 },
+        { "upTo": 100525, "rate": 0.22 },
+        { "upTo": 191950, "rate": 0.24 },
+        { "upTo": 243725, "rate": 0.32 },
+        { "upTo": 609350, "rate": 0.35 },
+        { "rate": 0.37 }
+      ],
+      "2025": [
+        { "upTo": 11925, "rate": 0.10 },
+        { "upTo": 48475, "rate": 0.12 },
+        { "upTo": 103350, "rate": 0.22 },
+        { "upTo": 197300, "rate": 0.24 },
+        { "upTo": 250525, "rate": 0.32 },
+        { "upTo": 626350, "rate": 0.35 },
+        { "rate": 0.37 }
+      ]
+    },
+    "mfj": {
+      "2024": [
+        { "upTo": 23200, "rate": 0.10 },
+        { "upTo": 94300, "rate": 0.12 },
+        { "upTo": 201050, "rate": 0.22 },
+        { "upTo": 383900, "rate": 0.24 },
+        { "upTo": 487450, "rate": 0.32 },
+        { "upTo": 731200, "rate": 0.35 },
+        { "rate": 0.37 }
+      ],
+      "2025": [
+        { "upTo": 23850, "rate": 0.10 },
+        { "upTo": 96950, "rate": 0.12 },
+        { "upTo": 206700, "rate": 0.22 },
+        { "upTo": 394600, "rate": 0.24 },
+        { "upTo": 501050, "rate": 0.32 },
+        { "upTo": 751600, "rate": 0.35 },
+        { "rate": 0.37 }
+      ]
+    },
+    "mfs": {
+      "2024": [
+        { "upTo": 11600, "rate": 0.10 },
+        { "upTo": 47150, "rate": 0.12 },
+        { "upTo": 100525, "rate": 0.22 },
+        { "upTo": 191950, "rate": 0.24 },
+        { "upTo": 243725, "rate": 0.32 },
+        { "upTo": 365600, "rate": 0.35 },
+        { "rate": 0.37 }
+      ],
+      "2025": [
+        { "upTo": 11925, "rate": 0.10 },
+        { "upTo": 48475, "rate": 0.12 },
+        { "upTo": 103350, "rate": 0.22 },
+        { "upTo": 197300, "rate": 0.24 },
+        { "upTo": 250525, "rate": 0.32 },
+        { "upTo": 375800, "rate": 0.35 },
+        { "rate": 0.37 }
+      ]
+    },
+    "hoh": {
+      "2024": [
+        { "upTo": 16550, "rate": 0.10 },
+        { "upTo": 63100, "rate": 0.12 },
+        { "upTo": 100500, "rate": 0.22 },
+        { "upTo": 191950, "rate": 0.24 },
+        { "upTo": 243700, "rate": 0.32 },
+        { "upTo": 609350, "rate": 0.35 },
+        { "rate": 0.37 }
+      ],
+      "2025": [
+        { "upTo": 17000, "rate": 0.10 },
+        { "upTo": 64850, "rate": 0.12 },
+        { "upTo": 103350, "rate": 0.22 },
+        { "upTo": 197300, "rate": 0.24 },
+        { "upTo": 250500, "rate": 0.32 },
+        { "upTo": 626350, "rate": 0.35 },
+        { "rate": 0.37 }
+      ]
+    },
+    "qw": {
+      "2024": [
+        { "upTo": 23200, "rate": 0.10 },
+        { "upTo": 94300, "rate": 0.12 },
+        { "upTo": 201050, "rate": 0.22 },
+        { "upTo": 383900, "rate": 0.24 },
+        { "upTo": 487450, "rate": 0.32 },
+        { "upTo": 731200, "rate": 0.35 },
+        { "rate": 0.37 }
+      ],
+      "2025": [
+        { "upTo": 23850, "rate": 0.10 },
+        { "upTo": 96950, "rate": 0.12 },
+        { "upTo": 206700, "rate": 0.22 },
+        { "upTo": 394600, "rate": 0.24 },
+        { "upTo": 501050, "rate": 0.32 },
+        { "upTo": 751600, "rate": 0.35 },
+        { "rate": 0.37 }
+      ]
+    }
+  },
+  "quarterlyEstimatedDueDates": [
+    { "quarter": 1, "month": 4, "day": 15, "periodStartMonth": 1, "periodStartDay": 1, "periodEndMonth": 3, "periodEndDay": 31 },
+    { "quarter": 2, "month": 6, "day": 15, "periodStartMonth": 4, "periodStartDay": 1, "periodEndMonth": 5, "periodEndDay": 31 },
+    { "quarter": 3, "month": 9, "day": 15, "periodStartMonth": 6, "periodStartDay": 1, "periodEndMonth": 8, "periodEndDay": 31 },
+    { "quarter": 4, "month": 1, "day": 15, "periodStartMonth": 9, "periodStartDay": 1, "periodEndMonth": 12, "periodEndDay": 31 }
+  ],
+  "estimatedTaxPayments": {
+    "$comment": "Default detection matchers for estimated-tax payments ALREADY recorded in YNAB. The estimated-tax engine (lib/tax/estimatedTax.mjs) flags an OUTFLOW transaction as an estimated-tax payment when its payee matches any payeeKeywords (case-insensitive substring) OR its YNAB category, category-group, or account matches any name listed here (case-insensitive). These default payee keywords are GENERIC US federal signals (the tax authority and the estimated-payment vehicle) and contain no owner-specific names; categoryNames, categoryGroups, and accounts are left empty here because YNAB category and account labels are user-specific, so a user adds their own in their profile instance. NOT tax advice.",
+    "payeeKeywords": ["irs", "internal revenue", "us treasury", "united states treasury", "estimated tax", "1040-es", "1040es", "eftps"],
+    "categoryNames": [],
+    "categoryGroups": [],
+    "accounts": []
   }
 }

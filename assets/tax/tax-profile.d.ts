@@ -139,6 +139,11 @@ export interface Thresholds {
  * Q1–Q3 fall in the tax year (Apr 15 / Jun 15 / Sep 15); Q4 falls in January
  * of the FOLLOWING year (Jan 15). The consumer combines each part-set with the
  * correct calendar year and handles weekend/holiday shifting.
+ *
+ * The optional `period*` fields encode the UNEVEN income-attribution window for
+ * the quarter (Q1 = Jan–Mar, Q2 = Apr–May, Q3 = Jun–Aug, Q4 = Sep–Dec), stored
+ * as data so they stay adjustable for IRS calendar shifts. `periodEndMonth` for
+ * Q4 is December of the tax year — the Jan 15 due date is not the period end.
  */
 export interface QuarterlyEstimatedDueDate {
   /** Estimated-tax quarter, 1–4. */
@@ -147,6 +152,55 @@ export interface QuarterlyEstimatedDueDate {
   month: number;
   /** Calendar day of month, 1–31. */
   day: number;
+  /** Month (1–12) the income-attribution period for this quarter starts on. */
+  periodStartMonth?: number;
+  /** Day of month (1–31) the income-attribution period for this quarter starts on. */
+  periodStartDay?: number;
+  /** Month (1–12) the income-attribution period for this quarter ends on (inclusive). */
+  periodEndMonth?: number;
+  /** Day of month (1–31) the income-attribution period for this quarter ends on (inclusive). */
+  periodEndDay?: number;
+}
+
+/**
+ * One federal income-tax marginal bracket. The top (highest) bracket OMITS
+ * `upTo` to mean unbounded. `rate` is a fraction (0.22 = 22%), not dollars or a
+ * percentage; `upTo` is the inclusive upper bound of taxable income in dollars.
+ */
+export interface IncomeTaxBracket {
+  /** Inclusive upper bound of taxable income (dollars). Omit on the top bracket. */
+  upTo?: number;
+  /** Marginal rate for this bracket as a fraction (0.22 = 22%). */
+  rate: number;
+}
+
+/**
+ * Federal income-tax marginal brackets keyed by filing status, then by
+ * four-digit tax-year string. Applied to the Schedule C net (after the half-SE
+ * deduction) to estimate income tax on side-hustle earnings.
+ */
+export type IncomeTaxBracketsByYear = {
+  [status in FilingStatus]?: {
+    /** Four-digit year string (e.g. "2025") → ascending marginal brackets. */
+    [year: string]: IncomeTaxBracket[];
+  };
+};
+
+/**
+ * Detection matchers for estimated-tax payments already recorded in YNAB. An
+ * OUTFLOW transaction is an estimated-tax payment when its payee contains any
+ * `payeeKeywords` entry (case-insensitive substring) or its category /
+ * category-group / account matches one named here (case-insensitive).
+ */
+export interface EstimatedTaxPaymentMatchers {
+  /** Case-insensitive payee substrings (e.g. "irs", "eftps"). */
+  payeeKeywords?: string[];
+  /** YNAB category names (case-insensitive exact). */
+  categoryNames?: string[];
+  /** YNAB category-group names (case-insensitive exact). */
+  categoryGroups?: string[];
+  /** YNAB account names (case-insensitive exact). */
+  accounts?: string[];
 }
 
 /**
@@ -188,6 +242,10 @@ export interface TaxProfile {
   thresholds?: Thresholds;
   /** Federal quarterly estimated-tax due dates as calendar parts. */
   quarterlyEstimatedDueDates?: QuarterlyEstimatedDueDate[];
+  /** Federal income-tax marginal brackets by filing status and year (issue #82). */
+  incomeTaxBracketsByYear?: IncomeTaxBracketsByYear;
+  /** Detection matchers for estimated-tax payments recorded in YNAB (issue #82). */
+  estimatedTaxPayments?: EstimatedTaxPaymentMatchers;
   /** User overrides deep-merged on top of the default US ruleset (M3-3). */
   overrides?: TaxProfileOverrides;
 }

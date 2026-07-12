@@ -47,6 +47,12 @@ human approval gates the transition from proposal to any write:
 The `id` on every operation is stable, so apply can be **idempotent on resume**:
 a re-run skips operations already recorded as applied in the audit log.
 
+The stages above are the lifecycle of a *single* change-set. The lifecycle of the
+proposal **files** around it — which proposal apply selects when several exist,
+when a proposal is too stale to apply, how applied/superseded proposals are
+retired, and the proposal-status model — is defined in
+[`changeset-lifecycle.md`](./changeset-lifecycle.md) (GAP-10).
+
 ---
 
 ## 2. Money is always milliunits
@@ -62,9 +68,10 @@ Every monetary field — `amount`, `budgeted`, `cleared_balance`,
   path.
 - Negative amounts are outflows; positive amounts are inflows, exactly as YNAB
   reports them.
-- A single shared money helper (centralized milliunits → currency formatting,
-  tracked separately in the backlog) owns display conversion. Change-set
-  artifacts always carry raw milliunits.
+- A single shared money helper — [`format-money.js`](./format-money.js),
+  `formatMoney(milliunits, currency_format)` — owns display conversion,
+  centralizing milliunits → currency formatting driven by the budget's
+  `currency_format` (issue #34). Change-set artifacts always carry raw milliunits.
 
 ---
 
@@ -156,8 +163,15 @@ Every operation carries a `risk` tag: `low`, `medium`, or `destructive`.
 |--------------------|---------------------------------------------|----------------------------------------------------------|
 | `categorize`       | `transaction_id`                            | category id/name before → proposed category              |
 | `allocate`         | `category_id`, `month` (`YYYY-MM-01`)       | budgeted milliunits before → proposed budgeted           |
-| `delete_duplicate` | `transaction_id`                            | full transaction snapshot → `{ "deleted": true }`        |
+| `delete_duplicate` | `transaction_id`, `twin` (surviving pair)   | full victim snapshot → `{ "deleted": true }`             |
 | `reconcile`        | `account_id` (optional `transaction_ids[]`) | cleared/reconciled balances + status before → after      |
+
+A `delete_duplicate` op additionally carries a **`twin`** object — the surviving
+transaction it is a duplicate OF (`id`, `payee_name`, `amount`, `date`) — and its
+`before` is the **full** victim snapshot (`payee_name`, `amount`, `date`,
+`category_id`, `account_id`, `cleared`, `memo`). The M4-8 handler refuses any
+delete op lacking twin evidence before any read or delete (see
+[`skills/delete-duplicate.md`](../skills/delete-duplicate.md)).
 
 The schema discriminates the four subtypes with a `oneOf` keyed on the `type`
 `const`, so exactly one subtype schema matches each operation and each enforces
@@ -181,7 +195,16 @@ change-set schema itself. Increment it whenever `changeset-schema.json` changes:
 
 Producers stamp the version they emitted; consumers should check `schema_version`
 and refuse a MAJOR they do not understand. The current schema version is
-**`1.0.0`**.
+**`2.0.0`**.
+
+> **2.0.0 (M4-8).** The delete-duplicate write path tightened `delete_duplicate`:
+> it now requires a `twin` object (the surviving transaction's `id`, `payee_name`,
+> `amount`, `date` — pairing evidence so the deletion is reviewable) and a full
+> victim `before` snapshot (`payee_name`, `category_id`, `account_id`, `cleared`,
+> `memo` alongside `amount`/`date`) so the M4-3 audit records the complete state
+> before the irreversible delete. Both are **new required fields**, so a `1.0.0`
+> `delete_duplicate` op no longer validates → a MAJOR bump. The other three op
+> types are unchanged.
 
 ---
 

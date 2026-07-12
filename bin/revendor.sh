@@ -9,11 +9,20 @@
 #
 #   1. Downloads the target version's tarball into a temp dir (npm pack), never
 #      touching the repo root or installing into it.
-#   2. Extracts dist/bundle/index.cjs and overwrites vendor/ynab-mcp/index.cjs.
-#   3. Recomputes the upstream tarball + vendored-bundle SHA-256 and rewrites the
+#   2. PROVENANCE GATE (GAP-2 / #5): before unpacking a single byte, cross-checks
+#      the download against the npm registry's PUBLISHED integrity metadata
+#      (`npm view … dist.integrity dist.shasum`). The tarball's computed SHA-512
+#      SRI and SHA-1 shasum must BOTH match the registry, or extraction is
+#      refused. Then verifies the registry's cryptographic signature on the
+#      version via npm's own published keys (`npm audit signatures`); if the
+#      registry publishes no signature for the package the gate is not skipped
+#      silently — it is recorded as a residual supply-chain risk in the marker.
+#   3. Extracts dist/bundle/index.cjs and overwrites vendor/ynab-mcp/index.cjs.
+#   4. Recomputes the upstream tarball + vendored-bundle SHA-256 and rewrites the
 #      version marker (vendored.json) — package, version, both hashes, today's
-#      date, provenance URL + integrity.
-#   4. Prints a human-readable old → new diff summary and reminds the operator to
+#      date, provenance URL + integrity, the registry SHA-1, and the signature
+#      verification outcome.
+#   5. Prints a human-readable old → new diff summary and reminds the operator to
 #      run the M1-7 offline-boot verification before committing.
 #
 # It is IDEMPOTENT: re-running with a version whose bundle is already vendored
@@ -59,6 +68,7 @@ require npm  "install npm (ships with Node — 'brew install node') to fetch the
 require jq   "install jq ('brew install jq') to read/write the version marker"
 require shasum "shasum is part of macOS/Perl — ensure it is on \$PATH to hash artifacts"
 require tar  "tar is required to unpack the npm tarball"
+require openssl "install openssl (ships with macOS/Linux) to compute the tarball's SHA-512 SRI for the registry provenance check"
 
 [ -f "$MARKER" ] || die "version marker not found: $MARKER (was M1-3 vendoring run?)"
 
@@ -106,11 +116,50 @@ if ! jq -e '.[0].filename' "$TMP/pack.json" >/dev/null 2>&1; then
 fi
 
 TARBALL_FILE="$(jq -r '.[0].filename' "$TMP/pack.json")"
-TARBALL_INTEGRITY="$(jq -r '.[0].integrity // ""' "$TMP/pack.json")"
 TARBALL="$TMP/$TARBALL_FILE"
 [ -f "$TARBALL" ] || die "npm pack reported '$TARBALL_FILE' but it is not in $TMP"
 
 TARBALL_SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
+
+# --- Provenance gate: registry integrity (BEFORE extraction) ----------------
+# GAP-2 / #5: npm pack already fetches from the registry, but nothing made the
+# trust link explicit. Cross-check the downloaded tarball against the registry's
+# PUBLISHED integrity metadata before unpacking a single byte: the computed
+# SHA-512 SRI must match dist.integrity AND the computed SHA-1 must match
+# dist.shasum. A mismatch means the download does not descend from the
+# registry-published artifact — refuse to extract.
+log "Verifying tarball against npm registry provenance for $SPEC…"
+if ! REG_META="$(npm view "$SPEC" --json dist.integrity dist.shasum dist.tarball 2>"$TMP/view.err")"; then
+  cat "$TMP/view.err" >&2 || true
+  die "npm view failed for $SPEC — cannot fetch the registry integrity metadata to verify against"
+fi
+# Fail-CLOSED schema guard, mirroring the npm pack (above) and npm audit (below)
+# guards: npm view exited 0, but a future npm — or a wrapper — could still emit
+# non-JSON noise on stdout. `npm view --json <field>…` returns a JSON OBJECT keyed
+# by the requested fields; validate that shape up front so a malformed payload
+# surfaces this actionable message plus the captured output, not a raw jq error
+# when the registry fields are indexed below.
+if ! jq -e 'type == "object"' <<<"$REG_META" >/dev/null 2>&1; then
+  log "--- npm stdout ---"; printf '%s\n' "$REG_META" >&2 || true
+  log "--- npm stderr ---"; cat "$TMP/view.err" >&2 || true
+  die "npm view did not return the expected JSON for $SPEC (npm output above)"
+fi
+REG_INTEGRITY="$(jq -r '."dist.integrity" // ""' <<<"$REG_META")"
+REG_SHASUM="$(jq -r '."dist.shasum" // ""' <<<"$REG_META")"
+REG_TARBALL="$(jq -r '."dist.tarball" // ""' <<<"$REG_META")"
+[ -n "$REG_INTEGRITY" ] || die "registry returned no dist.integrity for $SPEC — cannot verify provenance"
+[ -n "$REG_SHASUM" ]    || die "registry returned no dist.shasum for $SPEC — cannot verify provenance"
+
+# Computed SHA-512 SRI (base64 of the raw digest, npm's integrity format) and
+# SHA-1 of the SAME downloaded file.
+TARBALL_SRI="sha512-$(openssl dgst -sha512 -binary "$TARBALL" | openssl base64 -A)"
+TARBALL_SHA1="$(shasum -a 1 "$TARBALL" | awk '{print $1}')"
+
+[ "$TARBALL_SRI" = "$REG_INTEGRITY" ] \
+  || die "tarball SHA-512 SRI mismatch — registry says $REG_INTEGRITY but the download is $TARBALL_SRI; refusing to extract"
+[ "$TARBALL_SHA1" = "$REG_SHASUM" ] \
+  || die "tarball SHA-1 shasum mismatch — registry says $REG_SHASUM but the download is $TARBALL_SHA1; refusing to extract"
+log "  ✓ integrity verified — SHA-512 SRI and SHA-1 both match the registry"
 
 # --- Extract + locate the bundle --------------------------------------------
 EXTRACT="$TMP/extract"
@@ -127,28 +176,99 @@ SRC_BUNDLE="$EXTRACT/$BUNDLE_SRC_PATH"
 NEW_BUNDLE_SHA="$(shasum -a 256 "$SRC_BUNDLE" | awk '{print $1}')"
 
 # --- Idempotency: same version AND same bundle bytes → nothing to do --------
+# Carve-out: this early return is BEFORE the signature gate below, so a no-change
+# re-pin does NOT re-verify the registry signature — a signature revoked upstream
+# after the original vendor is not re-checked here. Re-vendoring changed bytes (a
+# new version or republished bytes) always runs the full gate. Documented in
+# docs/vendoring.md and SECURITY.md so the behavior is auditable.
 if [ "$VERSION" = "$PINNED_VERSION" ] && [ "$NEW_BUNDLE_SHA" = "$OLD_BUNDLE_SHA" ]; then
   printf 'No change: %s is already vendored (bundle %s).\n' "$SPEC" "$NEW_BUNDLE_SHA"
   printf 'Nothing was modified.\n'
   exit 0
 fi
 
+# --- Provenance gate: registry signature ------------------------------------
+# We are about to adopt new bytes, so verify the registry's cryptographic
+# signature on this version using npm's OWN published keys (`npm audit
+# signatures`) — provenance must not rest on hashes alone. Installed into an
+# isolated temp dir under $TMP (NEVER the repo root, NEVER the working tree). An
+# INVALID signature is a hard stop (possible tampering); a MISSING signature is
+# recorded as a residual supply-chain risk rather than skipped silently.
+log "Verifying registry signature for $SPEC via 'npm audit signatures'…"
+SIGDIR="$TMP/sigcheck"
+mkdir -p "$SIGDIR"
+printf '{"name":"ynab-mcpb-sigcheck","version":"0.0.0","private":true}\n' > "$SIGDIR/package.json"
+SIG_STATUS="unavailable"
+SIG_NOTE=""
+if ! ( cd "$SIGDIR" && npm install --ignore-scripts --no-audit --no-fund "$SPEC" ) >"$TMP/sig-install.log" 2>&1; then
+  cat "$TMP/sig-install.log" >&2 || true
+  die "isolated install for signature verification failed for $SPEC"
+fi
+# Keep the audit's stderr (mirroring the install step's sig-install.log) so a
+# non-signature failure — old npm, network, a registry hiccup — is shown with
+# npm's own diagnostics, not swallowed behind the generic guard below.
+AUDIT="$( cd "$SIGDIR" && npm audit signatures --json 2>"$TMP/sig-audit.log" )" || true
+# Fail-CLOSED schema guard. `npm audit signatures --json` reports findings under
+# exactly two arrays — `invalid` and `missing`; a package absent from both is a
+# pass. We trust that "verified by elimination" ONLY when the output is a shape
+# we fully recognize: it is an object, BOTH fields are arrays (not null/scalar),
+# and there is NO unrecognized top-level key. This is what makes "verified"
+# require positive evidence instead of being a blind catch-all `else`:
+#   * {"invalid":null,"missing":null} — the keys exist but aren't arrays, so the
+#     old has()-only check passed it while both length probes returned 0 → a
+#     FALSE "verified". The array-type test rejects it.
+#   * {"invalid":[],"missing":[],"revoked":[…]} — a NEW failure category a future
+#     npm might add would otherwise fall straight through to "verified". The
+#     unknown-key test rejects it.
+# For a gate whose premise is zero-trust toward a possibly-compromised registry,
+# the safe default on an unexpected shape is to STOP, not to pass.
+if ! jq -e '
+      type == "object"
+      and (.invalid | type) == "array"
+      and (.missing | type) == "array"
+      and ([keys[] | select(. != "invalid" and . != "missing")] | length) == 0
+    ' <<<"$AUDIT" >/dev/null 2>&1; then
+  cat "$TMP/sig-audit.log" >&2 || true
+  die "could not parse or recognize 'npm audit signatures' output for $SPEC — signature verification did not run"
+fi
+# Lift the counts into plain variables BEFORE the if. A `$(jq …)` evaluated
+# inside an `if`-condition runs with `set -e` suspended, so a jq failure there
+# would be silently treated as a count rather than aborting the run.
+SIG_INVALID="$(jq --arg n "$NAME" '[.invalid[]? | select(.name==$n)] | length' <<<"$AUDIT")"
+SIG_MISSING="$(jq --arg n "$NAME" '[.missing[]? | select(.name==$n)] | length' <<<"$AUDIT")"
+if [ "$SIG_INVALID" -gt 0 ]; then
+  die "registry signature INVALID for $SPEC — possible tampering; refusing to vendor"
+elif [ "$SIG_MISSING" -gt 0 ]; then
+  SIG_STATUS="unavailable"
+  SIG_NOTE="npm registry publishes no signature for $SPEC; provenance rests on the integrity-hash chain only — residual supply-chain risk."
+  log "  ⚠ no registry signature for $SPEC — recorded as a residual supply-chain risk"
+else
+  SIG_STATUS="verified"
+  log "  ✓ registry signature verified against npm's published keys"
+fi
+
 # --- Write the new bundle + rewrite the marker ------------------------------
 log "Bundle changed — updating $VENDORED_PATH and the marker…"
 cp "$SRC_BUNDLE" "$BUNDLE"
 
+# Record the registry's reported dist.tarball; fall back to the canonical URL
+# shape only if the registry omitted it (it never should for a published version).
 UNSCOPED="${NAME##*/}"
-TARBALL_URL="https://registry.npmjs.org/${NAME}/-/${UNSCOPED}-${VERSION}.tgz"
+TARBALL_URL="${REG_TARBALL:-https://registry.npmjs.org/${NAME}/-/${UNSCOPED}-${VERSION}.tgz}"
 DATE_VENDORED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 jq -n \
   --arg name "$NAME" \
   --arg version "$VERSION" \
   --arg tarball_sha256 "$TARBALL_SHA" \
+  --arg tarball_shasum "$TARBALL_SHA1" \
   --arg bundle_sha256 "$NEW_BUNDLE_SHA" \
   --arg date_vendored "$DATE_VENDORED" \
   --arg tarball_url "$TARBALL_URL" \
-  --arg tarball_integrity "$TARBALL_INTEGRITY" \
+  --arg tarball_integrity "$REG_INTEGRITY" \
+  --arg signature_status "$SIG_STATUS" \
+  --arg signature_method "npm audit signatures" \
+  --arg signature_note "$SIG_NOTE" \
   --arg bundle_source_path "$BUNDLE_SRC_PATH" \
   --arg vendored_path "$VENDORED_PATH" \
   --argjson self_contained "$SELF_CONTAINED" \
@@ -156,23 +276,28 @@ jq -n \
     name: $name,
     version: $version,
     tarball_sha256: $tarball_sha256,
+    tarball_shasum: $tarball_shasum,
     bundle_sha256: $bundle_sha256,
     date_vendored: $date_vendored,
     tarball_url: $tarball_url,
     tarball_integrity: $tarball_integrity,
+    signature_status: $signature_status,
+    signature_method: $signature_method,
     bundle_source_path: $bundle_source_path,
     vendored_path: $vendored_path,
     self_contained: $self_contained
-  }' > "$MARKER.tmp"
+  }
+  + (if $signature_note == "" then {} else {signature_note: $signature_note} end)' > "$MARKER.tmp"
 mv "$MARKER.tmp" "$MARKER"
 
 # --- Result summary (stdout) ------------------------------------------------
 short() { printf '%.12s…' "$1"; }
 printf 'Re-vendored %s\n' "$NAME"
-printf '  version:  %s → %s\n' "$PINNED_VERSION" "$VERSION"
-printf '  bundle:   %s → %s\n' "$(short "${OLD_BUNDLE_SHA:-none}")" "$(short "$NEW_BUNDLE_SHA")"
-printf '  tarball:  %s\n' "$(short "$TARBALL_SHA")"
-printf '  marker:   %s\n' "$VENDORED_PATH (vendored.json updated)"
+printf '  version:   %s → %s\n' "$PINNED_VERSION" "$VERSION"
+printf '  bundle:    %s → %s\n' "$(short "${OLD_BUNDLE_SHA:-none}")" "$(short "$NEW_BUNDLE_SHA")"
+printf '  tarball:   %s\n' "$(short "$TARBALL_SHA")"
+printf '  provenance: integrity ✓ (SHA-512 SRI + SHA-1 match registry); signature %s\n' "$SIG_STATUS"
+printf '  marker:    %s\n' "$VENDORED_PATH (vendored.json updated)"
 printf '\n'
 printf 'Next steps (NOT done for you):\n'
 printf '  1. Run the offline-boot verification before committing:\n'

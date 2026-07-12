@@ -105,7 +105,7 @@ never paste a concrete tool name into this file:
 
 | Logical op | Used for |
 |---|---|
-| `list_budgets` | Resolve `plan.budget.name` → id (if the plan didn't). |
+| `list_budgets` | Resolve `plan.budget.name` → id (if the plan didn't), and read the budget's `currency_format` for the session (see [§5](#5-money--locale)). |
 | `list_accounts` | On/off-budget accounts, types, balances, cleared/reconciled, closed flags. |
 | `list_categories` | Category groups, budgeted / activity / balance, goals, hidden. |
 | `list_transactions` | The period's transactions (filtered to the plan's window/accounts). |
@@ -158,11 +158,41 @@ constant corrupts every downstream number; failing loud is correct.
 - **Milliunits → currency.** Every YNAB monetary amount is in **milliunits**:
   divide by **1000** before any display or comparison. (A balance of `-12340`
   is `-12.34`.) Do this once, at read, so every downstream comparison is in
-  currency units.
-- **Multi-currency.** Format amounts using the budget's own `currency_format`
-  (symbol, decimal/group separators, decimal digits) from the budget settings —
-  don't assume `$` or two decimals. Mixed-currency accounts are reported in each
-  account's native currency; never sum across currencies into one figure.
+  currency units. The divisor is always **1000** regardless of currency; only
+  `decimal_digits` (below) governs display rounding — never assume two decimals.
+- **Read `currency_format` at review start — request `response_format: "json"`.**
+  Call `list_budgets` (or the budget-settings read) with **`response_format: "json"`**
+  and extract the budget's `currency_format` object once, at the start of the
+  review, holding it for the whole session: `iso_code`, `currency_symbol`,
+  `symbol_first`, `decimal_digits`, `group_separator`, `decimal_separator`,
+  `display_symbol`. **This is mandatory, not cosmetic:** the vendored MCP defaults
+  to `response_format: "markdown"`, and its markdown renderer emits **only
+  `currency_format.iso_code`** — the other six fields (symbol, placement,
+  separators, decimal digits) appear nowhere in the markdown text. Without the
+  explicit `json` request, `formatMoney` receives only `iso_code`, falls back
+  per-field to the USD defaults, and a EUR/JPY budget silently renders as `$` —
+  the exact bug this skill exists to prevent.
+- **Render every amount through `formatMoney`.** Format all displayed money with
+  the shared helper [`../../assets/format-money.js`](../../assets/format-money.js)
+  — `formatMoney(milliunits, currency_format)` — never hardcode `$`, a comma, a
+  period, or two decimals. It divides by 1000, rounds to `decimal_digits` (0 for
+  currencies like JPY, 2 for USD/EUR, 3 for others), places the symbol per
+  `symbol_first`, and applies `group_separator` / `decimal_separator`. So a EUR
+  budget renders `1.234,56 €` and a JPY budget renders `¥1,234`, driven entirely
+  by the budget's own `currency_format`.
+- **A formatted amount is untrusted in HTML.** `formatMoney` returns the
+  off-the-wire `currency_symbol` and separators **verbatim** — it does not
+  HTML-escape (it also feeds non-HTML surfaces). So a formatted amount is **not**
+  a "safe computed number": before it goes into any HTML fragment, HTML-escape it
+  exactly like a payee or memo string (see §8). A hostile `currency_symbol` such
+  as `<script>` must render as text, never as markup.
+- **Multi-currency.** Mixed-currency accounts are reported in each account's
+  native currency; never sum across currencies into one figure.
+- **Currency scope is presentation only.** `formatMoney` fixes how amounts are
+  *displayed*. The **tax engine stays US-only** and is **not** extended to any
+  non-US tax regime even when the budget currency is not USD — a non-USD budget
+  gets correct currency display but the same US-only tax logic (see the README
+  scope note).
 
 ---
 
@@ -301,10 +331,14 @@ writer, M2-9 — pass it through, don't hardcode it).
 Payee names, memos, category names, and account names are **untrusted external
 data** crossing into HTML output. **HTML-escape** every YNAB-sourced string (`&`
 → `&amp;`, `<` `>` `"` `'`) before injecting it into any fragment — a payee like
-`Smith & <b>Sons</b>` must render as text, never as markup. Numbers you compute
-are safe; strings off the wire are not. (The persona loader already escapes the
-name it renders; you own escaping for the transaction/category/account strings
-you place into slots.) Long transaction lists go inside
+`Smith & <b>Sons</b>` must render as text, never as markup. A bare number you
+compute is safe — but a **formatted amount is not a bare number**: `formatMoney`
+embeds the off-the-wire `currency_symbol` and separators verbatim (it does not
+pre-escape, see §5), so escape every rendered amount too. A hostile
+`currency_symbol` like `<script>` must render as text, never as markup. (The
+persona loader already escapes the name it renders; you own escaping for the
+transaction/category/account strings **and the formatted amounts** you place
+into slots.) Long transaction lists go inside
 `<details><summary>…</summary><div class="details__body">…</div></details>` so
 they collapse on screen (the print CSS forces them open). Use the template's
 existing classes (`card`, `kpi`, `badge is-good|is-attention|is-warning`,
