@@ -136,15 +136,18 @@ references the source of truth so a namespace change is a **one-file edit**:
 
 | Consumer | Lands in | Source of truth |
 |---|---|---|
-| Pre-approval glob (read tools, then write tools) | Sprint 1 setup / Sprint 4 write paths | the glob defined in [`ynab-tools.md`](../skills/protocol/ynab-tools.md) |
+| Pre-approval globs (read phase, then the tight write set) | Sprint 1 setup / Sprint 4 write paths | the phase-split pre-approval set in [`ynab-tools.md`](../skills/protocol/ynab-tools.md) |
 | Orchestrator agent tools list | Sprint 1 orchestrator stub → fleshed in Sprint 3 | the tools list in [`ynab-tools.md`](../skills/protocol/ynab-tools.md) |
 | Review / write-back skills (prose) | Sprints 3–4 | this map's logical operation names |
 
-Because a single glob — `mcp__plugin_workbench-ynab_ynab__ynab_*` — matches the
-entire tool family, the pre-approval config and the orchestrator tools list can
-both be regenerated from `ynab-tools.md` mechanically. A namespace change edits
-the derivation rule in this map and the list in `ynab-tools.md`; the consumers
-inherit it.
+A namespace change edits the derivation rule in this map and the lists in
+`ynab-tools.md`; the consumers inherit it. Note the pre-approval config is **not**
+the `mcp__plugin_workbench-ynab_ynab__ynab_*` family glob — that glob names the
+whole family (handy for schema loading), but blanket-approving it would grant the
+ledger-*deleting* `delete_transaction` verb standing permission. Pre-approval is
+the **tight, phase-split set** in `ynab-tools.md` (read globs, then the four
+write tools by full name, delete deliberately withheld). See the permission
+notes below.
 
 ## Swap procedure
 
@@ -187,6 +190,76 @@ These two facts are easy to lose across a swap. Keep them here so they don't:
   corrupts the protocol and breaks the handshake. Mirror the discipline in
   `workbench-core`'s `hooks/mcp-memory.sh`: every diagnostic goes to `stderr`
   (`>&2`), `stdout` carries only protocol frames.
+
+## Permission notes — pre-approving the write tools
+
+These notes govern which YNAB tools carry standing pre-approval in
+`~/.claude/settings.json`, and why the destructive verb never does. The
+canonical, machine-referenced list lives in
+[`ynab-tools.md` § Pre-approval globs](../skills/protocol/ynab-tools.md); this
+section is the human-readable *why* plus the exact config snippet.
+
+### (a) The namespace is `mcp__plugin_workbench-ynab_ynab__*`, never `mcp__ynab__*`
+
+Every pre-approval entry uses the plugin-namespaced prefix. The plugin bundles
+its MCP under the `mcpServers.ynab` key, and Claude Code derives a
+plugin-provided server's tool names as
+`mcp__plugin_<plugin-name>_<mcpServers-key>__<tool>` — so the compiler-derived
+prefix is `mcp__plugin_workbench-ynab_ynab__` (see the derivation rule above). A
+glob written against the bare `mcp__ynab__*` form **silently fails to match** —
+it never pre-approves anything and never errors, so the mistake hides as a
+"why does it still prompt?" until someone checks the namespace. Get it right in
+every entry.
+
+### (b) `/ynab-apply` (M4-5) is the human gate — pre-approval only removes the redundant per-call prompt
+
+The human-approval gate for a write **batch** is the `/ynab-apply` command
+(M4-5) plus the write-safety guardrail (money-movement hard block, one approval
+per batch). That gate is enforced at the skill/workflow layer, *before* any tool
+runs. Without pre-approval, Claude Code *also* shows its own per-call permission
+dialog on every single write tool invocation inside an already-approved batch —
+pure friction with no added safety, since the batch is already human-approved.
+Pre-approving the four write tools removes that redundant per-call dialog. It
+does **not** remove — and must never be described as removing — the `/ynab-apply`
+approval gate.
+
+### (c) The delete verb is deliberately withheld
+
+`ynab_delete_transaction` is **not** pre-approved, and the family glob
+`mcp__plugin_workbench-ynab_ynab__ynab_*` is **never** used for pre-approval
+precisely because it would sweep the delete verb in. Deletes run only through the
+dedicated strong-confirmation + dry-run preview path (M4-8). Do not add
+`ynab_delete_transaction` to any pre-approval list, and do not replace the tight
+set below with the family glob, without first building an equivalent confirmation
+path. The `create_transaction` / `create_transactions` verbs are likewise absent
+— no M4 write path creates transactions.
+
+### The exact config snippet
+
+Setup (Step 5) pre-approves the **read** tools automatically. Write pre-approval
+is opt-in: setup never seeds it. To silence the redundant per-call dialog on the
+four gated write tools, add these entries to the `permissions.allow` array in
+`~/.claude/settings.json` (they de-dupe — re-adding an existing entry is a
+no-op):
+
+```jsonc
+{
+  "permissions": {
+    "allow": [
+      // read phase — setup already seeds these; shown for completeness
+      "mcp__plugin_workbench-ynab_ynab__ynab_list_*",
+      "mcp__plugin_workbench-ynab_ynab__ynab_get_*",
+      // write phase (Sprint 4) — the four gated write tools, by full name
+      "mcp__plugin_workbench-ynab_ynab__ynab_update_transaction",
+      "mcp__plugin_workbench-ynab_ynab__ynab_update_transactions",
+      "mcp__plugin_workbench-ynab_ynab__ynab_update_category",
+      "mcp__plugin_workbench-ynab_ynab__ynab_reconcile_account"
+      // NOT ynab_delete_transaction — withheld on purpose (M4-8 confirms deletes)
+      // NOT the ynab_* family glob — it would blanket-approve the delete verb
+    ]
+  }
+}
+```
 
 ## Config split — token vs. config
 
