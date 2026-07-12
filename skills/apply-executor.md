@@ -48,6 +48,39 @@ const outcome = await applyChangeset(changeset, {
 There is **no CLI** — unlike the validator and guardrail, the executor cannot run
 without its MCP-backed ports, which exist only in the agent runtime.
 
+## Opt-in bulk dispatch — batch the write, keep every per-op guarantee
+
+By default the executor applies **one op per tool call** (`applyOp`). A write path
+that can collapse many same-type ops into a single call — categorize →
+`ynab_update_transactions` (M4-6) — opts in by supplying three more options:
+
+```js
+const outcome = await applyChangeset(changeset, {
+  /* …the per-op options above… */
+  bulkToolMap,   // op-type → namespaced BULK tool
+  bulkApplyOp,   // async (toolName, ops) => mcp result   (one call for the group)
+  bulkFits,      // (ops) => boolean: may this same-type group go through one bulk call?
+});
+```
+
+The executor still **drift-checks, guardrails, and audits every op individually** —
+only the mutating dispatch of the survivors is batched. Per op-type, it groups the
+survivors and, when `bulkApplyOp` is wired, `bulkToolMap[type]` is set, and
+`bulkFits(group)` is true, issues **one** `bulkApplyOp` call; otherwise the group
+applies per-op. If `bulkApplyOp` **throws** (the bulk shape was rejected at
+runtime), the executor **falls back** to a per-op `applyOp` call for each op in the
+group — so a bulk-capable path is never less safe, or less complete, than a per-op
+one. A bulk call that **resolves** is read **fail-closed**: an op is recorded
+`applied` only when the payload is well-shaped (a `results` array with one entry per
+requested op) *and* that op's own entry reports a written status
+(created/duplicate/updated). A failed entry, a missing entry, a length mismatch, or a
+payload with no `results` array at all is audited as `error` — the M4-3 trail never
+records `applied` for a transaction the tool did not positively confirm. This is the
+mechanism that keeps `skipped-stale` / `blocked` reachable and the
+M4-3 audit trail honest even on the bulk path. A bulk-capable op type is pre-flighted
+on **both** its per-op tool and its bulk tool (the fallback needs the per-op tool),
+so a denied bulk tool aborts the whole batch before any dispatch.
+
 ## Dry-run is the default — real apply is opt-in
 
 `dryRun` defaults to **`true`**. A dry-run resolves the target entities via the
@@ -78,10 +111,19 @@ the human approves the batch**. Anything that is not an explicit `false` simulat
    batch (`reason: 'auth_preflight_fail'`) with **zero mutations and no audit records
    for ops that never ran**. `authPreflight` is **mandatory** on real apply — the
    executor fails closed (throws) without it. Dry-run never mutates, so it skips this.
-4. **Per-op loop**, in array order. For each op: re-read live state → drift-check
-   → simulate (dry-run) or dispatch the mutating tool (real apply) → **audit**.
-   A stale op is skipped individually; the rest of the batch continues — **except**
-   on a mid-batch auth failure (see Batch semantics), which stops the loop.
+4. **Prepare every op**, in array order: re-read live state → drift-check → (real
+   apply) per-op guardrail re-check. Terminal outcomes (`error` / `skipped-stale` /
+   `blocked`) are recorded now; the rest are **survivors**. A **read-phase auth
+   failure** (a dead token surfaces on the re-read too) aborts the whole batch
+   fail-closed here — preparation stops immediately, so ops past it are never read,
+   dispatched, or audited (phase-agnostic; see Batch semantics).
+5. **Dispatch the survivors**, in array order. Dry-run simulates each (diff only).
+   Real apply batches each run of **consecutive same-type survivors** into one
+   **bulk** call when a bulk port + `bulkFits` allow (see below), else a per-op
+   `applyOp` call each — then **audits** every processed op, in array order. A stale
+   op is skipped individually; the rest of the batch continues — **except** on a
+   mid-batch auth failure (see Batch semantics), which stops the dispatch at that op
+   and leaves the untouched tail un-audited.
 
 ## Drift detection — never clobber a value the human didn't see
 

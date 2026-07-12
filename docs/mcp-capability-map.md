@@ -59,10 +59,11 @@ path and the one the swap procedure below assumes by default.
 
 ## Capability map
 
-The 14 logical operations the rituals need, each mapped to its current concrete
+The 16 logical operations the rituals need, each mapped to its current concrete
 namespaced tool. `R` = read (safe, pre-approved in the read-only phase);
 `W` = write (ledger-only mutation, gated behind the write-safety guardrail and
-approved in Sprint 4).
+approved in Sprint 4). Operations 15–16 were added for the Sprint 4 delete-duplicate
+write path (M4-8).
 
 | # | Logical operation | Concrete tool | Kind | What it does |
 |---|---|---|---|---|
@@ -80,6 +81,8 @@ approved in Sprint 4).
 | 12 | `create_transactions` | `mcp__plugin_workbench-ynab_ynab__ynab_create_transactions` | W | Bulk-create transactions |
 | 13 | `delete_transaction` | `mcp__plugin_workbench-ynab_ynab__ynab_delete_transaction` | W | Delete a transaction (duplicate fix) |
 | 14 | `reconcile_account` | `mcp__plugin_workbench-ynab_ynab__ynab_reconcile_account` | W | Reconcile an account to a statement balance |
+| 15 | `get_transaction` | `mcp__plugin_workbench-ynab_ynab__ynab_get_transaction` | R | Get one transaction — the M4-8 delete path re-reads the victim for drift detection |
+| 16 | `compare_transactions` | `mcp__plugin_workbench-ynab_ynab__ynab_compare_transactions` | R | Compare two transactions — corroborates the duplicate pairing in the M4-8 dry-run preview |
 
 > **None of these move real money.** Write-back is strictly ledger-only
 > (categorize / allocate / dedup / reconcile). The plugin never initiates
@@ -87,7 +90,7 @@ approved in Sprint 4).
 
 > **Suffixes confirmed against the vendored bundle.** The vendored MCP
 > (`@dizzlkheinz/ynab-mcpb` v0.26.10, in `vendor/ynab-mcp/`) exposes ~30 tools;
-> the rituals need the 14 above. All 14 concrete suffixes were verified to be
+> the rituals need the 16 above. All 16 concrete suffixes were verified to be
 > registered tool ids in that bundle. On a future re-vendor or MCP swap,
 > re-confirm each suffix against the new bundle and correct any drift **here, in
 > [`ynab-tools.md`](../skills/protocol/ynab-tools.md), and (for a changed suffix

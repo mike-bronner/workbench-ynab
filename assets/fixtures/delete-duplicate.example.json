@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0.0",
+  "schema_version": "2.0.0",
   "generated_at": "2026-06-19T14:30:00Z",
   "budget_id": "b1f2c3d4-1111-4a2b-9c3d-000000000001",
   "budget_name": "Family Budget",
@@ -11,17 +11,26 @@
       "type": "delete_duplicate",
       "budget_id": "b1f2c3d4-1111-4a2b-9c3d-000000000001",
       "transaction_id": "t0000000-0000-4000-8000-00000000d002",
+      "twin": {
+        "id": "t0000000-0000-4000-8000-00000000d001",
+        "payee_name": "Amazon",
+        "amount": -54990,
+        "date": "2026-06-12"
+      },
       "before": {
         "amount": -54990,
         "date": "2026-06-12",
         "payee_name": "Amazon",
-        "category_name": "Shopping",
+        "category_id": "c0000000-0000-4000-8000-0000000000c7",
+        "account_id": "a0000000-0000-4000-8000-00000000ac01",
+        "cleared": "cleared",
+        "memo": null,
         "import_id": "YNAB:-54990:2026-06-12:1"
       },
       "after": {
         "deleted": true
       },
-      "rationale": "Exact duplicate of transaction t0000000-0000-4000-8000-00000000d001 (same amount, date, and import_id); safe to remove.",
+      "rationale": "Exact duplicate of surviving twin t0000000-0000-4000-8000-00000000d001 (same amount, date, and import_id); safe to remove.",
       "risk": "destructive"
     }
   ]
