@@ -49,6 +49,16 @@
  * MCP-backed ports, which exist only in the agent runtime that wires them (see
  * skills/reconcile-write-path.md).
  *
+ * AUTH FAIL-CLOSED, both ends (real apply only, GAP-8 / #50) — identical to the
+ * executor. A mandatory `authPreflight` read-only call runs BEFORE the first mutation;
+ * any failure aborts with zero mutations and no per-op audit records. And if a 401/403
+ * surfaces mid-batch (on the re-read OR the mutation), the loop STOPS immediately — an
+ * auth failure aborts the whole batch; a single-op data error (422), a rate limit (429),
+ * or an indeterminate 5xx / network fault is recorded per-op and the batch CONTINUES.
+ * Every errored op's audit record carries an `error_class` and `applied_state` (the same
+ * substrate the resume design, #48, reads). `applyReconcile` returns the same outcome
+ * shape as the executor, so M4-5 renders an auth abort with `describeAuthFailure`.
+ *
  * Usage (M4-5 approval command):
  *   const { applyReconcile } = require('./assets/reconcile-handler');
  *   const { results } = await applyReconcile(reconcileOps, {
@@ -61,12 +71,14 @@
  *     toolSearch,              // async () => ToolSearch(...) — loads deferred schemas
  *     readLiveState,           // async (op) => live state (see skill doc for the shape)
  *     applyOp,                 // async (toolName, payload, op) => mcp result (real apply only)
+ *     authPreflight,           // async () => ynab_list_budgets; THROWS on 401/403/network (real apply only)
  *     audit,                   // async ({ operation, result, dryRun }) => void
  *   });
  */
 
-const { STATUS, isStale } = require('./apply-executor');
+const { STATUS, OUTCOME, isStale } = require('./apply-executor');
 const { evaluateOperation, evaluateTool } = require('./write-safety-guardrail');
+const { classifyError, isAuthFailure, throwOnErrorResult } = require('./write-error');
 
 /**
  * The two reconcile sub-actions. Exhaustive — anything else is an error.
@@ -278,12 +290,20 @@ async function processMarkCleared(op, ctx, live, opId) {
     : { transaction_id: op.transaction_ids[0], cleared: target };
 
   try {
-    const apiResult = await applyOp(toolName, payload, op);
+    // Defense in depth (#50): route the result through throwOnErrorResult so a vendored
+    // `{ isError: true }` auth / rate / 5xx envelope that RESOLVED (didn't reject) throws
+    // here and the batch-level auth-abort machinery engages — the same guard the categorize
+    // port wrappers apply, code-enforced on the reconcile mutation rather than prose-only.
+    const apiResult = throwOnErrorResult(await applyOp(toolName, payload, op));
     return result(opId, STATUS.APPLIED, false, {
       tool: toolName, sub_action: SUB_ACTIONS.MARK_CLEARED, diff, result: apiResult == null ? null : apiResult,
     });
   } catch (err) {
-    return result(opId, STATUS.ERROR, false, { phase: 'apply', tool: toolName, message: errMessage(err) });
+    // Classify the mutation failure (#50): error_class drives the batch-level
+    // abort-vs-continue decision (auth → abort; data/rate/5xx → per-op error, continue)
+    // and applied_state lets a later resume reason about whether the write may have landed.
+    const { error_class, applied_state } = classifyError(err);
+    return result(opId, STATUS.ERROR, false, { phase: 'apply', tool: toolName, message: errMessage(err), error_class, applied_state });
   }
 }
 
@@ -329,9 +349,12 @@ async function processReconcileAccount(op, ctx, live, opId) {
 
   let apiResult;
   try {
-    apiResult = await applyOp(toolName, { account_id: op.account_id, balance: asserted }, op);
+    // Defense in depth (#50): a resolved `{ isError: true }` envelope throws here too,
+    // so an auth failure on the reconcile mutation aborts the batch fail-closed.
+    apiResult = throwOnErrorResult(await applyOp(toolName, { account_id: op.account_id, balance: asserted }, op));
   } catch (err) {
-    return result(opId, STATUS.ERROR, false, { phase: 'apply', tool: toolName, message: errMessage(err) });
+    const { error_class, applied_state } = classifyError(err);
+    return result(opId, STATUS.ERROR, false, { phase: 'apply', tool: toolName, message: errMessage(err), error_class, applied_state });
   }
 
   // Adjustment guard: even though the balance guard already refused a mismatch,
@@ -377,7 +400,10 @@ async function processReconcileOp(op, ctx = {}) {
   try {
     live = await ctx.readLiveState(op);
   } catch (err) {
-    return result(opId, STATUS.ERROR, dryRun, { phase: 'read', message: errMessage(err) });
+    // A read failure is a per-op error, classified so a dead token surfacing on the
+    // re-read aborts the batch (phase-agnostic, #50) and the audit record carries the class.
+    const { error_class, applied_state } = classifyError(err);
+    return result(opId, STATUS.ERROR, dryRun, { phase: 'read', message: errMessage(err), error_class, applied_state });
   }
 
   if (isReconcileStale(op, live, subAction)) {
@@ -394,13 +420,18 @@ async function processReconcileOp(op, ctx = {}) {
 
 /** Append one audit record per op (mirrors the executor's recordAudit / M4-3 writer). */
 async function recordAudit(audit, op, res, ctx, dryRun) {
+  const detail = res.detail || {};
   await audit({
     operation: op,
     result: {
-      tool: res.detail && res.detail.tool != null ? res.detail.tool : null,
+      tool: detail.tool != null ? detail.tool : null,
       status: res.status,
       schema_version: ctx.schemaVersion == null ? null : ctx.schemaVersion,
       run_id: ctx.source == null ? null : ctx.source,
+      // Present only on an errored op; null everywhere else — the same substrate the
+      // idempotent-resume design (#48) reads, identical to the executor's audit shape.
+      error_class: detail.error_class == null ? null : detail.error_class,
+      applied_state: detail.applied_state == null ? null : detail.applied_state,
     },
     dryRun,
   });
@@ -435,18 +466,84 @@ async function applyReconcile(operations, ctx = {}) {
   if (!dryRun && typeof ctx.applyOp !== 'function') {
     throw new TypeError('real apply (dryRun: false) requires an applyOp(toolName, payload, op) function');
   }
+  if (!dryRun && typeof ctx.authPreflight !== 'function') {
+    throw new TypeError('real apply (dryRun: false) requires an authPreflight() function — the preflight auth-check is mandatory before any mutation');
+  }
 
   // Load deferred YNAB schemas before the first MCP call (ToolSearch + boot patience).
   await loadDeferredSchemas(ctx.toolSearch, ctx.bootPatience);
 
+  // Auth preflight (real apply only, GAP-8 / #50) — a cheap read-only YNAB call BEFORE
+  // the first mutation confirms the token is valid and write-capable. Any failure
+  // (401 / 403 / network) aborts the whole batch: zero mutations, and NO audit record
+  // for ops that never ran. Dry-run never mutates, so it skips the preflight entirely.
+  if (!dryRun) {
+    try {
+      // Defense in depth (#50): route the preflight result through throwOnErrorResult so a
+      // resolved `{ isError: true }` auth envelope aborts fail-closed here, identical to the
+      // executor's shared preflight gate — the fail-closed guarantee is code-enforced.
+      throwOnErrorResult(await ctx.authPreflight());
+    } catch (err) {
+      const { error_class, applied_state } = classifyError(err);
+      return {
+        ok: false,
+        dry_run: false,
+        aborted: true,
+        reason: OUTCOME.AUTH_PREFLIGHT_FAIL,
+        authFailure: { phase: 'preflight', op_id: null, error_class, applied_state, message: errMessage(err) },
+        total_ops: operations.length,
+        results: [],
+      };
+    }
+  }
+
+  // Per-op loop — process in array order; one audit record per op processed. Two
+  // mutually-exclusive failure policies (#50): a mid-batch AUTH failure (401/403 on the
+  // read or the mutation — the token is bad) aborts the whole batch fail-closed (record
+  // that op, then stop, leaving the tail untouched and un-audited); every other per-op
+  // error (a 422 data error, a 429 rate limit, a 5xx / network fault) is recorded and
+  // the batch CONTINUES.
   const runCtx = { ...ctx, dryRun };
   const results = [];
-  for (const op of operations) {
+  let authFailure = null;
+  for (let index = 0; index < operations.length; index += 1) {
+    const op = operations[index];
     const res = await processReconcileOp(op, runCtx);
     await recordAudit(ctx.audit, op, res, ctx, dryRun);
     results.push(res);
+
+    if (!dryRun && res.status === STATUS.ERROR && isAuthFailure(res.detail.error_class)) {
+      authFailure = {
+        phase: res.detail.phase,
+        op_id: res.op_id,
+        index,
+        error_class: res.detail.error_class,
+        applied_state: res.detail.applied_state,
+      };
+      break;
+    }
   }
-  return { results };
+
+  if (authFailure) {
+    return {
+      ok: false,
+      dry_run: false,
+      aborted: true,
+      reason: OUTCOME.AUTH_ABORT,
+      authFailure,
+      stopped_at_index: authFailure.index,
+      total_ops: operations.length,
+      results,
+    };
+  }
+
+  return {
+    ok: true,
+    dry_run: dryRun,
+    aborted: false,
+    reason: dryRun ? OUTCOME.DRY_RUN_COMPLETE : OUTCOME.APPLY_COMPLETE,
+    results,
+  };
 }
 
 /**

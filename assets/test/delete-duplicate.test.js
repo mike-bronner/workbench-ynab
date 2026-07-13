@@ -47,6 +47,8 @@ function spy(impl) {
 /** readLiveState that echoes each op's own `before` snapshot → never stale. */
 const noDrift = () => spy((op) => clone(op.before));
 const auditSpy = () => spy(() => undefined);
+/** authPreflight that succeeds — a valid, write-capable token (real apply only, #50). */
+const okPreflight = () => spy(() => ({ budgets: [{ id: 'b1' }] }));
 
 // --- registration point ----------------------------------------------------
 
@@ -186,6 +188,7 @@ test('a delete_duplicate op whose victim has drifted is marked stale and skipped
     dryRun: false,
     readLiveState: read,
     applyOp: apply,
+    authPreflight: okPreflight(),
     audit,
   });
 
@@ -233,6 +236,7 @@ test('real apply dispatches exactly the registered delete tool for the victim', 
     dryRun: false,
     readLiveState: noDrift(),
     applyOp: apply,
+    authPreflight: okPreflight(),
     audit: auditSpy(),
   });
   assert.equal(out.results[0].status, STATUS.APPLIED);
@@ -255,6 +259,7 @@ test('the full before-snapshot is audited BEFORE the irreversible delete, not af
     dryRun: false,
     readLiveState: (o) => clone(o.before),
     applyOp: apply,
+    authPreflight: okPreflight(),
     audit,
   });
 
@@ -288,6 +293,104 @@ test('dry-run writes no pending_delete record (no delete to precede)', async () 
   assert.equal(records.some((r) => r.result.status === 'pending_delete'), false);
 });
 
+// --- (#50) auth-failure handling on the irreversible delete path -----------
+
+/** Build a thrown error carrying an HTTP status — the shape a real MCP port surfaces. */
+const httpError = (status, message) => Object.assign(new Error(message || `HTTP ${status}`), { status });
+/** The vendored MCP's error shape: a RESOLVED { isError: true } result, NOT a throw. */
+const isErrorEnvelope = (status, message) => ({
+  isError: true,
+  content: [{ type: 'text', text: `{"error":{"message":"${message} (HTTP ${status})"}}` }],
+});
+/** applyOp (the delete dispatch, 2-arg) that throws `err` for one op id, succeeds otherwise. */
+const deleteFailingOn = (failId, err) => spy((_tool, op) => { if (op.id === failId) throw err; return { ok: true }; });
+
+/** A 3-op delete change-set — each victim distinct from its surviving twin (valid evidence). */
+function threeDeletes() {
+  const base = loadFixture('delete-duplicate.example.json');
+  const mk = (n) => {
+    const o = clone(base.operations[0]);
+    o.id = `op-delete-duplicate-000${n}`;
+    o.transaction_id = `t0000000-0000-4000-8000-00000000d0${n}0`;
+    o.twin.id = `t0000000-0000-4000-8000-00000000d0${n}1`;
+    return o;
+  };
+  return { ...base, operations: [mk(1), mk(2), mk(3)] };
+}
+
+test('(#50) a mid-batch 401 on a delete aborts the batch, records the two-phase trail, and never attempts later deletes', async () => {
+  // The highest-stakes path: an irreversible delete on a revoked token mid-batch. op-1
+  // deletes, op-2 gets a 401, op-3 must NEVER be attempted (fail-closed). The failed op
+  // still leaves the two-phase audit trail #50 guarantees: the pending_delete INTENT
+  // (written before the delete ran) then the error/auth_revoked OUTCOME.
+  const cs = threeDeletes();
+  const [id1, id2, id3] = cs.operations.map((o) => o.id);
+  const apply = deleteFailingOn(id2, httpError(401, 'unauthorized'));
+  const records = [];
+  const audit = async (rec) => { records.push(rec); };
+
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: (o) => clone(o.before), // no drift
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit,
+  });
+
+  assert.equal(out.ok, false);
+  assert.equal(out.aborted, true);
+  assert.equal(out.reason, OUTCOME.AUTH_ABORT);
+  assert.equal(out.stopped_at_index, 1);
+  assert.equal(out.total_ops, 3);
+  // op-1 deleted; op-2 errored (auth); op-3 was NEVER processed.
+  assert.equal(out.results.length, 2);
+  assert.equal(out.results[0].status, STATUS.APPLIED);
+  assert.equal(out.results[1].status, STATUS.ERROR);
+  assert.equal(out.results[1].detail.error_class, 'auth_revoked');
+  assert.equal(out.results[1].detail.applied_state, 'not_applied');
+  // The dispatch stopped fail-closed: the delete tool ran for op-1 + op-2 only, never op-3.
+  assert.equal(apply.calls.length, 2);
+  assert.ok(!apply.calls.some(([, op]) => op.id === id3));
+  // Two-phase trail for the FAILED op: a pending_delete intent (before the delete ran),
+  // THEN the error/auth_revoked outcome — the ambiguous mid-delete state #50 eliminates.
+  const op2Records = records.filter((r) => r.operation.id === id2);
+  assert.deepEqual(op2Records.map((r) => r.result.status), ['pending_delete', 'error']);
+  assert.equal(op2Records[1].result.error_class, 'auth_revoked');
+  assert.equal(op2Records[1].result.applied_state, 'not_applied');
+  // op-3 left NO paper trail at all (un-dispatched tail, AC#2) — not even a pending_delete.
+  assert.equal(records.some((r) => r.operation.id === id3), false);
+});
+
+test('(#50) a delete dispatch that RESOLVES a { isError: true } 401 envelope aborts fail-closed (no fail-open on the destructive path)', async () => {
+  // Defense in depth: even if the injected delete port returns the vendored 401 as a
+  // RESOLVED { isError: true } result (not a throw), the handler routes it through
+  // throwOnErrorResult so it throws → the executor auth-aborts. Without the guard the
+  // irreversible path would read the envelope as a "success" and fail OPEN.
+  const cs = loadFixture('delete-duplicate.example.json');
+  const opId = cs.operations[0].id;
+  const apply = spy(() => isErrorEnvelope(401, 'token revoked')); // RESOLVES, does not throw
+  const records = [];
+  const audit = async (rec) => { records.push(rec); };
+
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: (o) => clone(o.before),
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit,
+  });
+
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, OUTCOME.AUTH_ABORT);
+  assert.equal(out.results[0].status, STATUS.ERROR);
+  assert.equal(out.results[0].detail.error_class, 'auth_revoked');
+  // The intent record was still written before the (failed) dispatch — audit-before-delete.
+  const opRecords = records.filter((r) => r.operation.id === opId);
+  assert.deepEqual(opRecords.map((r) => r.result.status), ['pending_delete', 'error']);
+});
+
 // --- guardrail still governs the path --------------------------------------
 
 test('a delete op missing risk:destructive is blocked by the guardrail through this path', async () => {
@@ -298,6 +401,7 @@ test('a delete op missing risk:destructive is blocked by the guardrail through t
     dryRun: false,
     readLiveState: noDrift(),
     applyOp: spy(),
+    authPreflight: okPreflight(),
     audit: auditSpy(),
   });
   // Either the schema (risk const) or the guardrail rejects it — never applied.
