@@ -396,10 +396,15 @@ Print a clean summary block:
 
   Re-run /workbench-ynab:setup any time — it is idempotent and the
   recommended step after a plugin update.
+
+  ⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.
 ═══════════════════════════════════════════
 ```
 
-Substitute the actual budget names from Step 6 (or note the MCP wasn't reachable
+Print the disclaimer line **verbatim** — it is the canonical not-tax-advice tag
+from [`../skills/shared/disclaimer.md`](../skills/shared/disclaimer.md), identical to
+the one shown in the report, the dispatch summary, and the README. Substitute the
+actual budget names from Step 6 (or note the MCP wasn't reachable
 if Step 6 failed), and the monitor line from Step 7 (`cron "<MON_CRON>"` when
 deployed, `disabled` when `schedules.monitor.enabled: false`, or `skipped` when
 the scheduled-tasks MCP was unreachable).

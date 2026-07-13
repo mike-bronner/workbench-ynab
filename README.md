@@ -15,7 +15,9 @@ Two things make this plugin unusual among workbench plugins, and both are front 
 - **It writes back to YNAB.** Beyond reading, it can categorize, allocate, fix duplicates, and reconcile *inside your budget*. Every write waits for your explicit approval, and the plugin **never moves real money** — see [The read / propose / approve loop](#the-read--propose--approve-loop).
 - **It handles a financial access token.** Your YNAB Personal Access Token is stored **only** in the macOS Keychain — never in the repo, never in a config file, never logged. See [Privacy / where the token lives](#privacy--where-the-token-lives).
 
-> **Not tax advice.** This tool organizes financial data and surfaces tax-relevant signals to help you and your tax professional. It is **not** a substitute for professional tax advice.
+> ⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.
+>
+> This tool produces estimates for organizational purposes only. It is **not** tax, legal, or financial advice, it makes simplifying assumptions, and its figures may be incomplete or wrong for your situation. Consult a qualified tax professional before you file or pay. (Canonical wording: [`skills/shared/disclaimer.md`](skills/shared/disclaimer.md).)
 
 > **Currency & tax scope (v1).** The review reads your budget's `currency_format` and renders every amount in that currency — correct symbol, symbol placement, separators, and decimal digits — so a non-USD budget (EUR `1.234,56 €`, JPY `¥1,234`, …) displays correctly via one shared money helper (`assets/format-money.js`). This is a **presentation** capability only: the **tax engine is US-only** and is **not** extended to any other jurisdiction. A non-USD budget gets correct currency display but the same US-only tax logic — the tax sections assume US federal rules regardless of budget currency.
 

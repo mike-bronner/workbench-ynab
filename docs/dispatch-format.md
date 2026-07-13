@@ -27,11 +27,16 @@ structure that produced it.
 
 ## The shape
 
-A dispatch is exactly these four parts, in order:
+A dispatch is these four fixed parts, in order — plus one **conditional** line (a
+not-tax-advice tag) that appears only when the output carries tax figures:
 
 1. A one-line **header** naming the review (tier + report date).
 2. Exactly **five (5) findings**, one per line, ranked by severity/impact
    **descending** — no more, no fewer.
+2b. A **not-tax-advice disclaimer tag** — *conditional*: present only when tax
+   figures, quarterly estimates, or Schedule amounts appear in the findings (see
+   [Not-tax-advice disclaimer](#6-not-tax-advice-disclaimer-conditional) below). It
+   is not a finding and never counts toward the fixed five.
 3. A **report pointer** line to the saved report path.
 4. A **persona sign-off** line.
 
@@ -101,6 +106,25 @@ Any run-level warnings or notes (`empty_budget`, `tax_profile_error`,
 `ynab_mcp_offline`, plan `warnings`) are carried into the dispatch as findings or
 an appended note line — they are surfaced, never dropped.
 
+### 6. Not-tax-advice disclaimer (conditional)
+
+Whenever the dispatch surfaces **tax figures, quarterly estimates, or Schedule
+amounts** — an SE-tax number, an estimated-tax due amount, a Schedule C/A total, an
+AGI-threshold figure — it carries a single compact **not-tax-advice tag** on its own
+line, placed **between the five findings and the report pointer**:
+
+```
+⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.
+```
+
+This is the **canonical compact tag** — the exact, invariant wording defined once in
+[`../skills/shared/disclaimer.md`](../skills/shared/disclaimer.md) and shared verbatim
+with the report, the README, and the setup output. It is **content, not analysis**: the
+string never varies by tax profile, Schedule, currency, or persona, and it is emitted
+**only when tax content is present** (a weekly or monthly dispatch with no tax figures
+omits it — see those worked examples). The tag is **not a finding**: it never counts
+toward the fixed five and never carries a severity emoji.
+
 ## Tier-agnostic by construction
 
 This contract is **identical for every tier** — weekly, monthly, quarterly-tax,
@@ -160,6 +184,8 @@ YNAB Quarterly-Tax Review — 2026-06-30
 🟡 **Medical spend is at 61% of the AGI deduction threshold.** Track remaining qualifying costs this half-year in case itemizing beats the standard deduction.
 🟢 **All business income is categorized and mapped to Schedule C lines.** Clean books — no reclassification needed for the estimate.
 
+⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.
+
 📄 Full report: ~/Documents/Claude/Reports/YNAB-Quarterly-Tax-Review-2026-06-30.html
 
 — {persona}, your financial assistant
@@ -175,6 +201,8 @@ YNAB Annual Review — 2026-12-31
 🟡 **Three sinking funds are underfunded heading into January.** Top them up or reset their goals so next year's known costs are already covered.
 🟡 **Discretionary spend grew 9% year-over-year, ahead of income.** Worth a category-level look before it becomes next year's baseline.
 🟢 **Net worth rose 14% over the year.** Solid trajectory — the current allocation is working.
+
+⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.
 
 📄 Full report: ~/Documents/Claude/Reports/YNAB-Annual-Review-2026-12-31.html
 

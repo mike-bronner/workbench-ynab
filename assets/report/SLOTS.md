@@ -64,3 +64,9 @@ tier via the `{{tier}}` scalar slot. Neither is hardcoded.
 - The `@media print` block is present and carries the full print contract
   (color-adjust, page-break rules, forced-open `<details>`, sticky/fixed reset,
   `@page` margin, 11pt body / 10pt tables, running footer).
+- The **not-tax-advice disclaimer** is **hardcoded, never a slot** (issue #18): the
+  full disclaimer is a banner near the top of the body (before any tax figures), and
+  the compact tag repeats at the top of the tax section and in the print footer. It is
+  outside the slot system on purpose, so fragment-stitching can never omit it. The
+  canonical wording is the single source of truth in
+  [`../../skills/shared/disclaimer.md`](../../skills/shared/disclaimer.md).
