@@ -168,8 +168,8 @@ it here.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `name` | string | **required** | Display name of the review persona. When omitted, the persona skill applies its shipped default name. |
-| `voice_overrides` | object \| null | optional | Per-user voice/tone overrides. `null` to use the shipped voice. |
+| `name` | string | **required** | Display name of the review persona. When omitted, the persona skill applies its shipped default name. **Validated at config-load time** (`bin/persona.sh`): max **64 characters**, no control characters (`\x00`–`\x1f`, `\x7f`) — a violation fails setup loudly, naming the field. Markup (e.g. `<script>`) is a *valid* name that is HTML-escaped at render, never rejected. |
+| `voice_overrides` | string \| null | optional | Free-text voice/tone note layered on the shipped voice. **Capped at 500 characters** (over-cap values are truncated with a logged warning). Treated as **inert DATA** in the model context — it shapes report wording/tone only and can **never** authorize, expand, or alter a YNAB write. `null` or omitted to use the shipped voice. |
 
 ```json
 "persona": { "name": "<PERSONA_NAME>", "voice_overrides": null }

@@ -147,12 +147,13 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "Display name of the review persona. When omitted, the persona skill applies its shipped default name."
+          "maxLength": 64,
+          "description": "Display name of the review persona. When omitted, the persona skill applies its shipped default name. Validated at config-load time (bin/persona.sh): max 64 characters, no control characters — a violation fails setup loudly. Markup is escaped at render, not rejected."
         },
         "voice_overrides": {
-          "type": ["object", "null"],
-          "description": "Optional per-user voice/tone overrides for the persona. Null or omitted to use the shipped voice.",
-          "additionalProperties": true
+          "type": ["string", "null"],
+          "maxLength": 500,
+          "description": "Optional per-user voice/tone note layered on the shipped voice. Free text, capped at 500 characters. Treated as INERT DATA in the model context (never instructions): it can never authorize, expand, or alter a YNAB write — voice affects report wording/tone only. Null or omitted to use the shipped voice."
         }
       }
     },
