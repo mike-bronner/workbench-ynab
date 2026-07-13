@@ -360,6 +360,22 @@ assert_rc       "AC6: control-char persona.name fails loudly (non-zero exit)" 1 
 assert_contains "AC6: control-char persona.name error names the field"     "persona.name" "$CAP_ERR"
 assert_contains "AC6: control-char persona.name error names the violation" "control character" "$CAP_ERR"
 
+# (c2) a name carrying a bare NEWLINE (\x0a) fails loudly too. grep is line-oriented
+#      — the newline is its record separator, never shown to the [[:cntrl:]] pattern
+#      as content — so the validator guards it explicitly in bash. Regression for the
+#      round-2 blocker where a newline slipped the grep. Delivered as a JSON unicode
+#      escape (valid JSON; jq decodes it to a real 0x0a), built at runtime so no
+#      literal newline is stored in this file — the raw-byte form is invalid JSON and
+#      would merely fall back, masking the bug.
+nl_esc="$(printf '\\u%04x' 10)"                        # the 6 chars backslash-u-0-0-0-a
+ynab_nl="${TMPDIR_TEST}/ynab-nl.json"
+printf '{"persona":{"name":"Cal%svin"}}' "$nl_esc" > "$ynab_nl"
+run_capture "$ynab_nl" "$NO_FILE" name
+assert_rc       "AC6: newline persona.name fails loudly (non-zero exit)" 1 "$CAP_RC"
+assert_contains "AC6: newline persona.name error names the field"     "persona.name" "$CAP_ERR"
+assert_contains "AC6: newline persona.name error names the violation" "control character" "$CAP_ERR"
+assert_absent   "AC6: newline persona.name prints no name to stdout"   "Cal" "$CAP_OUT"
+
 # (d) a multibyte (accented) name within the cap passes untouched — the cap counts
 #     CHARACTERS, and é's continuation byte is not a control character.
 ynab_acc="${TMPDIR_TEST}/ynab-acc.json"
@@ -520,18 +536,56 @@ else
   printf 'FAIL — AC4: capped voice payload is %s chars, expected 501\n' "$plen"; fail=$((fail + 1))
 fi
 
+# AC 4 (boundary): pin the cap at EXACTLY 500. The 600-char fixture above proves
+# truncation happens but not WHERE the threshold sits, so a `-gt`→`-ge` off-by-one
+# would sail through it. Mirror the persona.name 64/65 accept-reject pair: a
+# 500-char voice is accepted verbatim (no warning, no ellipsis, payload 500), and
+# a 501-char voice trips truncation (warning + ellipsis, payload 500+ellipsis=501).
+exact500="$(printf 'y%.0s' $(seq 1 500))"
+ynab_v500="${TMPDIR_TEST}/ynab-v500.json"
+printf '{"persona":{"voice_overrides":"%s"}}' "$exact500" > "$ynab_v500"
+run_capture "$ynab_v500" "$NO_FILE" voice
+assert_absent "AC4: 500-char voice (at the cap) emits no truncation warning" "truncated" "$CAP_ERR"
+assert_absent "AC4: 500-char voice (at the cap) carries no ellipsis"         "…"         "$CAP_OUT"
+payload500="$(printf '%s\n' "$CAP_OUT" | sed -n '6p')"
+len500="$(printf '%s' "$payload500" | LC_ALL=C tr -d '\200-\277' | wc -c | tr -d ' ')"
+if [ "$len500" = "500" ]; then
+  printf 'ok   — AC4: 500-char voice accepted verbatim (inclusive cap boundary)\n'; pass=$((pass + 1))
+else
+  printf 'FAIL — AC4: 500-char voice payload is %s chars, expected 500\n' "$len500"; fail=$((fail + 1))
+fi
+
+over501="$(printf 'y%.0s' $(seq 1 501))"
+ynab_v501="${TMPDIR_TEST}/ynab-v501.json"
+printf '{"persona":{"voice_overrides":"%s"}}' "$over501" > "$ynab_v501"
+run_capture "$ynab_v501" "$NO_FILE" voice
+assert_contains "AC4: 501-char voice (just over cap) warns naming the field" "persona.voice_overrides" "$CAP_ERR"
+assert_contains "AC4: 501-char voice (just over cap) warns it was truncated" "truncated" "$CAP_ERR"
+assert_contains "AC4: 501-char voice (just over cap) ends with an ellipsis"  "…" "$CAP_OUT"
+payload501="$(printf '%s\n' "$CAP_OUT" | sed -n '6p')"
+len501="$(printf '%s' "$payload501" | LC_ALL=C tr -d '\200-\277' | wc -c | tr -d ' ')"
+if [ "$len501" = "501" ]; then
+  printf 'ok   — AC4: 501-char voice truncated to 500 + ellipsis (just past the cap)\n'; pass=$((pass + 1))
+else
+  printf 'FAIL — AC4: 501-char capped voice payload is %s chars, expected 501\n' "$len501"; fail=$((fail + 1))
+fi
+
 # ---- AC 5/8/9: the write-authorization gate is isolated from persona config ---
 # Prove it structurally: every file that authorises or performs a YNAB write —
-# the apply executor, the write-safety guardrail, and the three write handlers
-# (categorize / delete-duplicate / reconcile) — reads NO persona/voice config, so
-# a voice_overrides value has no path to tool authority, approval, or the MCP.
+# the apply executor, the write-safety guardrail, and the four write handlers
+# (categorize / delete-duplicate / reconcile / allocate) — reads NO persona/voice
+# config, so a voice_overrides value has no path to tool authority, approval, or
+# the MCP. allocate-handler.js is a genuine fourth write path (dispatches allocate
+# ops to ynab_update_category), a direct peer of the other three — omitting it
+# would leave the write-handler class only partly covered against a future leak.
 #
 # The existence assertion is load-bearing: `grep` on a MISSING path exits non-zero,
 # which without the guard would land in the else (isolated) branch and report a
 # renamed/moved gate as "isolated" while testing nothing — a vacuous pass. Asserting
 # the file exists first makes the check fail loud if a gate is ever relocated.
 for gate in assets/apply-executor.js assets/write-safety-guardrail.js \
-            assets/categorize-handler.js assets/delete-duplicate.js assets/reconcile-handler.js; do
+            assets/categorize-handler.js assets/delete-duplicate.js \
+            assets/reconcile-handler.js assets/allocate-handler.js; do
   if [ ! -f "${REPO_ROOT}/${gate}" ]; then
     printf 'FAIL — AC8/9: write gate %s is missing — the isolation check cannot vacuously pass on a moved/renamed file\n' "$gate"
     fail=$((fail + 1))

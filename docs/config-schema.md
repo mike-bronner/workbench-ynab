@@ -42,7 +42,7 @@ loader, the JSON Schema, or any default.
 | `business` | object | optional | Side-business config (accounts, category group, expense categories). |
 | `tax_profile` | object | **required** | Data-driven, generic tax parameters. |
 | `mapping_rules` | array | optional | Payee/category → tax-line rules, expressed as data. |
-| `persona` | object | **required** | The financial-review persona (configurable name). |
+| `persona` | object | optional | The financial-review persona (configurable name); absent → shipped default (Hobbes). |
 | `report` | object | **required** | Report output directory + template path. |
 | `schedules` | object | optional | Scheduled-task cadences for background tasks (e.g. the monitoring poll). |
 
@@ -160,15 +160,16 @@ Each element:
 
 ---
 
-### `persona` *(object, required)*
+### `persona` *(object, optional)*
 
 The financial-review persona. The **name is a config field, not a constant** — the
 default voice is shipped by the persona skill (issue #36), and the user may rename
-it here.
+it here. The whole block is **optional**: an absent `persona` (or an absent/blank
+`name`) falls back silently to the shipped default (Hobbes) at config-load.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `name` | string | **required** | Display name of the review persona. When omitted, the persona skill applies its shipped default name. **Validated at config-load time** (`bin/persona.sh`): max **64 characters**, no control characters (`\x00`–`\x1f`, `\x7f`) — a violation fails setup loudly, naming the field. Markup (e.g. `<script>`) is a *valid* name that is HTML-escaped at render, never rejected. |
+| `name` | string | optional | Display name of the review persona. When omitted or blank, the persona skill applies its shipped default name (Hobbes) — no error. When **present**, it is **validated at config-load time** (`bin/persona.sh`): max **64 characters**, no control characters (`\x00`–`\x1f`, `\x7f`) — a violation fails setup loudly, naming the field. Markup (e.g. `<script>`) is a *valid* name that is HTML-escaped at render, never rejected. |
 | `voice_overrides` | string \| null | optional | Free-text voice/tone note layered on the shipped voice. **Capped at 500 characters** (over-cap values are truncated with a logged warning). Treated as **inert DATA** in the model context — it shapes report wording/tone only and can **never** authorize, expand, or alter a YNAB write. `null` or omitted to use the shipped voice. |
 
 ```json

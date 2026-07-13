@@ -4,7 +4,7 @@
   "title": "workbench-ynab config.json",
   "description": "User configuration for the workbench-ynab plugin. Lives OUTSIDE the repo at $HOME/.claude/plugins/data/workbench-ynab-claude-workbench/config.json so it survives plugin updates. Read by plugin SKILLS and commands via bin/config.sh — never by the vendored MCP launcher. All tax logic is data-driven: any user's situation is one config instance, never a schema constant.",
   "type": "object",
-  "required": ["schema_version", "budget", "tax_profile", "persona", "report"],
+  "required": ["schema_version", "budget", "tax_profile", "report"],
   "additionalProperties": false,
   "properties": {
     "schema_version": {
@@ -141,9 +141,8 @@
     },
     "persona": {
       "type": "object",
-      "description": "The financial-review persona. The name is a CONFIG FIELD, not a constant: the default voice is supplied by the persona skill (issue #36), and the user may rename it here.",
+      "description": "The financial-review persona. The name is a CONFIG FIELD, not a constant: the default voice is supplied by the persona skill (issue #36), and the user may rename it here. The whole block is OPTIONAL and so is name: an absent persona (or an absent/blank name) falls back silently to the shipped default (Hobbes) at config-load — see bin/persona.sh — so neither is marked required, matching that behaviour.",
       "additionalProperties": false,
-      "required": ["name"],
       "properties": {
         "name": {
           "type": "string",
