@@ -18,7 +18,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -78,6 +78,8 @@ function assertSuggestionShape(s) {
   assert.equal(typeof s.confidence, 'number');
   assert.ok(s.confidence >= 0 && s.confidence <= 1);
   assert.equal(typeof s.reason, 'string');
+  // matchedRuleId is a documented TaxSuggestion field: a rule id string, or null.
+  assert.ok(s.matchedRuleId === null || typeof s.matchedRuleId === 'string');
   if ('businessEntityId' in s && s.businessEntityId !== undefined) {
     assert.equal(typeof s.businessEntityId, 'string');
   }
@@ -89,6 +91,7 @@ test('AC#3 classifyTransaction returns { taxLineId, confidence, reason, business
   assertSuggestionShape(s);
   assert.equal(s.taxLineId, 'schedC.27a'); // GitHub → Schedule C other expenses
   assert.ok(s.confidence > 0);
+  assert.equal(s.matchedRuleId, 'dev-tools-saas-hosting'); // the matched rule id, for traceability
   // Defaults carry no business entities, so $profile cannot resolve one.
   assert.equal(s.businessEntityId, undefined);
 });
@@ -112,8 +115,14 @@ test('AC#4 classifyBatch returns one suggestion per input, in order, same shape'
   assert.ok(Array.isArray(out));
   assert.equal(out.length, txns.length);
   for (const s of out) assertSuggestionShape(s);
-  // Order is preserved: index 0 is the GitHub expense line.
+  // Order is preserved and each input maps to its OWN line — assert both, not
+  // just index 0: index 0 → the GitHub expense line (a matched rule); index 1 →
+  // the unmatched income txn (the 'unclassified' sentinel with a null rule id).
   assert.equal(out[0].taxLineId, 'schedC.27a');
+  assert.equal(out[0].matchedRuleId, 'dev-tools-saas-hosting');
+  assert.equal(out[1].taxLineId, 'unclassified');
+  assert.equal(out[1].confidence, 0);
+  assert.equal(out[1].matchedRuleId, null);
   // A non-array input degrades to an empty array, never throws.
   assert.deepEqual(classifyBatch(null, profile), []);
 });
@@ -136,8 +145,16 @@ test('AC#5 computeTaxSummary composes P&L, Schedule A, medical, SE tax, and next
   };
   const summary = computeTaxSummary(profile, ytdData);
 
-  // Schedule C P&L by line + totals.
+  // Schedule C P&L by line + totals. Inspect per-line CONTENTS (id/label/category/
+  // amount), not just the array length — a dropped or mangled field would slip past
+  // a length check.
   assert.equal(summary.scheduleC.lines.length, 2);
+  assert.deepEqual(summary.scheduleC.lines[0], {
+    taxLineId: 'schedC.1', label: 'Gross receipts', category: 'income', amount: 42000,
+  });
+  assert.deepEqual(summary.scheduleC.lines[1], {
+    taxLineId: 'schedC.8', label: 'Advertising', category: 'expense', amount: 12000,
+  });
   assert.equal(summary.scheduleC.grossIncome, 42000);
   assert.equal(summary.scheduleC.deductibleExpenses, 12000);
   assert.equal(summary.scheduleC.netProfit, 30000);
@@ -189,6 +206,109 @@ test('AC#5 computeTaxSummary tolerates empty ytdData without throwing', () => {
   assert.equal(summary.scheduleC.netProfit, 0);
   assert.equal(summary.medical.exceedsThreshold, false); // 0 medical, 0 threshold
   assert.equal(summary.seTax.amount, 0);
+});
+
+// --- Facade-authored branches: the parts computeTaxSummary owns (not delegated) --
+
+test('computeTaxSummary throws — never emits a NaN due date — when taxYear is unresolved', () => {
+  // The defaults-only first-run profile carries no taxYear/filingStatus. Following
+  // the module's OWN "HOW M2 CALLS THIS" example (no taxYear in ytdData) must FAIL
+  // LOUD rather than sort 'undefined'/'NaN' date strings into a 'NaN-01-15' due
+  // date that slips silently into the M2 report. This pins the headline #1 fix.
+  const profile = loadFixtureProfile();
+  assert.throws(
+    () =>
+      computeTaxSummary(profile, {
+        asOfDate: '2025-05-01',
+        scheduleCLines: [{ taxLineId: 'schedC.1', category: 'income', amount: 42000 }],
+        itemizedDeductionsTotal: 21000,
+        medicalExpenses: 9000,
+        agi: 120000,
+      }),
+    /resolvable taxYear/,
+  );
+});
+
+test('computeTaxSummary yields nextQuarterlyPayment=null when no due date remains', () => {
+  const profile = loadFixtureProfile();
+  // Q4 2025 falls due 2026-01-15; an anchor past it leaves nothing upcoming, so
+  // the null branch (index.mjs) is asserted explicitly, not hit incidentally.
+  const summary = computeTaxSummary(profile, {
+    taxYear: 2025,
+    filingStatus: 'single',
+    asOfDate: '2026-02-01',
+  });
+  assert.equal(summary.nextQuarterlyPayment, null);
+});
+
+test('scheduleA breaks the itemized==standard tie toward standard (> not >=)', () => {
+  const profile = loadFixtureProfile();
+  const std = profile.getStandardDeduction(2025, 'single');
+  // Itemized exactly equal to the standard deduction — the boundary a `>=` slip
+  // would flip. Expected values are PINNED, not re-derived from the production
+  // comparison, so a `>` vs `>=` regression is actually caught.
+  const summary = computeTaxSummary(profile, {
+    taxYear: 2025,
+    filingStatus: 'single',
+    itemizedDeductionsTotal: std,
+  });
+  assert.equal(summary.scheduleA.recommendation, 'standard');
+  assert.equal(summary.scheduleA.advantage, 0);
+});
+
+test('nextQuarterly uses the incremental liability when priorCumulative is supplied', () => {
+  const profile = loadFixtureProfile();
+  const seRate = profile.getThreshold('seTaxRate');
+  const brackets = profile.getIncomeTaxBrackets(2025, 'single') ?? [];
+  // A prior-quarter snapshot → the next quarter's estimate is the exact
+  // INCREMENTAL liability, exercising the `ytdData.priorCumulative` branch rather
+  // than the null full-cumulative fallback the other AC#5 test hits.
+  const prior = computeEstimate({
+    grossIncome: 20000,
+    deductibleExpenses: 5000,
+    seRate,
+    brackets,
+    meta: { taxYear: 2025, filingStatus: 'single', asOfDate: '2025-04-15' },
+  });
+  const summary = computeTaxSummary(profile, {
+    taxYear: 2025,
+    filingStatus: 'single',
+    asOfDate: '2025-05-01',
+    scheduleCLines: [
+      { taxLineId: 'schedC.1', category: 'income', amount: 42000 },
+      { taxLineId: 'schedC.8', category: 'expense', amount: 12000 },
+    ],
+    priorCumulative: prior,
+  });
+  const cumulative = computeEstimate({
+    grossIncome: 42000,
+    deductibleExpenses: 12000,
+    seRate,
+    brackets,
+    meta: { taxYear: 2025, filingStatus: 'single', asOfDate: '2025-05-01' },
+  });
+  const expectedIncremental = quarterlyEstimate(cumulative, prior).quarterLiability;
+  const fullCumulative = quarterlyEstimate(cumulative, null).quarterLiability;
+  assert.equal(summary.nextQuarterlyPayment.estimatedAmount, expectedIncremental);
+  // The incremental path is genuinely distinct from the full-cumulative fallback,
+  // so the equality above actually proves the branch was taken.
+  assert.notEqual(expectedIncremental, fullCumulative);
+});
+
+// --- Bad-profile handling: a failed load is refused consistently everywhere -----
+
+test('a failed profile load is refused consistently across classify/batch/summary', () => {
+  // An invalid-JSON user profile → loadEffectiveProfile returns { ok:false }.
+  const badPath = join(TMP, 'invalid-profile.json');
+  writeFileSync(badPath, '{ not valid json');
+  const bad = loadEffectiveProfile({ profilePath: badPath });
+  assert.equal(bad.ok, false);
+  // All three consumers must refuse it the SAME way — never silently classify a
+  // failure envelope into a plausible-looking suggestion, never leak a raw
+  // TypeError. The docstring tells M2 to check `.ok`; reaching here is a caller bug.
+  assert.throws(() => classifyTransaction(GITHUB_TXN, bad), /failed profile load/);
+  assert.throws(() => classifyBatch([GITHUB_TXN], bad), /failed profile load/);
+  assert.throws(() => computeTaxSummary(bad, { taxYear: 2025, filingStatus: 'single' }), /failed profile load/);
 });
 
 // --- AC #11: the facade writes nothing to stdout -----------------------------
