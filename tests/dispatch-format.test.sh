@@ -54,6 +54,17 @@ assert_absent() {
   fi
 }
 
+# tier_block <#### Heading> — prints the lines of one tier's worked-example block:
+# everything after the `#### <Tier> tier` heading up to (not including) the next
+# `#### ` or `## ` heading. Lets per-example assertions scope to a single tier.
+tier_block() {
+  awk -v h="$1" '
+    $0 == h { inblk = 1; next }
+    inblk && (/^#### / || /^## /) { exit }
+    inblk { print }
+  ' "$SPEC"
+}
+
 # ---- the spec exists at the AC-specified path ---------------------------------
 if [ ! -f "$SPEC" ]; then
   printf 'FAIL — spec missing at %s\n' "$SPEC"
@@ -110,24 +121,60 @@ for heading in "Weekly tier" "Monthly tier" "Quarterly-Tax tier" "Annual tier"; 
   assert_present "worked example: $heading" "#### $heading"
 done
 
-# Count the finding lines inside each tier's worked-example block. A finding line
-# is the only kind that carries bold (`**`) inside a `#### <Tier> tier` block, so
-# counting `**`-bearing lines per block is locale-safe (no multibyte-emoji match
-# needed) and yields exactly five per tier.
-counts="$(awk '
-  /^#### / { tier=$0; next }        # enter a tier example block
-  /^## /   { tier="" }              # a level-2 heading ends the examples section
-  tier!="" && /\*\*/ { n[tier]++ }
-  END { for (t in n) printf "%d\t%s\n", n[t], t }
+# Walk each tier's worked-example block and score its finding lines by their
+# leading severity emoji, so the guard bites *inside the examples* — where a
+# static doc drifts. A finding line is `^{🔴|🟡|🟢} **…`; keying on that prefix
+# (not a bare `**`) is what enforces, per example: exactly five findings, only
+# the approved emoji set, the emoji-prefix + bold structure, and — since the
+# severities are ranked 🔴=3 🟡=2 🟢=1 — non-increasing (descending) order. BSD
+# awk matches the literal multibyte emoji prefix byte-for-byte regardless of
+# locale (there are no regex metacharacters in the emoji itself), so no
+# locale-specific matching is needed.
+tier_stats="$(awk '
+  /^#### / { tier=$0; prev=99; ord[tier]=1; next }   # enter a tier example block
+  /^## /   { tier="" }                               # a level-2 heading ends them
+  tier!="" {
+    sev = 0
+    if      (/^🔴 \*\*/) sev = 3
+    else if (/^🟡 \*\*/) sev = 2
+    else if (/^🟢 \*\*/) sev = 1
+    if (sev) {
+      n[tier]++
+      if (sev > prev) ord[tier] = 0   # a higher severity after a lower one = not descending
+      prev = sev
+    }
+  }
+  END { for (t in n) printf "%d\t%d\t%s\n", n[t], ord[t], t }
 ' "$SPEC")"
 
 expected_tiers=("#### Weekly tier" "#### Monthly tier" "#### Quarterly-Tax tier" "#### Annual tier")
 for t in "${expected_tiers[@]}"; do
-  c="$(printf '%s\n' "$counts" | awk -F'\t' -v want="$t" '$2==want {print $1}')"
+  stat="$(printf '%s\n' "$tier_stats" | awk -F'\t' -v want="$t" '$3==want {print $1"\t"$2}')"
+  c="$(printf '%s' "$stat" | cut -f1)"
+  o="$(printf '%s' "$stat" | cut -f2)"
+
+  # exactly five emoji-prefixed findings (AC: "exactly 5 findings", approved
+  # emoji set, per-finding emoji-prefix structure — all enforced by the key).
   if [ "${c:-0}" -eq 5 ]; then
-    printf 'ok   — %s renders exactly 5 findings\n' "$t"; pass=$((pass + 1))
+    printf 'ok   — %s renders exactly 5 emoji-prefixed findings\n' "$t"; pass=$((pass + 1))
   else
-    printf 'FAIL — %s renders %s findings, expected 5\n' "$t" "${c:-0}"; fail=$((fail + 1))
+    printf 'FAIL — %s renders %s emoji-prefixed findings, expected 5\n' "$t" "${c:-0}"; fail=$((fail + 1))
+  fi
+
+  # severities non-increasing 🔴→🟡→🟢 (AC: "ranked by severity/impact descending").
+  if [ "${o:-0}" -eq 1 ]; then
+    printf 'ok   — %s findings are in non-increasing severity order\n' "$t"; pass=$((pass + 1))
+  else
+    printf 'FAIL — %s findings break descending severity order (🔴→🟡→🟢)\n' "$t"; fail=$((fail + 1))
+  fi
+
+  # the example's own report pointer carries the writer filename shape for THIS
+  # tier — guards against a stray/placeholder path passing (AC: report pointer).
+  ftier="${t#\#### }"; ftier="${ftier% tier}"
+  if tier_block "$t" | grep -qE "^📄 Full report:.*YNAB-${ftier}-Review-[0-9]{4}-[0-9]{2}-[0-9]{2}\.html$"; then
+    printf 'ok   — %s report pointer matches YNAB-%s-Review-<date>.html\n' "$t" "$ftier"; pass=$((pass + 1))
+  else
+    printf 'FAIL — %s report pointer missing or wrong filename shape\n' "$t"; fail=$((fail + 1))
   fi
 done
 
