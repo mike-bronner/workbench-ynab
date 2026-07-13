@@ -167,6 +167,10 @@ assert_present    "references the dispatch-format contract" "docs/dispatch-forma
 
 # ---- trust boundary: HTML-escape YNAB strings --------------------------------
 assert_present "HTML-escapes untrusted YNAB strings" "HTML-escape"
+# The escaping must route through the ONE shared, audited helper (issue #30), not
+# ad-hoc hand-escaping — so the section emitters and persona/report-writer all use
+# a single implementation that can't drift.
+assert_present "routes YNAB strings through the shared escaper" "bin/html-escape.sh"
 
 # ---- milliunit rule (AC) -----------------------------------------------------
 assert_present_re "divides milliunits by 1000" "milliunit|/ ?1000|by .*1000"

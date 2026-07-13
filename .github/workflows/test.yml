@@ -30,15 +30,21 @@ jobs:
           node-version: lts/*
 
       # scripts/test.sh is the one true entrypoint (bash suite needs bash + jq +
-      # shasum; Node suite needs node — all present on ubuntu-latest). With no
-      # args it auto-discovers and runs the FULL suite — every tests/**/*.test.sh
-      # (bash) and tests/**/*.test.{mjs,js} (Node), including the offline-boot
-      # proof — so new test files gate here automatically. This now includes
-      # tests/persona-loader.test.sh: its bash≥5 footer-escaping bug (#126) is
-      # fixed, so the temporary exclusion that kept it off the GNU/Linux runner
-      # (where it failed while passing on macOS bash 3.2) is gone.
-      - name: Run the full test suite
-        run: bash scripts/test.sh
+      # shasum; Node suite needs node — all present on ubuntu-latest). It runs the
+      # FULL discovered suite, including tests/persona-loader.test.sh: its former
+      # bash≥5 footer-escaping failure (#126) was a `patsub_replacement` bug in
+      # bin/persona.sh's private escaper, fixed in #30 by routing persona through
+      # the shared bin/html-escape.sh (which disables patsub_replacement). The
+      # offline-boot proof and the full Node suite gate here too. `find` is
+      # dynamic, so new test files are picked up automatically.
+      - name: Run the test suite
+        run: |
+          files=()
+          while IFS= read -r f; do files+=("$f"); done < <(
+            find tests -type f \( -name '*.test.sh' -o -name '*.test.mjs' -o -name '*.test.js' \) \
+              -not -path 'tests/lib/*' | sort
+          )
+          bash scripts/test.sh "${files[@]}"
 
   # The assets/ change-set integration suite (M4) exercises the real apply
   # executor and the Ajv-backed validator end to end (assets/test/*.test.js), so
