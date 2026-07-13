@@ -18,6 +18,15 @@
  *  - FAIL-CLOSED at the guardrail. The whole change-set runs through
  *    `evaluateChangeset` first; a single blocked operation aborts the ENTIRE
  *    batch — nothing is applied past (or around) a block.
+ *  - AUTH FAIL-CLOSED, both ends (real apply only, GAP-8 / #50). A preflight
+ *    read-only call (`authPreflight`, e.g. ynab_list_budgets) runs BEFORE the first
+ *    mutation; any failure aborts with zero mutations and no per-op audit records.
+ *    And if a 401/403 surfaces mid-batch, the loop STOPS immediately (the token is
+ *    bad — continuing would just fail every remaining op). An auth failure aborts the
+ *    whole batch; a single-op data error (422), a rate limit (429), or an
+ *    indeterminate 5xx / network fault is recorded per-op and the batch CONTINUES —
+ *    two mutually-exclusive policies. Every errored op's audit record carries an
+ *    `error_class` and `applied_state` (the substrate the resume design, #48, reads).
  *  - PURE ORCHESTRATOR, INJECTED I/O. This module owns the control flow but holds
  *    no MCP or filesystem coupling: the side-effecting operations are injected as
  *    ports — `readLiveState(op)` (read-only entity resolution + drift detection),
@@ -66,6 +75,7 @@
  *     toolMap: { categorize: '<namespaced tool>', ... },  // the registration point
  *     readLiveState: async (op) => ({ ...fields shaped like op.before }),
  *     applyOp: async (toolName, op) => ({ ...mcp result }),  // real apply only
+ *     authPreflight: async () => ({ ...ynab_list_budgets result }),  // real apply only
  *     audit: async ({ operation, result, dryRun }) => { ... },
  *     // Optional bulk capability (categorize / any batchable write path):
  *     bulkToolMap: { categorize: '<namespaced bulk tool>', ... },
@@ -81,6 +91,13 @@ const {
   evaluateOperation,
   evaluateTool,
 } = require('./write-safety-guardrail');
+const {
+  APPLIED_STATE,
+  classifyError,
+  isAuthFailure,
+  remediation,
+  throwOnErrorResult,
+} = require('./write-error');
 
 /**
  * The per-operation result statuses. This is the contract M4-5 renders for the
@@ -102,6 +119,8 @@ const OUTCOME = Object.freeze({
   SCHEMA_INVALID: 'schema_invalid',
   GUARDRAIL_BLOCK: 'guardrail_block',
   TOOL_BLOCK: 'tool_block',
+  AUTH_PREFLIGHT_FAIL: 'auth_preflight_fail',
+  AUTH_ABORT: 'auth_abort',
   DRY_RUN_COMPLETE: 'dry_run_complete',
   APPLY_COMPLETE: 'apply_complete',
 });
@@ -167,12 +186,15 @@ function errMessage(err) {
 async function prepareOp(op, { activeBudgetId, dryRun, toolMap, readLiveState }) {
   const opId = op.id == null ? null : op.id;
 
-  // Re-read live state before processing (both modes). A read failure is a per-op error.
+  // Re-read live state before processing (both modes). A read failure is a per-op
+  // error, classified so an auth failure (a dead token surfaces on the read too)
+  // aborts the batch and the audit record carries error_class / applied_state.
   let live;
   try {
     live = await readLiveState(op);
   } catch (err) {
-    return { result: { op_id: opId, status: STATUS.ERROR, dry_run: dryRun, detail: { phase: 'read', message: errMessage(err) } } };
+    const { error_class, applied_state } = classifyError(err);
+    return { result: { op_id: opId, status: STATUS.ERROR, dry_run: dryRun, detail: { phase: 'read', message: errMessage(err), error_class, applied_state } } };
   }
 
   // Drift detection — compare live to the op's `before` snapshot.
@@ -220,7 +242,12 @@ async function applyOneOp(op, { toolMap, applyOp }) {
     const result = await applyOp(toolName, op);
     return { op_id: opId, status: STATUS.APPLIED, dry_run: false, detail: { tool: toolName, result: result == null ? null : result } };
   } catch (err) {
-    return { op_id: opId, status: STATUS.ERROR, dry_run: false, detail: { phase: 'apply', tool: toolName, message: errMessage(err) } };
+    // Classify the mutation failure: error_class drives the abort-vs-continue
+    // decision in the loop (auth → abort; data error / rate limit / 5xx → per-op
+    // error, continue) and applied_state (not_applied vs unknown) lets a later
+    // resume reason about whether the mutation may have landed.
+    const { error_class, applied_state } = classifyError(err);
+    return { op_id: opId, status: STATUS.ERROR, dry_run: false, detail: { phase: 'apply', tool: toolName, message: errMessage(err), error_class, applied_state } };
   }
 }
 
@@ -294,8 +321,22 @@ async function applyBulkGroup(ops, { bulkToolMap, bulkApplyOp, toolMap, applyOp 
   try {
     result = await bulkApplyOp(bulkTool, ops);
   } catch (err) {
+    // The bulk dispatch threw. Fall back to per-op applyOp so the survivors still apply
+    // individually (safe — a bulk-capable path opts in for idempotent ops) — BUT stop the
+    // moment a per-op call itself auth-fails, mirroring the outer dispatch abort. Before
+    // the isError→throw port wiring (#50), a whole-bulk 401/403 came back as a RESOLVED
+    // `{ isError: true }` envelope and never entered this catch; now it throws, so it
+    // lands here too. Re-dispatching the WHOLE group against a dead token would (a)
+    // violate AC #3 (attempt every remaining op on a revoked credential) and (b) risk an
+    // un-audited apply if a later op flakily succeeded after an earlier one auth-failed
+    // and the outer loop had already broken past its index. Breaking on the first
+    // auth-classified result records that op and leaves the rest un-dispatched.
     const out = [];
-    for (const op of ops) out.push(await applyOneOp(op, { toolMap, applyOp }));
+    for (const op of ops) {
+      const res = await applyOneOp(op, { toolMap, applyOp });
+      out.push(res);
+      if (res.status === STATUS.ERROR && isAuthFailure(res.detail.error_class)) break;
+    }
     return out;
   }
   // Resolved — but inspect the payload FAIL-CLOSED: a resolved bulk result can
@@ -310,7 +351,19 @@ async function applyBulkGroup(ops, { bulkToolMap, bulkApplyOp, toolMap, applyOp 
         || (unconfirmed
           ? 'bulk update resolved without confirming this op — no matching per-entry result; recorded error, not applied (fail-closed)'
           : 'bulk update reported this entry as failed');
-      return { op_id: opId, status: STATUS.ERROR, dry_run: false, detail: { phase: 'apply', tool: bulkTool, bulk: true, message, result: entry == null ? (result == null ? null : result) : entry } };
+      // AC #4: a bulk per-entry failure still needs an audit-grade error_class /
+      // applied_state — never null. A RESOLVED bulk call means the HTTP request itself
+      // succeeded, so a per-entry failure is a data-level rejection, never an auth /
+      // rate class — hence classifyError stamps `unknown` here. applied_state comes from
+      // what the payload proves (the classifier can't see it on a non-thrown envelope):
+      // an entry YNAB positively marked `failed` did NOT apply → not_applied; an
+      // unconfirmed / off-contract / missing entry is indeterminate → unknown (the safe
+      // resume direction for #48).
+      const { error_class } = classifyError(entry);
+      const applied_state = entry && entry.status === 'failed'
+        ? APPLIED_STATE.NOT_APPLIED
+        : APPLIED_STATE.UNKNOWN;
+      return { op_id: opId, status: STATUS.ERROR, dry_run: false, detail: { phase: 'apply', tool: bulkTool, bulk: true, message, error_class, applied_state, result: entry == null ? (result == null ? null : result) : entry } };
     }
     return { op_id: opId, status: STATUS.APPLIED, dry_run: false, detail: { tool: bulkTool, bulk: true, result: entry } };
   });
@@ -324,11 +377,12 @@ async function applyBulkGroup(ops, { bulkToolMap, bulkApplyOp, toolMap, applyOp 
  * so every attempt leaves a paper trail with `dry_run` stamped.
  */
 async function recordAudit(audit, op, result, changeset, toolMap, dryRun) {
+  const detail = result.detail || {};
   // Record the tool that ACTUALLY ran when the result names one (a bulk dispatch
   // records the bulk tool, not the per-op tool); otherwise fall back to the op's
   // registered per-op tool (dry-run / skipped / blocked ops name no tool).
-  const tool = result && result.detail && typeof result.detail.tool === 'string'
-    ? result.detail.tool
+  const tool = typeof detail.tool === 'string'
+    ? detail.tool
     : (toolMap[op.type] == null ? null : toolMap[op.type]);
   await audit({
     operation: op,
@@ -337,6 +391,11 @@ async function recordAudit(audit, op, result, changeset, toolMap, dryRun) {
       status: result.status,
       schema_version: changeset.schema_version == null ? null : changeset.schema_version,
       run_id: changeset.source == null ? null : changeset.source,
+      // Present only on an errored op; null everywhere else. These two fields are
+      // the substrate the idempotent-resume design (#48) reads to reason about a
+      // failed op without re-querying — so they flow all the way to the audit log.
+      error_class: detail.error_class == null ? null : detail.error_class,
+      applied_state: detail.applied_state == null ? null : detail.applied_state,
     },
     dryRun,
   });
@@ -361,6 +420,10 @@ async function recordAudit(audit, op, result, changeset, toolMap, dryRun) {
  *   live entity state for drift detection (read-only namespaced MCP reads).
  * @param {(toolName:string, op:object)=>(unknown|Promise<unknown>)} [options.applyOp] REQUIRED
  *   when dryRun is false — dispatches the mutating tool for one op.
+ * @param {()=>(unknown|Promise<unknown>)} [options.authPreflight] REQUIRED when dryRun is
+ *   false — a read-only YNAB call (e.g. ynab_list_budgets) that confirms the token is
+ *   valid and write-capable before the first mutation. It must THROW on a non-2xx /
+ *   network failure; any throw aborts the whole batch before any op is dispatched.
  * @param {Record<string,string>} [options.bulkToolMap={}] op-type → namespaced BULK tool.
  *   Supplying it (with bulkApplyOp + bulkFits) opts an op type into single-call batch
  *   dispatch of its survivors; every op is still drift-checked, guardrailed, and audited.
@@ -373,11 +436,12 @@ async function recordAudit(audit, op, result, changeset, toolMap, dryRun) {
  *   options.audit REQUIRED — the append-only audit sink (M4-3).
  * @returns {Promise<{ok:boolean, dry_run:boolean, aborted:boolean, reason:string,
  *   validation?:object, guardrail?:object, toolBlocks?:Array<object>,
+ *   authFailure?:object, total_ops?:number, stopped_at_index?:number,
  *   results:Array<{op_id:string|null, status:string, dry_run:boolean, detail:object}>}>}
  */
 async function applyChangeset(changeset, options = {}) {
   const {
-    activeBudgetId, dryRun = true, toolMap = {}, readLiveState, applyOp, audit,
+    activeBudgetId, dryRun = true, toolMap = {}, readLiveState, applyOp, authPreflight, audit,
     bulkToolMap = {}, bulkApplyOp, bulkFits,
   } = options;
 
@@ -398,6 +462,9 @@ async function applyChangeset(changeset, options = {}) {
   }
   if (!dryRun && typeof applyOp !== 'function') {
     throw new TypeError('real apply (dryRun: false) requires an applyOp(toolName, op) function');
+  }
+  if (!dryRun && typeof authPreflight !== 'function') {
+    throw new TypeError('real apply (dryRun: false) requires an authPreflight() function — the preflight auth-check is mandatory before any mutation');
   }
 
   // 1. Schema validation — reject malformed input and call NO ports.
@@ -458,53 +525,160 @@ async function applyChangeset(changeset, options = {}) {
     }
   }
 
-  // 4. Prepare every op (read → drift-check → per-op guardrail), preserving array
-  //    order, so the survivors are known before any dispatch and can be batched.
-  const prepared = [];
-  for (const op of changeset.operations) {
-    prepared.push({ op, prep: await prepareOp(op, { activeBudgetId, dryRun, toolMap, readLiveState }) });
+  // 3.5. Auth preflight (real apply only) — a cheap read-only YNAB call BEFORE the
+  //      first mutation confirms the token is valid and write-capable. Any failure
+  //      (401 / 403 / network) aborts the whole batch: zero mutations are attempted
+  //      and NO audit record is written for ops that never ran (#50 AC #2). Dry-run
+  //      never mutates, so it skips the preflight entirely.
+  if (!dryRun) {
+    try {
+      // Defense in depth (#50): route the preflight result through throwOnErrorResult so a
+      // vendored `{ isError: true }` auth envelope that RESOLVED (didn't reject) still
+      // aborts fail-closed here — the same guard the categorize port wrappers apply, now
+      // code-enforced at the executor's shared preflight gate for every path that routes
+      // through it (categorize / delete / allocate).
+      throwOnErrorResult(await authPreflight());
+    } catch (err) {
+      const { error_class, applied_state } = classifyError(err);
+      return {
+        ok: false,
+        dry_run: false,
+        aborted: true,
+        reason: OUTCOME.AUTH_PREFLIGHT_FAIL,
+        authFailure: { phase: 'preflight', op_id: null, error_class, applied_state, message: errMessage(err) },
+        total_ops: changeset.operations.length,
+        results: [],
+      };
+    }
   }
 
-  // 5. Dispatch the survivors. Terminal (error/skipped-stale/blocked) results are
-  //    already set; each survivor is filled in by index so array order is preserved.
-  const resultByIndex = new Array(prepared.length);
-  const readyIndices = [];
-  prepared.forEach(({ prep }, i) => {
-    if (prep.result) resultByIndex[i] = prep.result;
-    else readyIndices.push(i);
-  });
+  const operations = changeset.operations;
+
+  // 4. PREPARE every op in array order (read → drift-check → per-op guardrail), so the
+  //    survivors are known before dispatch and same-type survivors can be batched. A
+  //    read-phase AUTH failure (a dead token surfaces on the re-read too) aborts the
+  //    whole batch fail-closed: stop preparing immediately — the remaining ops are then
+  //    never read, never dispatched, and never audited (#50 AC #2/#3, phase-agnostic).
+  const prepared = new Array(operations.length);
+  // A read-phase auth failure during PREPARE stops at the FIRST bad read. It is tracked
+  // SEPARATELY from a dispatch-phase auth failure (step 5): both are genuine failures
+  // that must EACH be audited (#50 AC #4), so neither may clobber the other out of the
+  // audit range. A read abort is always at a HIGHER index than any dispatch abort —
+  // dispatch only walks the survivors BEFORE the bad read.
+  let readAuthFailure = null;
+  let readAuthFailIndex = null;
+  for (let i = 0; i < operations.length; i += 1) {
+    const prep = await prepareOp(operations[i], { activeBudgetId, dryRun, toolMap, readLiveState });
+    prepared[i] = prep;
+    if (!dryRun && prep.result && prep.result.status === STATUS.ERROR
+      && isAuthFailure(prep.result.detail.error_class)) {
+      const { op_id, detail } = prep.result;
+      readAuthFailure = { phase: detail.phase, op_id, index: i, error_class: detail.error_class, applied_state: detail.applied_state };
+      readAuthFailIndex = i;
+      break;
+    }
+  }
+  // Everything through `lastPrepared` has a prep; ops past a read-abort were never read.
+  const lastPrepared = readAuthFailIndex == null ? operations.length - 1 : readAuthFailIndex;
+
+  // 5. DISPATCH the survivors in array order. Two mutually-exclusive failure policies
+  //    (#50 AC #5): a mid-batch AUTH failure (401/403 — the token is bad) aborts the
+  //    whole batch — record that op, then stop, leaving later ops un-dispatched and
+  //    un-audited; every other per-op error (422 data / 429 rate limit / 5xx / network)
+  //    is recorded and the batch CONTINUES. Consecutive same-type survivors go through
+  //    ONE bulk call when a bulk port is wired and the group `bulkFits` (terminal ops
+  //    between them don't break the run — they simply aren't in it); otherwise per-op.
+  const resultByIndex = new Array(operations.length);
+  for (let i = 0; i <= lastPrepared; i += 1) {
+    if (prepared[i].result) resultByIndex[i] = prepared[i].result; // terminal: no dispatch
+  }
+
+  // Record a dispatch-phase (mutation) auth failure at `index`; returns true to signal
+  // the abort. Tracked SEPARATELY from the prepare-phase read abort (above) so a later
+  // read failure isn't dropped from the audit when an earlier mutation aborts at a
+  // lower index (#50 AC #4).
+  let dispatchAuthFailure = null;
+  let dispatchStopIndex = null;
+  const isApplyAuthAbort = (res, index) => {
+    if (res.status === STATUS.ERROR && isAuthFailure(res.detail.error_class)) {
+      dispatchAuthFailure = { phase: res.detail.phase, op_id: res.op_id, index, error_class: res.detail.error_class, applied_state: res.detail.applied_state };
+      dispatchStopIndex = index;
+      return true;
+    }
+    return false;
+  };
 
   if (dryRun) {
     // No mutating dispatch — every survivor is simulated (diff only).
-    for (const i of readyIndices) resultByIndex[i] = simulateResult(prepared[i].op, true);
-  } else {
-    // Group survivors by op-type; a type with a bulk port whose group `bulkFits`
-    // goes through ONE bulk call, else each op applies per-op. Grouping preserves
-    // each op's original index for order-stable result placement.
-    const groups = new Map();
-    for (const i of readyIndices) {
-      const type = prepared[i].op.type;
-      if (!groups.has(type)) groups.set(type, []);
-      groups.get(type).push(i);
+    for (let i = 0; i <= lastPrepared; i += 1) {
+      if (!prepared[i].result) resultByIndex[i] = simulateResult(operations[i], true);
     }
-    for (const [type, indices] of groups) {
-      const ops = indices.map((i) => prepared[i].op);
+  } else {
+    // Walk survivors in array order, batching each run of consecutive same-type
+    // survivors, and short-circuit the moment a dispatch returns an auth failure.
+    let i = 0;
+    dispatch: while (i <= lastPrepared) {
+      if (prepared[i].result) { i += 1; continue; } // terminal — already placed
+      const type = operations[i].type;
+      // Collect this run: same-type survivors, skipping any terminal ops between them.
+      const runIdx = [];
+      let j = i;
+      while (j <= lastPrepared) {
+        if (prepared[j].result) { j += 1; continue; }
+        if (operations[j].type !== type) break;
+        runIdx.push(j);
+        j += 1;
+      }
+      const ops = runIdx.map((k) => operations[k]);
       const canBulk = typeof bulkApplyOp === 'function' && bulkToolMap[type] !== undefined
         && typeof bulkFits === 'function' && bulkFits(ops);
       if (canBulk) {
-        const groupResults = await applyBulkGroup(ops, { bulkToolMap, bulkApplyOp, toolMap, applyOp });
-        indices.forEach((i, k) => { resultByIndex[i] = groupResults[k]; });
+        const runResults = await applyBulkGroup(ops, { bulkToolMap, bulkApplyOp, toolMap, applyOp });
+        for (let k = 0; k < runIdx.length; k += 1) {
+          resultByIndex[runIdx[k]] = runResults[k];
+          if (isApplyAuthAbort(runResults[k], runIdx[k])) break dispatch;
+        }
       } else {
-        for (const i of indices) resultByIndex[i] = await applyOneOp(prepared[i].op, { toolMap, applyOp });
+        for (let k = 0; k < runIdx.length; k += 1) {
+          const res = await applyOneOp(ops[k], { toolMap, applyOp });
+          resultByIndex[runIdx[k]] = res;
+          if (isApplyAuthAbort(res, runIdx[k])) break dispatch;
+        }
       }
+      i = j;
     }
   }
 
-  // 6. Audit every op once, in array order — dry-run and real, applied and skipped.
+  // 6. Audit every PROCESSED op once, in array order — dry-run and real, applied and
+  //    skipped. A dispatch abort bounds the contiguous audited range; the tail past it
+  //    leaves no paper trail (#50 AC #2) — EXCEPT the op whose READ auth-failed during
+  //    prepare, which genuinely failed and must still be recorded (#50 AC #4) even when
+  //    an earlier mutation aborted at a lower index. Un-dispatched survivors in the tail
+  //    have no result and are naturally skipped.
+  const contiguousStop = dispatchStopIndex == null ? lastPrepared : dispatchStopIndex;
   const results = [];
-  for (let i = 0; i < prepared.length; i += 1) {
-    await recordAudit(audit, prepared[i].op, resultByIndex[i], changeset, toolMap, dryRun);
+  for (let i = 0; i <= lastPrepared; i += 1) {
+    const isTailReadAuthFail = i === readAuthFailIndex;
+    if (i > contiguousStop && !isTailReadAuthFail) continue; // aborted tail, un-audited
+    if (resultByIndex[i] === undefined) continue; // survivor never dispatched
+    await recordAudit(audit, operations[i], resultByIndex[i], changeset, toolMap, dryRun);
     results.push(resultByIndex[i]);
+  }
+
+  // The dispatch abort (the lower index — where the mutation halt actually occurred) is
+  // the primary stop for the user message; a read-only abort falls back to its own index.
+  const authFailure = dispatchAuthFailure || readAuthFailure;
+  if (authFailure) {
+    return {
+      ok: false,
+      dry_run: false,
+      aborted: true,
+      reason: OUTCOME.AUTH_ABORT,
+      authFailure,
+      stopped_at_index: authFailure.index,
+      total_ops: operations.length,
+      results,
+    };
   }
 
   return {
@@ -516,10 +690,51 @@ async function applyChangeset(changeset, options = {}) {
   };
 }
 
+/**
+ * Build the human-facing message for an auth-preflight or mid-batch auth abort
+ * (#50 AC #6/#7). It (a) lists the ops that applied before the stop, (b) names the
+ * failed op and its error_class, and (c) states the exact remediation — and it
+ * distinguishes "no changes applied" (preflight, or a first-op failure) from
+ * "N of M ops applied, batch stopped at op K" (a genuine mid-batch failure).
+ * Returns null for any non-auth-failure outcome — the caller renders those (the
+ * dry-run diff, the guardrail block) its own way.
+ * @param {object} outcome an applyChangeset outcome.
+ * @returns {string|null}
+ */
+function describeAuthFailure(outcome) {
+  if (
+    !outcome
+    || (outcome.reason !== OUTCOME.AUTH_PREFLIGHT_FAIL && outcome.reason !== OUTCOME.AUTH_ABORT)
+  ) {
+    return null;
+  }
+
+  const failure = outcome.authFailure || {};
+  const preflight = outcome.reason === OUTCOME.AUTH_PREFLIGHT_FAIL;
+  // Ops that genuinely applied (real apply only) before the stop.
+  const applied = (outcome.results || [])
+    .filter((r) => r.status === STATUS.APPLIED && r.dry_run === false)
+    .map((r) => r.op_id);
+  const total = outcome.total_ops;
+  const stoppedAt = failure.index == null ? null : failure.index + 1; // 1-based op position K
+
+  const headline = preflight || applied.length === 0
+    ? 'No changes applied.'
+    : `${applied.length} of ${total} op(s) applied, batch stopped at op ${stoppedAt}.`;
+
+  const lines = [headline];
+  if (applied.length > 0) lines.push(`Applied before the failure: ${applied.join(', ')}.`);
+  const where = preflight ? 'preflight auth-check' : `op ${failure.op_id}`;
+  lines.push(`Failed at ${where}: ${failure.error_class} (applied_state=${failure.applied_state}).`);
+  lines.push(`Remediation: ${remediation(failure.error_class)}.`);
+  return lines.join('\n');
+}
+
 module.exports = {
   STATUS,
   OUTCOME,
   deepEqual,
   isStale,
   applyChangeset,
+  describeAuthFailure,
 };

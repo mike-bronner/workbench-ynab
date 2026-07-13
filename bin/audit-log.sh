@@ -61,11 +61,19 @@
 #                     human display.
 #   result_json     The apply executor's call descriptor, carrying the MCP-call
 #                   outcome plus the change-set provenance it knows:
-#                     { tool, status, schema_version, run_id }
+#                     { tool, status, schema_version, run_id, error_class?, applied_state? }
 #                   tool   = namespaced MCP tool invoked (e.g. mcp__ynab__ynab_update_transaction)
 #                   status = MCP call status (success | error | dry_run | …)
 #                   schema_version = change-set envelope schema_version (provenance)
 #                   run_id = change-set `source` (the review run id, or "manual")
+#                   error_class   = on an errored op, the failure class (GAP-8 / #50):
+#                                   auth_revoked | insufficient_scope | rate_limited |
+#                                   unknown. Absent/null on a non-error op.
+#                   applied_state = on an errored op, whether the mutation is known
+#                                   NOT to have applied (not_applied) or is
+#                                   indeterminate (unknown). Absent/null otherwise.
+#                   Both default to null when the result omits them, so every prior
+#                   caller stays valid — the resume design (#48) reads these two.
 #   dry_run         true|1|yes → logged with dry_run:true; anything else → false.
 #                   Dry-run attempts are logged too, flagged, so a dry run leaves
 #                   a full paper trail without implying a real mutation.
@@ -201,6 +209,8 @@ _audit_append() {
       after: ($op.after // null),
       tool: ($res.tool // null),
       result_status: ($res.status // null),
+      error_class: ($res.error_class // null),
+      applied_state: ($res.applied_state // null),
       dry_run: $dry
     }' 2>/dev/null)" || {
     echo "audit-log: failed to build record — operation/result must be valid JSON" 1>&2

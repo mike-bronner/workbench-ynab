@@ -320,7 +320,7 @@ fragment (or an empty string when out of scope; the `<section>` stays):
 | `SLOT:section-10-anomalies` | §2 + §4 + §5 + §7 (duplicates, uncategorized, stale, unusual) |
 | `SLOT:section-11-recommendations` | §11 Recommended Actions |
 | `SLOT:section-12-tax-summary` | §12 Tax Summary YTD (empty string when the tier has none) |
-| `SLOT:footer-persona` | `bash "${CLAUDE_PLUGIN_ROOT}/bin/persona.sh" name`, then HTML-escaped (the persona loader's `footer`/`signoff` renderers escape for you; if you inject the bare name, escape it). |
+| `SLOT:footer-persona` | `bash "${CLAUDE_PLUGIN_ROOT}/bin/persona.sh" html-name` — the resolved persona name, already HTML-escaped by the loader's single tested `_html_escape`. Inject verbatim; never hand-escape the raw `name` yourself (one escape function, not an LLM re-implementation). |
 
 **Scalar slots** (`{{name}}`): `{{tier}}` (e.g. `Monthly`, `Quarterly Tax`),
 `{{report_date}}`, `{{output_path}}` (the save path is decided by the report
@@ -408,6 +408,12 @@ warnings/notes (`empty_budget`, `tax_profile_error`, `ynab_mcp_offline`, plan
 `bash "${CLAUDE_PLUGIN_ROOT}/bin/persona.sh" signoff`. Lead with the finding,
 keep the tone of [`../../assets/persona/hobbes.md`](../../assets/persona/hobbes.md):
 warm, plain-spoken, action-oriented, no jargon-as-drama.
+
+The exact rendering contract — the fixed **five-finding** shape, the 🔴/🟡/🟢
+severity emoji (aligned with the M2-5 report badges), the per-finding
+`{emoji} **statement.** action.` structure, the report-pointer line, and the
+sign-off — is frozen in [`../../docs/dispatch-format.md`](../../docs/dispatch-format.md),
+with a worked example for every tier. Render the dispatch to that contract.
 
 ---
 

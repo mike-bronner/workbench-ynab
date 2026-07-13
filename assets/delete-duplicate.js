@@ -42,6 +42,7 @@
  */
 
 const { ALLOWED_TOOLS } = require('./write-safety-guardrail');
+const { throwOnErrorResult } = require('./write-error');
 
 /** The op type this write path handles — the executor toolMap registration key. */
 const OP_TYPE = 'delete_duplicate';
@@ -72,6 +73,18 @@ const VICTIM_SNAPSHOT_FIELDS = Object.freeze([
  * Format raw YNAB milliunits as a display dollar string (integer math, no float
  * round-trip): 1000 milliunits = $1.00, so cents = (|m| mod 1000) / 10.
  * -54990 → "-$54.99"; 250000 → "$250.00"; 1200000 → "$1,200.00".
+ *
+ * ROUNDING — DELIBERATELY DISTINCT FROM formatMoney (issue #150). This helper
+ * TRUNCATES the sub-cent remainder (`Math.floor` of the absolute value); the shared
+ * assets/format-money.js `formatMoney` ROUNDS half-toward-+∞ instead. So on a
+ * fractional-milliunit value the two disagree — e.g. 2995 → "$2.99" here vs "$3.00"
+ * from formatMoney. Left intentionally unreconciled: both formatters only ever receive
+ * whole-cent YNAB amounts on real data, where their outputs are byte-identical, and this
+ * is the destructive delete-preview path — so its behavior is regression-guarded (see
+ * tests/unit/delete-duplicate.test.mjs and tests/unit/format-money.test.mjs, which pin
+ * each direction) rather than churned to match a formatter it can never disagree with in
+ * practice. A tiny negative that floors to zero renders "-$0.00" (the sign comes from
+ * `milliunits < 0`, independent of the rounded magnitude) — also pinned, also inert.
  * @param {number} milliunits integer milliunits.
  * @returns {string}
  */
@@ -282,7 +295,12 @@ function makeAuditingDeleteApplyOp({ applyOp, audit, changeset, dryRun = false }
         dryRun,
       });
     }
-    return applyOp(toolName, op);
+    // Defense in depth (#50): route the delete dispatch through throwOnErrorResult so a
+    // vendored `{ isError: true }` auth / rate / 5xx envelope that RESOLVED (didn't reject)
+    // throws — the executor's auth-abort machinery then fail-closes on the irreversible
+    // write path, code-enforcing the "ports throw on a non-2xx" contract rather than
+    // trusting the injected port to have done it.
+    return throwOnErrorResult(await applyOp(toolName, op));
   };
 }
 
@@ -310,11 +328,13 @@ function makeAuditingDeleteApplyOp({ applyOp, audit, changeset, dryRun = false }
  * @param {boolean} [options.dryRun=true] real apply requires an explicit false.
  * @param {Function} options.readLiveState async (op) => live victim state (wire to ynab_get_transaction).
  * @param {Function} [options.applyOp] async (toolName, op) => mcp result — required for real apply.
+ * @param {Function} [options.authPreflight] async () => read-only YNAB result — required for real apply;
+ *   the executor's pre-mutation auth check (#50). Forwarded verbatim to applyChangeset.
  * @param {Function} options.audit async ({operation, result, dryRun}) => void — the M4-3 audit sink.
  * @returns {Promise<object>} the executor outcome, or the twin_evidence_missing abort.
  */
 async function applyDeleteDuplicates(changeset, options = {}) {
-  const { activeBudgetId, dryRun = true, readLiveState, applyOp, audit } = options;
+  const { activeBudgetId, dryRun = true, readLiveState, applyOp, authPreflight, audit } = options;
 
   const ops = changeset && Array.isArray(changeset.operations) ? changeset.operations : [];
   const twinErrors = [];
@@ -344,6 +364,7 @@ async function applyDeleteDuplicates(changeset, options = {}) {
     toolMap: buildToolMap(),
     readLiveState,
     applyOp: wrappedApplyOp,
+    authPreflight,
     audit,
   });
 }

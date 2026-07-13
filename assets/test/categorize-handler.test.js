@@ -35,7 +35,8 @@ const {
   TOOL_FAMILY_GLOB,
 } = require('../categorize-handler');
 const { ALLOWED_TOOLS } = require('../write-safety-guardrail');
-const { STATUS, OUTCOME } = require('../apply-executor');
+const { STATUS, OUTCOME, describeAuthFailure } = require('../apply-executor');
+const { classifyError } = require('../write-error');
 
 // Resolve the namespaced tools from the guardrail allow-list by suffix, so no
 // literal `mcp__plugin_workbench-ynab_ynab__*` string lives in this file.
@@ -115,7 +116,7 @@ function changeset(ops, over = {}) {
 
 /** Default ctx: the executor's mandatory ports wired to spies + a no-wait sleep. */
 function baseCtx(over = {}) {
-  return { activeBudgetId: BUDGET, readLiveState: noDrift(), audit: auditSpy(), sleep: noWait(), ...over };
+  return { activeBudgetId: BUDGET, readLiveState: noDrift(), authPreflight: spy(async () => ({ budgets: [] })), audit: auditSpy(), sleep: noWait(), ...over };
 }
 
 // --- registration point ----------------------------------------------------
@@ -191,6 +192,113 @@ test('(g) the BULK bulkApplyOp dispatch payload carries ONLY { id, category_id }
       assert.ok(!(forbidden in entry), `bulk entry must not carry ${forbidden}`);
     }
   }
+});
+
+// --- (#50) port wrappers throw on a resolved { isError: true } envelope -----
+
+/** The vendored MCP's error shape: a RESOLVED { isError: true } result, NOT a throw. */
+const isErrorEnvelope = (status, message) => ({
+  isError: true,
+  content: [{ type: 'text', text: `{"error":{"message":"${message} (HTTP ${status})"}}` }],
+});
+
+test('makeCategorizeApplyOp THROWS on a resolved { isError: true } envelope (fail-closed, classifiable)', async () => {
+  // The vendored MCP surfaces a 401 as a resolved { isError: true } result, not a
+  // rejected promise. The wrapper must convert it to a throw so the executor's
+  // auth-abort machinery (which only runs in a catch) engages — else it fails OPEN.
+  const applyOp = makeCategorizeApplyOp({ callTool: spy(async () => isErrorEnvelope(401, 'token revoked')), sleep: noWait() });
+  await assert.rejects(() => applyOp(SINGLE_TOOL, op()), (err) => {
+    assert.equal(classifyError(err).error_class, 'auth_revoked'); // the status survives → classifiable
+    return true;
+  });
+});
+
+test('makeCategorizeBulkApplyOp THROWS on a resolved { isError: true } envelope (fail-closed, classifiable)', async () => {
+  const bulkApplyOp = makeCategorizeBulkApplyOp({ callTool: spy(async () => isErrorEnvelope(403, 'insufficient scope')), sleep: noWait() });
+  const ops = [op({ id: 'op-1', transaction_id: 't-a' }), op({ id: 'op-2', transaction_id: 't-b' })];
+  await assert.rejects(() => bulkApplyOp(BULK_TOOL, ops), (err) => {
+    assert.equal(classifyError(err).error_class, 'insufficient_scope');
+    return true;
+  });
+});
+
+test('a resolved { isError: true } auth envelope from callTool ABORTS the batch (no fail-open) — bulk path', async () => {
+  // End-to-end proof the money path fails CLOSED: two resolvable ops → bulk dispatch;
+  // callTool resolves an { isError: true } 401 for every call. The bulk wrapper throws,
+  // the executor falls back to per-op (also throws), classifies auth_revoked, and aborts
+  // — nothing is recorded applied. Before the wrappers threw, this 401 flowed in as a
+  // payload and the batch fell OPEN.
+  const callTool = spy(async () => isErrorEnvelope(401, 'token revoked'));
+  const audit = auditSpy();
+  const cs = changeset([
+    op({ id: 'op-1', transaction_id: 't-a', after: { category_id: 'c-a', category_name: 'A' } }),
+    op({ id: 'op-2', transaction_id: 't-b', after: { category_id: 'c-b', category_name: 'B' } }),
+  ]);
+  const out = await applyCategorize(cs, baseCtx({ dryRun: false, callTool, audit }));
+
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, OUTCOME.AUTH_ABORT);
+  assert.ok(!out.results.some((r) => r.status === STATUS.APPLIED)); // nothing applied — fail-closed
+});
+
+// --- (#50) a mid-batch auth abort preserves the applied ops (AC#6 / AC#7) ---
+
+test('a mid-batch auth abort PRESERVES the ops that applied — not clobbered as errors (#50 AC#6/#7)', async () => {
+  // op-1 applies, op-2 hits a 401, op-3 never runs. The returned results MUST keep op-1
+  // APPLIED (the old length-based remap rewrote the whole batch to schema errors), so
+  // describeAuthFailure renders "1 of 3 applied, stopped at op 2" — not "No changes
+  // applied." The durable audit log was already correct; this fixes the caller's results.
+  const httpError = (s, m) => Object.assign(new Error(m || `HTTP ${s}`), { status: s });
+  const hasTb = (payload) => payload.transaction_id === 't-b'
+    || (Array.isArray(payload.transactions) && payload.transactions.some((t) => t.id === 't-b'));
+  // The bulk call (which carries t-b) 401s → per-op fallback: t-a applies, t-b 401s → abort.
+  const callTool = spy(async (_tool, payload) => {
+    if (hasTb(payload)) throw httpError(401, 'unauthorized');
+    return { ok: true };
+  });
+  const cs = changeset([
+    op({ id: 'op-1', transaction_id: 't-a', after: { category_id: 'c-a', category_name: 'A' } }),
+    op({ id: 'op-2', transaction_id: 't-b', after: { category_id: 'c-b', category_name: 'B' } }),
+    op({ id: 'op-3', transaction_id: 't-c', after: { category_id: 'c-c', category_name: 'C' } }),
+  ]);
+  const out = await applyCategorize(cs, baseCtx({ dryRun: false, callTool }));
+
+  assert.equal(out.reason, OUTCOME.AUTH_ABORT);
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId['op-1'].status, STATUS.APPLIED); // ← regression guard: was clobbered to error/schema
+  assert.equal(byId['op-2'].status, STATUS.ERROR);
+  assert.equal(byId['op-2'].detail.error_class, 'auth_revoked');
+  assert.equal(byId['op-3'].status, STATUS.ERROR); // un-run tail → not-attempted
+  // The M4-5 renderer's message distinguishes "N of M applied" from "No changes applied".
+  assert.match(describeAuthFailure(out), /1 of 3 op\(s\) applied, batch stopped at op 2/);
+});
+
+test('(#50) a failed preflight marks every categorize op not-attempted and renders "No changes applied."', async () => {
+  // The AUTH_PREFLIGHT_FAIL remap branch: the executor aborts with EMPTY results (zero
+  // mutations, nothing audited), so applyCategorize must mark every run op not-attempted
+  // and the M4-5 renderer must say "No changes applied." — never leave an op with a
+  // dangling "applied" it never earned.
+  const httpError = (s, m) => Object.assign(new Error(m || `HTTP ${s}`), { status: s });
+  const callTool = spy(() => ({ ok: true })); // would apply — but the preflight aborts first
+  const cs = changeset([
+    op({ id: 'op-1', transaction_id: 't-a', after: { category_id: 'c-a', category_name: 'A' } }),
+    op({ id: 'op-2', transaction_id: 't-b', after: { category_id: 'c-b', category_name: 'B' } }),
+  ]);
+  const out = await applyCategorize(cs, baseCtx({
+    dryRun: false,
+    callTool,
+    authPreflight: spy(() => { throw httpError(401, 'token revoked'); }),
+  }));
+
+  assert.equal(out.reason, OUTCOME.AUTH_PREFLIGHT_FAIL);
+  assert.equal(callTool.calls.length, 0); // zero mutations — the preflight aborted first
+  // Every op is reported not-attempted, none applied.
+  assert.ok(!out.results.some((r) => r.status === STATUS.APPLIED));
+  for (const r of out.results) {
+    assert.equal(r.status, STATUS.ERROR);
+    assert.equal(r.detail.phase, 'auth_abort');
+  }
+  assert.match(describeAuthFailure(out), /No changes applied\./);
 });
 
 // --- (a) single-txn first-time categorization -------------------------------

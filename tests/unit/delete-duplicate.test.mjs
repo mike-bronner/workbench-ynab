@@ -67,6 +67,31 @@ test('formatDollars rejects a non-integer (never a float round-trip)', () => {
   assert.throws(() => formatDollars('250000'), /integer milliunits/);
 });
 
+// --- fractional-milliunit ROUNDING direction is pinned (issue #150) ----------
+// Every OTHER formatDollars input in this suite is a whole-cent multiple, so the
+// truncation direction is never exercised — a `Math.floor` → `Math.round`/`Math.ceil`
+// regression would pass the cases above unchanged. formatDollars TRUNCATES the sub-cent
+// remainder (Math.floor of the absolute value), which DELIBERATELY DIVERGES from the
+// shared assets/format-money.js formatMoney, that ROUNDS half-toward-+∞: on a
+// fractional-milliunit value the two disagree (e.g. 2995 → "$2.99" here vs "$3.00" from
+// formatMoney). The divergence is intentional and inert — both formatters only ever
+// receive whole-cent YNAB amounts on real data, where their outputs are byte-identical,
+// and this path renders the destructive delete preview, so its behavior is guarded, not
+// churned. See the divergence note in formatDollars's docblock (assets/delete-duplicate.js).
+test('formatDollars truncates a sub-cent remainder toward zero (floors, does not round)', () => {
+  // 2995 milliunits = $2.995. Math.floor → "$2.99"; a Math.round/Math.ceil regression → "$3.00".
+  assert.equal(formatDollars(2995), '$2.99');
+  // Magnitude is floored, sign taken from milliunits < 0: -2995 → "-$2.99".
+  assert.equal(formatDollars(-2995), '-$2.99');
+});
+
+test('formatDollars renders a tiny negative that floors to zero as "-$0.00" (known signed-zero render)', () => {
+  // -5 milliunits floors to $0.00, but the sign is set from `milliunits < 0`, independent
+  // of the rounded magnitude. Pin the actual output so the sign logic can't drift silently.
+  // Harmless in practice: unreachable under whole-cent YNAB data.
+  assert.equal(formatDollars(-5), '-$0.00');
+});
+
 // --- validateTwinEvidence ---------------------------------------------------
 
 test('TWIN_REQUIRED_FIELDS is the documented evidence set', () => {

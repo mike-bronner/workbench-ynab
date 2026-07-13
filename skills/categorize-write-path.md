@@ -109,6 +109,23 @@ category is a no-op-equivalent, never money movement). A cross-budget op never
 reaches bulk dispatch at all — the guardrail `blocked`s it first, since the batch
 runs against a single active budget.
 
+## Auth failure aborts the batch fail-closed (GAP-8 / #50)
+
+The executor carries the full GAP-8 auth machinery, and every categorize op inherits
+it: a mandatory read-only **auth preflight** runs before the first mutation (a bad
+token aborts with zero mutations), and a mid-batch **401 / 403** — on either a re-read
+or a mutation, single or bulk — **stops the batch immediately** (the token is bad;
+continuing would just fail every remaining op). A non-auth per-op error (a 422 data
+error, a 429 rate limit, an indeterminate 5xx / network fault) is recorded per-op and
+the batch **continues** — two mutually-exclusive policies. On an auth abort the handler
+**preserves each processed op's real status** (an op that applied before the stop stays
+`applied`) and marks only the un-run tail as not-attempted, so the M4-5 command reports
+"N of M applied, stopped at op K" accurately rather than "No changes applied." The port
+wrappers (`makeCategorizeApplyOp` / `makeCategorizeBulkApplyOp`) run every `callTool`
+result through `throwOnErrorResult`, so a vendored resolved `{ isError: true }` auth
+envelope throws and engages that machinery rather than fooling the executor into reading
+a "success."
+
 ## Namespaced tools only — resolved, never hard-coded
 
 The write tool names are resolved from the guardrail's exported `ALLOWED_TOOLS` by

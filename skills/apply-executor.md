@@ -39,6 +39,7 @@ const outcome = await applyChangeset(changeset, {
   toolMap,               // op-type → namespaced mutating tool (the registration point)
   readLiveState,         // async (op) => live-state shaped like op.before
   applyOp,               // async (toolName, op) => mcp result   (real apply only)
+  authPreflight,         // async () => ynab_list_budgets result; THROWS on 401/403/network (real apply only)
   audit,                 // async ({ operation, result, dryRun }) => void
 });
 // outcome.results: [{ op_id, status, dry_run, detail }, ...]
@@ -104,14 +105,25 @@ the human approves the batch**. Anything that is not an explicit `false` simulat
    and run each through the guardrail's `evaluateTool`. Any denied / un-namespaced
    / unmapped tool → abort the whole batch (`reason: 'tool_block'`) **before any
    dispatch**, so a misconfigured map can never partially apply.
+3.5. **Auth preflight (real apply only, GAP-8 / #50).** Call the injected
+   `authPreflight` port — a cheap read-only YNAB call (e.g. `ynab_list_budgets`) —
+   **before the first mutation**. Any failure (401 / 403 / network) aborts the whole
+   batch (`reason: 'auth_preflight_fail'`) with **zero mutations and no audit records
+   for ops that never ran**. `authPreflight` is **mandatory** on real apply — the
+   executor fails closed (throws) without it. Dry-run never mutates, so it skips this.
 4. **Prepare every op**, in array order: re-read live state → drift-check → (real
    apply) per-op guardrail re-check. Terminal outcomes (`error` / `skipped-stale` /
-   `blocked`) are recorded now; the rest are **survivors**.
-5. **Dispatch the survivors.** Dry-run simulates each (diff only). Real apply
-   groups survivors by op-type and issues one **bulk** call per group when a bulk
-   port + `bulkFits` allow (see below), else a per-op `applyOp` call each — then
-   **audits** every op, in array order. A stale op is skipped individually; the
-   rest of the batch continues.
+   `blocked`) are recorded now; the rest are **survivors**. A **read-phase auth
+   failure** (a dead token surfaces on the re-read too) aborts the whole batch
+   fail-closed here — preparation stops immediately, so ops past it are never read,
+   dispatched, or audited (phase-agnostic; see Batch semantics).
+5. **Dispatch the survivors**, in array order. Dry-run simulates each (diff only).
+   Real apply batches each run of **consecutive same-type survivors** into one
+   **bulk** call when a bulk port + `bulkFits` allow (see below), else a per-op
+   `applyOp` call each — then **audits** every processed op, in array order. A stale
+   op is skipped individually; the rest of the batch continues — **except** on a
+   mid-batch auth failure (see Batch semantics), which stops the dispatch at that op
+   and leaves the untouched tail un-audited.
 
 ## Drift detection — never clobber a value the human didn't see
 
@@ -141,6 +153,20 @@ An explicit, tested choice between all-or-nothing and best-effort:
   batch clears the guardrail, a `stale` op or a single failing `applyOp` is
   recorded per-op (`skipped-stale` / `error`) and the **rest of the batch still
   applies**. One drifted or failing op does not sink its clean siblings.
+- **Auth failure is all-or-nothing; every other error is isolated (GAP-8 / #50).**
+  Two mutually-exclusive per-op error policies:
+  - An **auth failure** (`401` → `auth_revoked`, `403` → `insufficient_scope`) means
+    the token itself is bad, so the executor **aborts the whole batch**: it records
+    that op, then stops immediately (`reason: 'auth_abort'`), leaving the remaining
+    ops untouched and un-audited. Continuing would just fail — and waste a call — on
+    every one.
+  - A **single-op data error** (`422`), a **rate limit** (`429`), or an
+    **indeterminate** `5xx` / network fault is recorded per-op (`error`) and the
+    **batch continues** (skip-this-op-and-continue).
+  Every errored op's result and audit record carry an `error_class`
+  (`auth_revoked` / `insufficient_scope` / `rate_limited` / `unknown`) and an
+  `applied_state` (`not_applied` when YNAB rejected the call, `unknown` when a
+  timeout leaves it indeterminate) — the substrate idempotent resume (#48) reads.
 
 ## The registration point — op-type → tool is supplied, never hard-coded
 
@@ -171,13 +197,46 @@ and audit log:
   compare them field-for-field.
 - **`applyOp(toolName, op)`** — invokes the single namespaced mutating tool the
   executor resolved from `toolMap`. Only called on the real-apply path.
+- **`bulkApplyOp(toolName, ops)`** — invokes the namespaced BULK tool for a whole
+  group of same-type survivors in one call (opt-in; see the bulk section above).
+  Only called on the real-apply path, and subject to the same isError→throw contract
+  as `applyOp` — a resolved `{ isError: true }` bulk envelope must throw so the
+  executor aborts / falls back fail-closed instead of reading it as a payload.
+- **`authPreflight()`** — a read-only YNAB call (resolve `ynab_list_budgets` from
+  [`ynab-tools.md`](protocol/ynab-tools.md)) run once before the first mutation to
+  confirm the token is valid and write-capable. It must **throw** on a non-2xx (a
+  401/403) or a network failure — the executor classifies the thrown error and
+  aborts fail-closed. Mandatory on real apply; unused in dry-run.
 - **`audit({ operation, result, dryRun })`** — appends one record via the M4-3
   audit log. The record mirrors the writer's
   `_audit_append <operation_json> <result_json> <dry_run>` signature
   ([`docs/audit-log.md`](../docs/audit-log.md)): `operation` is the change-set op,
-  `result` is `{ tool, status, schema_version, run_id }`, and `dryRun` is stamped
-  on every record — **dry-run attempts are audited too**, flagged, so they leave a
-  full paper trail.
+  `result` is `{ tool, status, schema_version, run_id, error_class, applied_state }`
+  (the last two are `null` on a non-error op and populated only on an errored one —
+  see [`docs/audit-log.md`](../docs/audit-log.md) for the field semantics), and
+  `dryRun` is stamped on every record — **dry-run attempts are audited too**,
+  flagged, so they leave a full paper trail.
+
+> **Every port wrapper must `throw` on failure — check `result.isError` first.**
+> The auth-preflight, mid-batch abort, and error-classification machinery all key
+> on the ports **throwing**: `classifyError` only runs inside the executor's
+> `catch` blocks. But the vendored YNAB MCP (`vendor/ynab-mcp/index.cjs`) surfaces
+> auth / rate-limit / 5xx failures as a **resolved** `{ isError: true, … }` result,
+> not a rejected promise. So each wrapper for `readLiveState`, `applyOp`,
+> `authPreflight`, and `bulkApplyOp` **must inspect `result.isError` and `throw`**
+> (rethrowing the structured error, preserving the HTTP status) before returning to
+> the executor. The shared `throwOnErrorResult` helper (`assets/write-error.js`) does
+> exactly this — wrap every `callTool` result in it.
+> A wrapper that returns the MCP result verbatim fails **open** — a 401 preflight
+> would silently "pass" and a mid-batch 401 would look like a success. Mirrored in
+> [`ynab-tools.md`](protocol/ynab-tools.md).
+>
+> As defense in depth (#50), the shared gates the ports flow through — the executor's
+> `authPreflight` call and per-op bulk fallback, and the reconcile / delete handlers'
+> own `applyOp` / `authPreflight` calls — **also** route their result through
+> `throwOnErrorResult`, so a wrapper that forgot the check still fails **closed** on
+> the money paths. The wrapper obligation above stands; this is a code-enforced net
+> under it, not a substitute for it.
 
 ### Deferred-tool boot-patience — load schemas before the first MCP call
 
@@ -218,11 +277,21 @@ operation:
 | `applied` | The op was applied. With `dry_run: true` the apply is **simulated** (diff only, nothing mutated); with `dry_run: false` the mutating tool ran. |
 | `skipped-stale` | Live state drifted from the op's `before` snapshot; the op was **not** applied. |
 | `blocked` | The guardrail (or the tool pre-flight) refused the op; `detail.verdict` carries the full guardrail verdict (`op_id`, `op_type`, `rule`, `reason`). |
-| `error` | The read or apply port threw; `detail.message` carries the failure. The rest of the batch still proceeded. |
+| `error` | The read or apply port threw; `detail.message` carries the failure, and `detail.error_class` / `detail.applied_state` classify it. On a **non-auth** error the rest of the batch still proceeded; an **auth** error stopped the batch (see below). |
 
 The top-level outcome carries `ok`, `dry_run`, `aborted`, and `reason`
-(`schema_invalid` / `guardrail_block` / `tool_block` / `dry_run_complete` /
-`apply_complete`), plus the `validation` or `guardrail` verdict on an abort.
+(`schema_invalid` / `guardrail_block` / `tool_block` / `auth_preflight_fail` /
+`auth_abort` / `dry_run_complete` / `apply_complete`), plus the `validation` or
+`guardrail` verdict on an abort.
+
+On an auth abort (`auth_preflight_fail` or `auth_abort`) the outcome also carries
+`authFailure` (`{ phase, op_id, error_class, applied_state }`), `total_ops`, and —
+for a mid-batch stop — `stopped_at_index`. Render the human message with the
+exported **`describeAuthFailure(outcome)`** helper: it lists the ops that applied
+before the stop, names the failed op and its `error_class`, states the exact
+remediation, and distinguishes **"no changes applied"** (preflight or first-op
+failure) from **"N of M ops applied, batch stopped at op K"** (a real mid-batch
+failure). It returns `null` for any non-auth-failure outcome.
 
 ## Tests
 
