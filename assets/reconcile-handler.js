@@ -65,7 +65,7 @@
  *   });
  */
 
-const { STATUS, isStale } = require('./apply-executor');
+const { STATUS, isStale, singleOpOutcome } = require('./apply-executor');
 const { evaluateOperation, evaluateTool } = require('./write-safety-guardrail');
 
 /**
@@ -279,6 +279,21 @@ async function processMarkCleared(op, ctx, live, opId) {
 
   try {
     const apiResult = await applyOp(toolName, payload, op);
+    // Single-transaction update: the vendored singular `ynab_update_transaction` does
+    // NOT throw on an API failure — it resolves an `{ isError: true }` MCP error
+    // envelope (see apply-executor's singleOpOutcome). Inspect the resolved result
+    // FAIL-CLOSED through that ONE shared executor reader (no per-path duplication) so
+    // a resolved-but-unconfirmed/failed single update is recorded `error`, never
+    // `applied` (issue #153). The batch branch uses the bulk tool — a separate concern
+    // outside this issue's single-op scope — so it is left unchanged.
+    if (!batch) {
+      const { failed, message } = singleOpOutcome(apiResult);
+      if (failed) {
+        return result(opId, STATUS.ERROR, false, {
+          phase: 'apply', tool: toolName, sub_action: SUB_ACTIONS.MARK_CLEARED, message, result: apiResult == null ? null : apiResult,
+        });
+      }
+    }
     return result(opId, STATUS.APPLIED, false, {
       tool: toolName, sub_action: SUB_ACTIONS.MARK_CLEARED, diff, result: apiResult == null ? null : apiResult,
     });

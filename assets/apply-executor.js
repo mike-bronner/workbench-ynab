@@ -57,6 +57,13 @@
  *    one-to-one with the request, or a payload with no `results` array at all are
  *    ALL audited as `error` — so the M4-3 trail never records `applied` for a
  *    transaction the tool did not positively confirm.
+ *  - FAIL-CLOSED APPLY CONFIRMATION, single AND bulk. A mutating tool call that
+ *    merely RESOLVES is never assumed to have applied. The bulk path reads per-entry
+ *    results (above); the single path (`applyOneOp`, and the bulk→per-op fallback)
+ *    reads the resolved payload through `singleOpOutcome`. The vendored singular
+ *    `ynab_update_transaction` does NOT throw on an API failure — it resolves an
+ *    `{ isError: true }` MCP error envelope — so a failure-shaped or unconfirmed
+ *    resolved payload is audited `error`, never `applied` (issue #153).
  *
  * Usage (M4-5 approval command, M4-6..M4-9 write paths):
  *   const { applyChangeset } = require('./assets/apply-executor');
@@ -212,16 +219,69 @@ function simulateResult(op, dryRun) {
   };
 }
 
-/** Dispatch one survivor via the per-op mutating tool. Never throws. */
+/** Best-effort human-readable message from a failure-shaped single-op result. */
+function singleOpErrorMessage(result) {
+  if (typeof result.error === 'string') return result.error;
+  if (result.error_code != null) return String(result.error_code);
+  // The MCP error envelope carries its message under content[].text (the singular
+  // tool's `{ isError: true, content: [{ type: 'text', text: '...' }] }` shape).
+  const textEntry = Array.isArray(result.content) ? result.content.find((c) => c && typeof c.text === 'string') : null;
+  return textEntry ? textEntry.text : 'single update resolved with a failure-shaped payload — recorded error, not applied (fail-closed)';
+}
+
+/**
+ * Read a resolved SINGLE-op tool result and decide whether it confirms the mutation,
+ * FAILING CLOSED — the per-op analogue of bulkOutcomeReader for a one-transaction call.
+ *
+ * The vendored singular `ynab_update_transaction` does NOT signal an API failure by
+ * throwing: its handler wraps the whole body in try/catch and, on ANY failure, RESOLVES
+ * with the MCP error envelope `{ isError: true, content: [{ type: 'text',
+ * text: '{"error":{"message":...}}' }] }` (the bundle's `Sd` error formatter). A
+ * missing/failed update is routed through that same envelope internally — the handler
+ * asserts the updated transaction came back and converts a miss into `isError`. So a
+ * resolved result carrying NO failure signal positively confirms the mutation, and every
+ * failure signal — plus a null/non-object payload that confirms nothing — must fail
+ * CLOSED, so the M4-3 audit trail never records `applied` for a transaction the tool did
+ * not confirm (issue #153). Failure/unconfirmed signals, mirroring the bulk reader:
+ *  - `isError === true` — the MCP error envelope (the singular tool's failure shape);
+ *  - `success === false`, or a truthy `error` / `error_code` — an explicit failure flag;
+ *  - a null / non-object / array payload — nothing to confirm (unconfirmed).
+ * Any other resolved object is a confirmed apply.
+ * @param {unknown} result the resolved single-op tool payload.
+ * @returns {{failed: boolean, unconfirmed: boolean, message: string|null}}
+ */
+function singleOpOutcome(result) {
+  if (result == null || typeof result !== 'object' || Array.isArray(result)) {
+    return { failed: true, unconfirmed: true, message: 'single update resolved without confirming this op — no result payload; recorded error, not applied (fail-closed)' };
+  }
+  if (result.isError === true || result.success === false || result.error || result.error_code) {
+    return { failed: true, unconfirmed: false, message: singleOpErrorMessage(result) };
+  }
+  return { failed: false, unconfirmed: false, message: null };
+}
+
+/**
+ * Dispatch one survivor via the per-op mutating tool. Never throws. A thrown call is an
+ * `error`; a RESOLVED call is inspected FAIL-CLOSED via singleOpOutcome — the vendored
+ * singular tool resolves an API failure as an `{ isError: true }` envelope rather than
+ * throwing, so a resolved-but-unconfirmed/failure-shaped payload is recorded `error`,
+ * never `applied` (issue #153). The bulk→per-op fallback in applyBulkGroup reuses this
+ * path, so it inherits the same fail-closed inspection.
+ */
 async function applyOneOp(op, { toolMap, applyOp }) {
   const opId = op.id == null ? null : op.id;
   const toolName = toolMap[op.type];
+  let result;
   try {
-    const result = await applyOp(toolName, op);
-    return { op_id: opId, status: STATUS.APPLIED, dry_run: false, detail: { tool: toolName, result: result == null ? null : result } };
+    result = await applyOp(toolName, op);
   } catch (err) {
     return { op_id: opId, status: STATUS.ERROR, dry_run: false, detail: { phase: 'apply', tool: toolName, message: errMessage(err) } };
   }
+  const { failed, message } = singleOpOutcome(result);
+  if (failed) {
+    return { op_id: opId, status: STATUS.ERROR, dry_run: false, detail: { phase: 'apply', tool: toolName, message, result: result == null ? null : result } };
+  }
+  return { op_id: opId, status: STATUS.APPLIED, dry_run: false, detail: { tool: toolName, result: result == null ? null : result } };
 }
 
 /**
@@ -521,5 +581,6 @@ module.exports = {
   OUTCOME,
   deepEqual,
   isStale,
+  singleOpOutcome,
   applyChangeset,
 };

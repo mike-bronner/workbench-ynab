@@ -269,6 +269,100 @@ test('an applyOp failure becomes a per-op error and the rest of the batch still 
   }
 });
 
+// --- single-op fail-closed inspection (issue #153) -------------------------
+// The vendored singular ynab_update_transaction does NOT throw on an API failure —
+// it RESOLVES with an { isError: true } MCP error envelope. The single-op path must
+// read that resolved payload fail-closed and record `error`, never `applied`, exactly
+// as the bulk path does for a partially-failed bulk envelope.
+
+test('single-op fail-closed: a RESOLVED { isError: true } payload is recorded error, NOT applied', async () => {
+  const cs = loadFixture('combined.example.json');
+  const failId = cs.operations[0].id;
+  // The singular tool resolves (does NOT throw) with the MCP error envelope on failure.
+  const apply = spy((toolName, op) => (op.id === failId
+    ? { isError: true, content: [{ type: 'text', text: '{"error":{"message":"Invalid or expired YNAB access token"}}' }] }
+    : { ok: true }));
+  const audit = auditSpy();
+  const out = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    applyOp: apply,
+    audit,
+  });
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId[failId].status, STATUS.ERROR); // resolved-but-failed → error, NOT applied
+  assert.match(byId[failId].detail.message, /access token/);
+  for (const r of out.results) {
+    if (r.op_id !== failId) assert.equal(r.status, STATUS.APPLIED);
+  }
+  // The audit trail must NOT lie: the failed single op is audited as error, not applied.
+  const failAudit = audit.calls.map(([rec]) => rec).find((rec) => rec.operation.id === failId);
+  assert.equal(failAudit.result.status, STATUS.ERROR);
+});
+
+test('single-op fail-closed: a resolved-but-unconfirmed (null) payload is recorded error, NOT applied', async () => {
+  const cs = loadFixture('categorize.example.json');
+  const apply = spy(() => null); // resolved with nothing — confirms no mutation
+  const out = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    applyOp: apply,
+    audit: auditSpy(),
+  });
+  assert.equal(out.results[0].status, STATUS.ERROR);
+  assert.match(out.results[0].detail.message, /without confirming this op/);
+});
+
+test('single-op fail-closed: an explicit failure flag (success:false / error) is recorded error', async () => {
+  const cs = loadFixture('categorize.example.json');
+  const apply = spy(() => ({ success: false, error: 'insufficient scope' }));
+  const out = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    applyOp: apply,
+    audit: auditSpy(),
+  });
+  assert.equal(out.results[0].status, STATUS.ERROR);
+  assert.match(out.results[0].detail.message, /insufficient scope/);
+});
+
+test('single-op: a resolved success envelope (no failure signal) is still applied', async () => {
+  const cs = loadFixture('categorize.example.json');
+  // The singular tool's real success shape: an updated transaction, no isError flag.
+  const apply = spy(() => ({ structuredContent: { transaction: { id: 't-x', cleared: 'cleared' } } }));
+  const out = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    applyOp: apply,
+    audit: auditSpy(),
+  });
+  assert.equal(out.results[0].status, STATUS.APPLIED);
+});
+
+test('single-op fail-closed is inherited by the bulk→per-op fallback: an { isError } fallback result is error, not applied', async () => {
+  const cs = twoCategorize(); // op-1 → t-a, op-2 → t-b
+  const bulk = spy(() => { throw new Error('bulk shape rejected'); }); // forces per-op fallback
+  // The per-op fallback dispatches applyOp; op-2's singular call resolves an error envelope.
+  const apply = spy((toolName, op) => (op.id === 'op-2'
+    ? { isError: true, content: [{ type: 'text', text: '{"error":{"message":"Rate limit exceeded"}}' }] }
+    : { ok: true }));
+  const out = await applyChangeset(cs, bulkCtx({ bulkApplyOp: bulk, applyOp: apply }));
+  assert.equal(bulk.calls.length, 1);
+  assert.equal(apply.calls.length, 2); // fell back to per-op for each op
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId['op-1'].status, STATUS.APPLIED);
+  assert.equal(byId['op-2'].status, STATUS.ERROR); // resolved error envelope → error, NOT applied
+  assert.match(byId['op-2'].detail.message, /Rate limit/);
+});
+
 // --- (d) guardrail block aborts the whole batch ----------------------------
 
 test('(d) a guardrail block (wrong active budget) aborts the whole batch: nothing applies, nothing audits', async () => {

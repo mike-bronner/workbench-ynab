@@ -198,6 +198,45 @@ test('(AC3) mark_cleared real apply (single) uses the singular tool and a minima
   }
 });
 
+// --- single-op fail-closed inspection (issue #153) -------------------------
+// The vendored singular ynab_update_transaction does NOT throw on an API failure — it
+// RESOLVES with an { isError: true } MCP error envelope. mark_cleared's non-batch branch
+// must read that resolved payload fail-closed (via the shared executor reader) and record
+// `error`, never `applied`.
+
+test('(#153) mark_cleared single: a RESOLVED { isError: true } result is recorded error, NOT applied', async () => {
+  const op = markClearedOp(['txn-1']); // single → the singular tool
+  const apply = spy(() => ({ isError: true, content: [{ type: 'text', text: '{"error":{"message":"Invalid or expired YNAB access token"}}' }] }));
+  const audit = auditSpy();
+  const res = await processReconcileOp(op, {
+    activeBudgetId: BUDGET,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: spy(() => liveTxns(['txn-1'], 'uncleared')),
+    applyOp: apply,
+    audit,
+  });
+  assert.equal(apply.calls.length, 1); // the tool WAS called (it resolved, did not throw)
+  assert.equal(apply.calls[0][0], TOOL_MAP.update_transaction); // the singular tool
+  assert.equal(res.status, STATUS.ERROR); // resolved-but-failed → error, NOT applied
+  assert.equal(res.detail.phase, 'apply');
+  assert.match(res.detail.message, /access token/);
+});
+
+test('(#153) mark_cleared single: a resolved-but-unconfirmed (null) result is recorded error, NOT applied', async () => {
+  const op = markClearedOp(['txn-1']);
+  const apply = spy(() => null); // resolved with nothing — confirms no mutation
+  const res = await processReconcileOp(op, {
+    activeBudgetId: BUDGET,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: spy(() => liveTxns(['txn-1'], 'uncleared')),
+    applyOp: apply,
+  });
+  assert.equal(res.status, STATUS.ERROR);
+  assert.match(res.detail.message, /without confirming this op/);
+});
+
 // --- (AC4) drift-stale skip -------------------------------------------------
 
 test('(AC4) mark_cleared is skipped-stale when a target transaction drifted from the before snapshot', async () => {
