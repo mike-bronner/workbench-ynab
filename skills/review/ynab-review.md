@@ -334,8 +334,10 @@ one shared, audited escaper — [`../../bin/html-escape.sh`](../../bin/html-esca
 — before injecting it into any fragment:
 
 ```bash
-# the SAME module bin/persona.sh and bin/report-writer.sh use — no hand-escaping
-safe_payee="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" "$raw_payee")"
+# the SAME module bin/persona.sh and bin/report-writer.sh use — no hand-escaping.
+# `--` ends option parsing so a payee literally named `-h`/`--raw` is escaped as
+# DATA, never dispatched as a flag — ALWAYS pass it before the untrusted value.
+safe_payee="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" -- "$raw_payee")"
 ```
 
 It **HTML-escapes** the five dangerous characters (`&` → `&amp;` first, then
