@@ -73,6 +73,18 @@ const VICTIM_SNAPSHOT_FIELDS = Object.freeze([
  * Format raw YNAB milliunits as a display dollar string (integer math, no float
  * round-trip): 1000 milliunits = $1.00, so cents = (|m| mod 1000) / 10.
  * -54990 → "-$54.99"; 250000 → "$250.00"; 1200000 → "$1,200.00".
+ *
+ * ROUNDING — DELIBERATELY DISTINCT FROM formatMoney (issue #150). This helper
+ * TRUNCATES the sub-cent remainder (`Math.floor` of the absolute value); the shared
+ * assets/format-money.js `formatMoney` ROUNDS half-toward-+∞ instead. So on a
+ * fractional-milliunit value the two disagree — e.g. 2995 → "$2.99" here vs "$3.00"
+ * from formatMoney. Left intentionally unreconciled: both formatters only ever receive
+ * whole-cent YNAB amounts on real data, where their outputs are byte-identical, and this
+ * is the destructive delete-preview path — so its behavior is regression-guarded (see
+ * tests/unit/delete-duplicate.test.mjs and tests/unit/format-money.test.mjs, which pin
+ * each direction) rather than churned to match a formatter it can never disagree with in
+ * practice. A tiny negative that floors to zero renders "-$0.00" (the sign comes from
+ * `milliunits < 0`, independent of the rounded magnitude) — also pinned, also inert.
  * @param {number} milliunits integer milliunits.
  * @returns {string}
  */

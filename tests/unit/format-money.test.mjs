@@ -65,6 +65,51 @@ test('JPY (decimal_digits=0) renders a whole number with no decimal separator', 
 test('decimal_digits=3 keeps three fractional digits', () => {
   const kwd = { currency_symbol: 'KD', symbol_first: true, decimal_digits: 3, decimal_separator: '.', group_separator: ',' };
   assert.equal(formatMoney(1500, kwd), 'KD1.500'); // 1500 milliunits = 1.5 units
+  // NOTE: a 3-decimal currency has divisor = 1000 / 10**3 = 1, so `Math.round(amount / 1)`
+  // is a no-op — there is no sub-milliunit remainder to round. The rounding DIRECTION
+  // therefore cannot be exercised for this shape; it is pinned below for the shapes
+  // that CAN round (2-decimal, divisor 10; 0-decimal, divisor 1000).
+});
+
+// --- fractional-milliunit ROUNDING is actually exercised (issue #150) ----------
+// Every OTHER input in this suite is an exact multiple of its currency's minor-unit
+// divisor, so `Math.round(amount / divisor)` at format-money.js's rounding line never
+// rounds a fractional value — a swap to `Math.trunc`/`Math.floor` would pass the whole
+// suite unchanged. These cases are the ONLY ones that pin the rounding DIRECTION: each
+// asserts an output that a `Math.trunc`/`Math.floor` regression provably breaks.
+// formatMoney rounds half-toward-+∞ (JS `Math.round`); the sibling formatDollars in
+// delete-duplicate.js TRUNCATES instead — that divergence is deliberate and separately
+// guarded in tests/unit/delete-duplicate.test.mjs.
+test('USD sub-cent input rounds half-away-from-zero for positives (2995 → $3.00, -2995 → -$2.99)', () => {
+  // 2995 milliunits = 299.5 cents. Math.round → 300 ("$3.00"); Math.trunc/Math.floor → 299 ("$2.99").
+  assert.equal(formatMoney(2995), '$3.00');
+  // -2995 = -299.5 cents. Math.round → -299 ("-$2.99", toward +∞); Math.floor → -300 ("-$3.00").
+  assert.equal(formatMoney(-2995), '-$2.99');
+  // This exact pair is byte-identical to the deleted allocate-handler formatter (the
+  // USD-parity contract in this file's header) and must stay so.
+});
+
+test('EUR sub-cent input rounds (2-decimal shape, trailing symbol, swapped separators)', () => {
+  const eur = { symbol: '€', symbol_first: false, decimal_digits: 2, decimal_separator: ',', group_separator: '.' };
+  // 1234565 milliunits = 123456.5 cents. Math.round → 123457 ("1.234,57 €"); trunc/floor → 123456 ("1.234,56 €").
+  assert.equal(formatMoney(1234565, eur), '1.234,57 €');
+  // -1234565 = -123456.5 cents. Math.round → -123456 (toward +∞); Math.floor → -123457.
+  assert.equal(formatMoney(-1234565, eur), '-1.234,56 €');
+});
+
+test('JPY (decimal_digits=0) sub-yen input rounds to the nearest whole yen, not truncated', () => {
+  const jpy0 = { currency_symbol: '¥', symbol_first: true, decimal_digits: 0, decimal_separator: '.', group_separator: ',' };
+  // 1500 milliunits = 1.5 yen. Math.round → 2 ("¥2"); Math.trunc/Math.floor → 1 ("¥1").
+  assert.equal(formatMoney(1500, jpy0), '¥2');
+  // -1500 = -1.5 yen. Math.round → -1 ("-¥1", toward +∞); Math.floor → -2 ("-¥2").
+  assert.equal(formatMoney(-1500, jpy0), '-¥1');
+});
+
+test('JPY near-zero negative rounds to a clean "¥0" (no "-¥0"): a magnitude that rounds to zero has no sign', () => {
+  const jpy0 = { currency_symbol: '¥', symbol_first: true, decimal_digits: 0, decimal_separator: '.', group_separator: ',' };
+  // -500 milliunits = -0.5 yen. Math.round(-0.5) === -0, and the `minorUnits < 0` sign
+  // test is false for -0, so the deliberate output is "¥0" — never "-¥0" or -1.
+  assert.equal(formatMoney(-500, jpy0), '¥0');
 });
 
 // --- display_symbol=false drops the symbol (and its space) --------------------
