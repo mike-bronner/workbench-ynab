@@ -11,6 +11,13 @@
 // by id) taking precedence over bundled defaults, documented tie-breaking, the
 // unclassified no-match sentinel, business-entity ($profile) scoping, purity,
 // and that the bundled defaults validate against the ruleset schema.
+//
+// Also covers the reason-template contract (issue #25 / M3-6, surfaced reviewing
+// PR #128): every {placeholder} in a rule's reason string substitutes correctly
+// in the classify() reason output, and an unrecognized {token} is left intact
+// rather than substituted or thrown on. renderReason() is module-private, so —
+// like the existing {businessEntityId} assertion below — the contract is pinned
+// through the public classify() call.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -287,4 +294,59 @@ test('UNCLASSIFIED sentinel is frozen and classify returns a distinct object', (
   const r = classify(tx({ payee_name: 'Nothing' }), null);
   assert.notEqual(r, UNCLASSIFIED);
   assert.equal(r.taxLineId, UNCLASSIFIED.taxLineId);
+});
+
+// --- issue #25: reason-template placeholder substitution --------------------
+//
+// The reason string is user-facing (the review skill shows it for a suggested
+// tax line), so each {placeholder} is part of the contract and pinned with its
+// own focused assertion. renderReason() is module-private; each case injects a
+// single matching rule whose reason is exactly the placeholder under test and
+// reads back classify()'s reason output — the same public-API path the
+// {businessEntityId} scoping test above uses. All fixtures are synthetic.
+
+// Classify `transaction` under one injected rule whose reason is `template`,
+// matched by `match`, and return the rendered reason string. `extra` patches the
+// rule (e.g. a literal businessEntityId or taxLineId).
+const reasonFor = (template, match, transaction, extra = {}) =>
+  classify(transaction, null, {
+    rules: [{ id: 'r', priority: 50, taxLineId: 'schedC.27a', reason: template, match, ...extra }],
+  }).reason;
+
+test('reason template substitutes {payee}', () => {
+  assert.equal(reasonFor('{payee}', { payeeKeywords: ['widgets'] }, tx({ payee_name: 'Acme Widgets LLC' })), 'Acme Widgets LLC');
+});
+
+test('reason template substitutes {categoryName}', () => {
+  assert.equal(reasonFor('{categoryName}', { categoryName: 'Office Supplies' }, tx({ category_name: 'Office Supplies' })), 'Office Supplies');
+});
+
+test('reason template substitutes {categoryGroup}', () => {
+  assert.equal(reasonFor('{categoryGroup}', { categoryGroup: 'Business Expenses' }, tx({ category_group_name: 'Business Expenses' })), 'Business Expenses');
+});
+
+test('reason template substitutes {accountName}', () => {
+  assert.equal(reasonFor('{accountName}', { accountName: 'Business Checking' }, tx({ account_name: 'Business Checking' })), 'Business Checking');
+});
+
+test('reason template substitutes {matchedKeyword}', () => {
+  assert.equal(reasonFor('{matchedKeyword}', { payeeKeywords: ['widgets'] }, tx({ payee_name: 'Acme Widgets LLC' })), 'widgets');
+});
+
+test('reason template substitutes {taxLineId}', () => {
+  assert.equal(reasonFor('{taxLineId}', { payeeKeywords: ['acme'] }, tx({ payee_name: 'Acme' }), { taxLineId: 'schedA.medical' }), 'schedA.medical');
+});
+
+test('reason template substitutes {businessEntityId}', () => {
+  assert.equal(reasonFor('{businessEntityId}', { payeeKeywords: ['acme'] }, tx({ payee_name: 'Acme' }), { businessEntityId: 'ent-42' }), 'ent-42');
+});
+
+// An unrecognized {token} is passed through verbatim — no substitution, and no
+// throw — while a known placeholder in the same string still substitutes.
+test('reason template leaves an unknown {token} intact and does not throw', () => {
+  let reason;
+  assert.doesNotThrow(() => {
+    reason = reasonFor('{payee} at {nope}', { payeeKeywords: ['acme'] }, tx({ payee_name: 'Acme' }));
+  });
+  assert.equal(reason, 'Acme at {nope}');
 });
