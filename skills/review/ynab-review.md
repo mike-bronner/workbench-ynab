@@ -329,16 +329,29 @@ writer, M2-9 — pass it through, don't hardcode it).
 ### Trust boundary — escape every YNAB string
 
 Payee names, memos, category names, and account names are **untrusted external
-data** crossing into HTML output. **HTML-escape** every YNAB-sourced string (`&`
-→ `&amp;`, `<` `>` `"` `'`) before injecting it into any fragment — a payee like
-`Smith & <b>Sons</b>` must render as text, never as markup. A bare number you
-compute is safe — but a **formatted amount is not a bare number**: `formatMoney`
-embeds the off-the-wire `currency_symbol` and separators verbatim (it does not
-pre-escape, see §5), so escape every rendered amount too. A hostile
-`currency_symbol` like `<script>` must render as text, never as markup. (The
-persona loader already escapes the name it renders; you own escaping for the
-transaction/category/account strings **and the formatted amounts** you place
-into slots.) Long transaction lists go inside
+data** crossing into HTML output. Route **every** YNAB-sourced string through the
+one shared, audited escaper — [`../../bin/html-escape.sh`](../../bin/html-escape.sh)
+— before injecting it into any fragment:
+
+```bash
+# the SAME module bin/persona.sh and bin/report-writer.sh use — no hand-escaping
+safe_payee="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" "$raw_payee")"
+```
+
+It **HTML-escapes** the five dangerous characters (`&` → `&amp;` first, then
+`<` `>` `"` `'`), strips layout-wrecking control characters, and truncates an
+over-long value (200 chars + `…`) — so a payee like `Smith & <b>Sons</b>` renders
+as text, never markup, and a multi-kilobyte memo can never blow out the layout. A
+bare number you compute is safe — but a **formatted amount is not a bare number**:
+`formatMoney` embeds the off-the-wire `currency_symbol` and separators verbatim
+(it does not pre-escape, see §5), so pass every rendered amount through the same
+helper too. A hostile `currency_symbol` like `<script>` must render as text, never
+as markup. (The persona loader escapes the name it renders via the same module;
+you own routing the transaction/category/account strings **and the formatted
+amounts** through `bin/html-escape.sh` before they go into slots.) The report
+writer (M2-9) then treats each finished fragment as an **opaque, already-escaped
+string** — it never re-processes or re-escapes it — so escaping happens exactly
+once, here, at the assembly boundary. Long transaction lists go inside
 `<details><summary>…</summary><div class="details__body">…</div></details>` so
 they collapse on screen (the print CSS forces them open). Use the template's
 existing classes (`card`, `kpi`, `badge is-good|is-attention|is-warning`,

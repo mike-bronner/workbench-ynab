@@ -85,6 +85,12 @@ DEFAULT_TEMPLATE="${REPO_ROOT}/assets/report/template.html"
 # shellcheck source=/dev/null
 . "${REPO_ROOT}/bin/config.sh"
 
+# The ONE shared, audited HTML escaper. The writer OWNS escaping the scalars it
+# injects (output path, tier, date); it uses the same html_escape every other
+# externally-sourced string goes through, so there is no second copy to drift.
+# shellcheck source=/dev/null
+. "${REPO_ROOT}/bin/html-escape.sh"
+
 prog="report-writer.sh"
 err()   { printf '%s: %s\n' "$prog" "$1" >&2; }
 usage_err() { err "$1"; exit 2; }
@@ -164,24 +170,13 @@ expand_path() {
   printf '%s' "$p"
 }
 
-# html_escape <string> — escape the five HTML metacharacters (`&`, `<`, `>`, `"`,
-# `'`) so a scalar the writer injects into the report (the output path, the tier,
-# the date) can never break out of an attribute or inject an element. The writer
-# OWNS escaping the scalars it places; fragment values are escaped by their
-# producer (the review skill's trust-boundary rule). '&' is replaced first so
-# entities it introduces are not double-escaped. The apostrophe (`&#39;`) is
-# defense-in-depth: the frozen template only ever places scalars in double-quoted
-# attributes or text nodes, but escaping it too means a future single-quoted
-# attribute could never be broken out of either.
-html_escape() {
-  local s="$1"
-  s="${s//&/&amp;}"
-  s="${s//</&lt;}"
-  s="${s//>/&gt;}"
-  s="${s//\"/&quot;}"
-  s="${s//\'/&#39;}"
-  printf '%s' "$s"
-}
+# html_escape is provided by the sourced bin/html-escape.sh — the shared, audited
+# escaper. It escapes the five HTML metacharacters (`&` first) so a scalar the
+# writer injects (output path, tier, date) can never break out of an attribute or
+# inject an element. The writer OWNS escaping the scalars it places; fragment
+# values arrive already sanitized by their producer (the review skill routes every
+# YNAB string through the same module — its escape_ynab_string), and the assembly
+# below treats each fragment as an opaque, pre-escaped string it never re-processes.
 
 # trim <string> — strip leading and trailing whitespace. Used so a whitespace-only
 # --slot value ("   ") is judged empty (hence missing) rather than passing the
