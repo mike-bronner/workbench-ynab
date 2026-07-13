@@ -183,12 +183,19 @@ Report output configuration.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `output_dir` | string | **required** | Directory where generated HTML reports are written. Supports `~` and env-var expansion at use time. |
+| `output_dir` | string | optional | Directory where generated HTML reports are written. Supports `~` and env-var expansion at use time. When absent or empty, the writer applies the shipped default `~/Documents/Claude/Reports` (see below). |
 | `template_path` | string \| null | optional | Path to the frozen HTML report template. When `null`, the plugin's bundled template under `assets/` is used (frozen in Sprint 3, issue #42). |
 
 ```json
-"report": { "output_dir": "~/Documents/YNAB Reports", "template_path": null }
+"report": { "output_dir": "~/Documents/Claude/Reports", "template_path": null }
 ```
+
+`output_dir` lives **outside the repo** (this whole `config.json` does — see the
+data-dir path above) and therefore **survives plugin updates**: it is the single,
+update-stable source of truth for where reports are saved. The report writer
+([`bin/report-writer.sh`](report-writer.md)) reads it through `bin/config.sh` with
+the `// empty` idiom and falls back to `~/Documents/Claude/Reports` when it is
+absent or empty.
 
 ---
 

@@ -346,10 +346,48 @@ existing classes (`card`, `kpi`, `badge is-good|is-attention|is-warning`,
 print, and responsive behavior are the frozen template's responsibility, not the
 fragment's.
 
+### Assemble & save — `bin/report-writer.sh` (final step)
+
+Once every block slot's fragment is computed and **escaped**, do **not** stitch
+the HTML yourself — the assembly is owned by one helper so the chrome is never
+regenerated. Call the report writer as the review's **final** step:
+
+<!-- Comments live on their own lines ABOVE the command: a `#` after a trailing
+     `\` escapes the space, not the newline, and silently breaks the line
+     continuation — so keep the backslash the last character on each line. -->
+
+```bash
+# --tier is one of: Weekly | Monthly | Quarterly-Tax | Annual
+# --date is the report date in YYYY-MM-DD
+# Pass ONE --slot per block slot the template declares (full list in SLOTS.md);
+# the elided slots between the first and last below follow the same pattern.
+report_path="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/report-writer.sh" \
+  --tier "$tier" \
+  --date "$report_date" \
+  --slot "kpi-dashboard=$kpi_html" \
+  --slot "section-1-classification=$s1_html" \
+  --slot "section-12-tax-summary=$s12_html" \
+  --slot "footer-persona=$persona_html")"
+```
+
+The writer resolves `.report.output_dir` (default `~/Documents/Claude/Reports`,
+read via [`../../bin/config.sh`](../../bin/config.sh)), builds the filename
+`YNAB-{Tier}-Review-{date}.html`, fills the `{{tier}}` / `{{report_date}}` /
+`{{output_path}}` scalar slots itself, `mkdir -p`s the directory, writes the
+file, and prints its **absolute path** to stdout — captured above as
+`$report_path`. Pass **every** block slot: a section that is out of scope for the
+tier (e.g. tax summary on the weekly tier) is passed as the literal
+`no findings`, which the writer renders as an empty section. A required slot left
+unsupplied makes the writer exit non-zero **without writing a file** — so a
+partial report can never reach the user. **Surface `$report_path`** in the
+dispatch summary below (and in the session output shown to the user) so they know
+exactly where the report was saved.
+
 ### Dispatch summary (M2-6)
 
 Also emit a short **dispatch summary** — the headline findings (top
-recommendations, health score, any tax flag), the report `output_path`, and any
+recommendations, health score, any tax flag), the report `output_path`
+(`$report_path` from the writer), and any
 warnings/notes (`empty_budget`, `tax_profile_error`, `ynab_mcp_offline`, plan
 `warnings`). Sign it off with the resolved persona:
 `bash "${CLAUDE_PLUGIN_ROOT}/bin/persona.sh" signoff`. Lead with the finding,

@@ -40,7 +40,7 @@
     "voice_overrides": null
   },
   "report": {
-    "output_dir": "~/Documents/YNAB Reports",
+    "output_dir": "~/Documents/Claude/Reports",
     "template_path": null
   },
   "schedules": {

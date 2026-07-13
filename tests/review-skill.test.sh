@@ -155,6 +155,14 @@ assert_present "scalar slot {{tier}}"        "{{tier}}"
 assert_present "scalar slot {{report_date}}" "{{report_date}}"
 assert_present "scalar slot {{output_path}}" "{{output_path}}"
 
+# ---- writer integration: the skill calls report-writer.sh as its FINAL assembly
+#      step and surfaces the returned absolute path (issue #46) -----------------
+assert_present    "has an Assemble & save final step"          "Assemble & save"
+assert_present    "calls the report-writer helper"             "bin/report-writer.sh"
+# shellcheck disable=SC2016  # a literal needle: no $ / backtick expansion wanted
+assert_present    "captures the writer's stdout as report_path" 'report_path="$('
+assert_present_re "surfaces the saved path (\$report_path) to the user" 'Surface.*report_path'
+
 # ---- trust boundary: HTML-escape YNAB strings --------------------------------
 assert_present "HTML-escapes untrusted YNAB strings" "HTML-escape"
 
