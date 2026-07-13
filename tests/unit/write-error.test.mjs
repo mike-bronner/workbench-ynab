@@ -59,6 +59,28 @@ test('extractStatus ignores an out-of-range number in the message', () => {
   assert.equal(extractStatus(new Error('read 200 transactions, wrote 12')), null);
 });
 
+test('a coincidental money amount is NOT misread as an HTTP status', () => {
+  // The bare-token fallback rejects a 4xx/5xx run that is part of a money amount — a
+  // leading `$`/digit/`.` or a trailing `.<digit>` disqualifies it — so "$450.00" never
+  // classifies as HTTP 450 (which would be a false not_applied on the resume path, #48).
+  assert.equal(extractStatus(new Error('Transaction amount $450.00 exceeds the limit')), null);
+  assert.equal(classifyError(new Error('a charge of $503.20 was declined')).status, null);
+});
+
+test('an explicit HTTP-adjacent status wins even when a money amount is also present', () => {
+  assert.equal(extractStatus(new Error('POST failed (HTTP 401) after charging $450.00')), 401);
+  assert.equal(extractStatus(new Error('gateway error HTTP/503')), 503);
+});
+
+test('extractStatus recovers a status from the retained mcpResult envelope when the message has none', () => {
+  // throwOnErrorResult stashes the vendored error envelope on err.mcpResult; its embedded
+  // `(HTTP <status>)` is recoverable even when it is not the error message's leading text.
+  const err = new Error('YNAB MCP returned an error result');
+  err.mcpResult = { isError: true, content: [{ type: 'text', text: '{"error":{"message":"revoked (HTTP 401)"}}' }] };
+  assert.equal(extractStatus(err), 401);
+  assert.equal(classifyError(err).error_class, ERROR_CLASS.AUTH_REVOKED);
+});
+
 // --- classifyError: status → { error_class, applied_state } ---------------------
 
 test('401 → auth_revoked / not_applied', () => {

@@ -624,3 +624,40 @@ test('(#50) describeAuthFailure renders a reconcile auth abort identically to th
   assert.match(msg, /Applied before the failure: /);
   assert.match(msg, /re-issue token via \/workbench-ynab:setup/); // auth_revoked remediation
 });
+
+// --- (#50) defense in depth: the reconcile ports throw on a resolved { isError } ---
+
+/** The vendored MCP's error shape: a RESOLVED { isError: true } result, NOT a throw. */
+const isErrorEnvelope = (status, message) => ({
+  isError: true,
+  content: [{ type: 'text', text: `{"error":{"message":"${message} (HTTP ${status})"}}` }],
+});
+
+test('(#50) a reconcile mutation that RESOLVES a { isError: true } 401 envelope aborts fail-closed', async () => {
+  // The vendored MCP surfaces a 401 as a resolved { isError: true } result, not a throw.
+  // reconcile-handler now routes applyOp through throwOnErrorResult, so it throws → the
+  // batch auth-aborts. Without the guard the batch would read the envelope as a success
+  // and fail OPEN on the money path.
+  const audit = auditSpy();
+  const out = await applyReconcile([mcOp(0), mcOp(1)], authCtx({
+    applyOp: spy((_tool, _payload, op) => (op.id === 'op-mc-0' ? isErrorEnvelope(401, 'token revoked') : { ok: true })),
+    audit,
+  }));
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, OUTCOME.AUTH_ABORT);
+  assert.equal(out.stopped_at_index, 0);
+  assert.equal(out.results[0].status, STATUS.ERROR);
+  assert.equal(out.results[0].detail.error_class, 'auth_revoked'); // the (HTTP 401) survives
+  assert.ok(!out.results.some((r) => r.status === STATUS.APPLIED)); // fail-closed, nothing applied
+});
+
+test('(#50) a reconcile preflight that RESOLVES a { isError: true } 403 envelope aborts before any mutation', async () => {
+  const apply = spy();
+  const out = await applyReconcile([mcOp(0), mcOp(1)], authCtx({
+    applyOp: apply,
+    authPreflight: spy(() => isErrorEnvelope(403, 'insufficient scope')), // RESOLVES, no throw
+  }));
+  assert.equal(out.reason, OUTCOME.AUTH_PREFLIGHT_FAIL);
+  assert.equal(out.authFailure.error_class, 'insufficient_scope');
+  assert.equal(apply.calls.length, 0); // zero mutations — the preflight aborted first
+});

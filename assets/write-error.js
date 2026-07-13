@@ -68,10 +68,43 @@ function isAuthFailure(errorClass) {
   return AUTH_FAILURE_CLASSES.includes(errorClass);
 }
 
+/** JSON.stringify that never throws (a circular envelope yields ''), for text scanning. */
+function safeStringify(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Recover an HTTP status (100–599) from a free-text blob — the last resort when no
+ * structured field carries one. Two passes, most-confident first:
+ *   1. an explicit HTTP-adjacent token — `(HTTP 401)`, `HTTP/500` — which the vendored
+ *      MCP embeds in its error envelope, so it is authoritative here.
+ *   2. a bare 4xx/5xx token, but ONLY when it is NOT part of a money amount: a leading
+ *      currency symbol / digit / dot, or a trailing `.<digit>`, disqualifies it — so a
+ *      coincidental "$450.00" is never misread as HTTP 450 (a false `not_applied` on the
+ *      resume path, #48). Real vendor prose like "429 Too Many Requests" still resolves.
+ * @param {string} text
+ * @returns {number|null}
+ */
+function statusFromText(text) {
+  const http = text.match(/\bHTTP[\s/]?(\d{3})\b/i);
+  if (http) {
+    const n = Number(http[1]);
+    if (n >= 100 && n <= 599) return n;
+  }
+  const bare = text.match(/(?<![$\d.])\b([45]\d\d)\b(?!\.\d)/);
+  return bare ? Number(bare[1]) : null;
+}
+
 /**
  * Pull an integer HTTP status (100–599) off a thrown value, or null when none is
  * present (a network/timeout error carries no status). Structured fields win, in
- * priority order; a bare 3-digit 4xx/5xx token in the message is the last resort.
+ * priority order; then a status token in the error MESSAGE; then — for an error
+ * thrown by throwOnErrorResult — one embedded in the retained MCP envelope
+ * (`err.mcpResult`), so the status survives even when it is not the message's text.
  * @param {unknown} err
  * @returns {number|null}
  */
@@ -84,8 +117,9 @@ function extractStatus(err) {
     if (Number.isInteger(n) && n >= 100 && n <= 599) return n;
   }
   const message = typeof err.message === 'string' ? err.message : '';
-  const match = message.match(/\b([45]\d\d)\b/);
-  return match ? Number(match[1]) : null;
+  const fromMessage = statusFromText(message);
+  if (fromMessage != null) return fromMessage;
+  return err.mcpResult != null ? statusFromText(safeStringify(err.mcpResult)) : null;
 }
 
 /**

@@ -273,6 +273,34 @@ test('a mid-batch auth abort PRESERVES the ops that applied — not clobbered as
   assert.match(describeAuthFailure(out), /1 of 3 op\(s\) applied, batch stopped at op 2/);
 });
 
+test('(#50) a failed preflight marks every categorize op not-attempted and renders "No changes applied."', async () => {
+  // The AUTH_PREFLIGHT_FAIL remap branch: the executor aborts with EMPTY results (zero
+  // mutations, nothing audited), so applyCategorize must mark every run op not-attempted
+  // and the M4-5 renderer must say "No changes applied." — never leave an op with a
+  // dangling "applied" it never earned.
+  const httpError = (s, m) => Object.assign(new Error(m || `HTTP ${s}`), { status: s });
+  const callTool = spy(() => ({ ok: true })); // would apply — but the preflight aborts first
+  const cs = changeset([
+    op({ id: 'op-1', transaction_id: 't-a', after: { category_id: 'c-a', category_name: 'A' } }),
+    op({ id: 'op-2', transaction_id: 't-b', after: { category_id: 'c-b', category_name: 'B' } }),
+  ]);
+  const out = await applyCategorize(cs, baseCtx({
+    dryRun: false,
+    callTool,
+    authPreflight: spy(() => { throw httpError(401, 'token revoked'); }),
+  }));
+
+  assert.equal(out.reason, OUTCOME.AUTH_PREFLIGHT_FAIL);
+  assert.equal(callTool.calls.length, 0); // zero mutations — the preflight aborted first
+  // Every op is reported not-attempted, none applied.
+  assert.ok(!out.results.some((r) => r.status === STATUS.APPLIED));
+  for (const r of out.results) {
+    assert.equal(r.status, STATUS.ERROR);
+    assert.equal(r.detail.phase, 'auth_abort');
+  }
+  assert.match(describeAuthFailure(out), /No changes applied\./);
+});
+
 // --- (a) single-txn first-time categorization -------------------------------
 
 test('(a) single-txn first-time categorization applies via the single tool', async () => {

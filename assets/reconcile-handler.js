@@ -78,7 +78,7 @@
 
 const { STATUS, OUTCOME, isStale } = require('./apply-executor');
 const { evaluateOperation, evaluateTool } = require('./write-safety-guardrail');
-const { classifyError, isAuthFailure } = require('./write-error');
+const { classifyError, isAuthFailure, throwOnErrorResult } = require('./write-error');
 
 /**
  * The two reconcile sub-actions. Exhaustive — anything else is an error.
@@ -290,7 +290,11 @@ async function processMarkCleared(op, ctx, live, opId) {
     : { transaction_id: op.transaction_ids[0], cleared: target };
 
   try {
-    const apiResult = await applyOp(toolName, payload, op);
+    // Defense in depth (#50): route the result through throwOnErrorResult so a vendored
+    // `{ isError: true }` auth / rate / 5xx envelope that RESOLVED (didn't reject) throws
+    // here and the batch-level auth-abort machinery engages — the same guard the categorize
+    // port wrappers apply, code-enforced on the reconcile mutation rather than prose-only.
+    const apiResult = throwOnErrorResult(await applyOp(toolName, payload, op));
     return result(opId, STATUS.APPLIED, false, {
       tool: toolName, sub_action: SUB_ACTIONS.MARK_CLEARED, diff, result: apiResult == null ? null : apiResult,
     });
@@ -345,7 +349,9 @@ async function processReconcileAccount(op, ctx, live, opId) {
 
   let apiResult;
   try {
-    apiResult = await applyOp(toolName, { account_id: op.account_id, balance: asserted }, op);
+    // Defense in depth (#50): a resolved `{ isError: true }` envelope throws here too,
+    // so an auth failure on the reconcile mutation aborts the batch fail-closed.
+    apiResult = throwOnErrorResult(await applyOp(toolName, { account_id: op.account_id, balance: asserted }, op));
   } catch (err) {
     const { error_class, applied_state } = classifyError(err);
     return result(opId, STATUS.ERROR, false, { phase: 'apply', tool: toolName, message: errMessage(err), error_class, applied_state });
@@ -473,7 +479,10 @@ async function applyReconcile(operations, ctx = {}) {
   // for ops that never ran. Dry-run never mutates, so it skips the preflight entirely.
   if (!dryRun) {
     try {
-      await ctx.authPreflight();
+      // Defense in depth (#50): route the preflight result through throwOnErrorResult so a
+      // resolved `{ isError: true }` auth envelope aborts fail-closed here, identical to the
+      // executor's shared preflight gate — the fail-closed guarantee is code-enforced.
+      throwOnErrorResult(await ctx.authPreflight());
     } catch (err) {
       const { error_class, applied_state } = classifyError(err);
       return {

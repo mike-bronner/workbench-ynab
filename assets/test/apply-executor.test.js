@@ -547,6 +547,35 @@ test('preflight auth failure aborts before any mutation — zero ops, no audit r
   assert.equal(audit.calls.length, 0);
 });
 
+test('(#50) a preflight that RESOLVES a { isError: true } 401 envelope aborts fail-closed (executor guard, no fail-open)', async () => {
+  // The vendored MCP surfaces a 401 as a RESOLVED { isError: true } result, not a throw.
+  // A preflight port that returns it verbatim would "pass" the auth gate and let the batch
+  // mutate on a dead token. The executor now routes the preflight result through
+  // throwOnErrorResult, so a resolved error envelope aborts here — code-enforced, not
+  // prose-only. This guard covers every path routing through the executor (categorize /
+  // delete / allocate).
+  const cs = loadFixture('combined.example.json');
+  const apply = spy();
+  const audit = auditSpy();
+  const isErrorEnvelope = { isError: true, content: [{ type: 'text', text: '{"error":{"message":"token revoked (HTTP 401)"}}' }] };
+
+  const out = await applyChangeset(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: noDrift(),
+    applyOp: apply,
+    authPreflight: spy(() => isErrorEnvelope), // RESOLVES (no throw) — must still abort
+    audit,
+  });
+
+  assert.equal(out.reason, OUTCOME.AUTH_PREFLIGHT_FAIL);
+  assert.equal(out.authFailure.error_class, 'auth_revoked'); // the (HTTP 401) survives → classifiable
+  assert.equal(out.authFailure.applied_state, 'not_applied');
+  assert.equal(apply.calls.length, 0); // fail-closed: zero mutations
+  assert.equal(audit.calls.length, 0);
+});
+
 test('preflight NETWORK failure (statusless) also aborts the whole batch', async () => {
   const cs = loadFixture('combined.example.json');
   const apply = spy();
@@ -891,6 +920,68 @@ test('bulk dispatch falls back to per-op applyOp when bulkApplyOp throws (reject
   assert.equal(bulk.calls.length, 1);
   assert.equal(apply.calls.length, 2); // fell back to a per-op call for each op in the group
   for (const r of out.results) assert.equal(r.status, STATUS.APPLIED);
+});
+
+test('(#50) a bulk group whose bulkApplyOp throws a 401 does NOT re-dispatch the remaining group ops — it aborts (AC#3)', async () => {
+  // Before the isError→throw port wiring, a whole-bulk 401 came back as a resolved
+  // { isError: true } envelope and never entered the fallback catch. Now it THROWS, so a
+  // dead token routes straight into the per-op fallback. The fallback must NOT re-dispatch
+  // the whole group against the revoked credential (AC#3: "does not attempt the remaining
+  // ops") — it breaks on the first auth-classified result. Three resolvable ops → ONE bulk
+  // group; the bulk call 401s; the fallback tries op-1 (401 → auth), then STOPS.
+  const cs = threeCategorize();
+  const bulk = spy(() => { throw httpError(401, 'bulk unauthorized'); });
+  const apply = spy(() => { throw httpError(401, 'per-op unauthorized (dead token)'); });
+  const audit = auditSpy();
+  const out = await applyChangeset(cs, bulkCtx({ bulkApplyOp: bulk, applyOp: apply, audit }));
+
+  assert.equal(bulk.calls.length, 1); // one bulk attempt, which threw
+  // The load-bearing assertion: only op-1 was re-dispatched per-op; op-2 / op-3 (the
+  // "remaining ops") were NEVER attempted against the dead token. Remove the fallback
+  // break and this becomes 3 (the whole group is re-dispatched) — a direct AC#3 failure.
+  assert.equal(apply.calls.length, 1);
+  assert.equal(apply.calls[0][1].id, 'op-1');
+  assert.ok(!apply.calls.some(([, op]) => op.id === 'op-2' || op.id === 'op-3'));
+  // The batch aborts on the auth failure, recording exactly the failed op.
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, OUTCOME.AUTH_ABORT);
+  assert.equal(out.stopped_at_index, 0);
+  assert.equal(out.results.length, 1);
+  assert.equal(out.results[0].op_id, 'op-1');
+  assert.equal(out.results[0].status, STATUS.ERROR);
+  assert.equal(out.results[0].detail.error_class, 'auth_revoked');
+  assert.equal(out.results[0].detail.applied_state, 'not_applied');
+  // Only the failed op is audited; the un-dispatched tail leaves no paper trail (AC#2).
+  assert.equal(audit.calls.length, 1);
+  assert.equal(audit.calls[0][0].result.error_class, 'auth_revoked');
+});
+
+test('(#50) the bulk fallback stops the moment a per-op call auth-fails — a later op is never dispatched (no un-audited apply)', async () => {
+  // The apply-without-audit race: if the fallback re-dispatched the WHOLE group and a
+  // later op flakily SUCCEEDED after an earlier one auth-failed, its mutation would land
+  // while the outer loop had already broken past its index → applied on YNAB, zero audit.
+  // Breaking on the first auth result closes it: op-1 applies, op-2 401 → abort, op-3
+  // (which WOULD succeed) is never dispatched, so it can never apply un-audited.
+  const cs = threeCategorize();
+  const bulk = spy(() => { throw httpError(401, 'bulk unauthorized'); }); // forces the per-op fallback
+  // Per-op: t-a succeeds, t-b 401s, t-c WOULD succeed — but must never be reached.
+  const apply = spy((_tool, op) => {
+    if (op.transaction_id === 't-b') throw httpError(401, 'unauthorized');
+    return { ok: true };
+  });
+  const audit = auditSpy();
+  const out = await applyChangeset(cs, bulkCtx({ bulkApplyOp: bulk, applyOp: apply, audit }));
+
+  assert.equal(out.reason, OUTCOME.AUTH_ABORT);
+  // op-1 dispatched + applied, op-2 dispatched + 401, op-3 NEVER dispatched (t-c absent).
+  assert.equal(apply.calls.length, 2);
+  assert.ok(!apply.calls.some(([, op]) => op.transaction_id === 't-c'));
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId['op-1'].status, STATUS.APPLIED);
+  assert.equal(byId['op-2'].status, STATUS.ERROR);
+  assert.equal(byId['op-2'].detail.error_class, 'auth_revoked');
+  assert.equal(byId['op-3'], undefined); // un-dispatched tail: no result, no audit
+  assert.equal(audit.calls.length, 2); // exactly the two processed ops
 });
 
 test('bulk dispatch: a RESOLVED but partially-failed bulk envelope audits each failed entry as error, not applied', async () => {

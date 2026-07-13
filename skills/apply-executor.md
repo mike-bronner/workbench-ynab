@@ -230,6 +230,13 @@ and audit log:
 > A wrapper that returns the MCP result verbatim fails **open** — a 401 preflight
 > would silently "pass" and a mid-batch 401 would look like a success. Mirrored in
 > [`ynab-tools.md`](protocol/ynab-tools.md).
+>
+> As defense in depth (#50), the shared gates the ports flow through — the executor's
+> `authPreflight` call and per-op bulk fallback, and the reconcile / delete handlers'
+> own `applyOp` / `authPreflight` calls — **also** route their result through
+> `throwOnErrorResult`, so a wrapper that forgot the check still fails **closed** on
+> the money paths. The wrapper obligation above stands; this is a code-enforced net
+> under it, not a substitute for it.
 
 ### Deferred-tool boot-patience — load schemas before the first MCP call
 

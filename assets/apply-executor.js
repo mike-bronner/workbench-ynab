@@ -96,6 +96,7 @@ const {
   classifyError,
   isAuthFailure,
   remediation,
+  throwOnErrorResult,
 } = require('./write-error');
 
 /**
@@ -320,8 +321,22 @@ async function applyBulkGroup(ops, { bulkToolMap, bulkApplyOp, toolMap, applyOp 
   try {
     result = await bulkApplyOp(bulkTool, ops);
   } catch (err) {
+    // The bulk dispatch threw. Fall back to per-op applyOp so the survivors still apply
+    // individually (safe — a bulk-capable path opts in for idempotent ops) — BUT stop the
+    // moment a per-op call itself auth-fails, mirroring the outer dispatch abort. Before
+    // the isError→throw port wiring (#50), a whole-bulk 401/403 came back as a RESOLVED
+    // `{ isError: true }` envelope and never entered this catch; now it throws, so it
+    // lands here too. Re-dispatching the WHOLE group against a dead token would (a)
+    // violate AC #3 (attempt every remaining op on a revoked credential) and (b) risk an
+    // un-audited apply if a later op flakily succeeded after an earlier one auth-failed
+    // and the outer loop had already broken past its index. Breaking on the first
+    // auth-classified result records that op and leaves the rest un-dispatched.
     const out = [];
-    for (const op of ops) out.push(await applyOneOp(op, { toolMap, applyOp }));
+    for (const op of ops) {
+      const res = await applyOneOp(op, { toolMap, applyOp });
+      out.push(res);
+      if (res.status === STATUS.ERROR && isAuthFailure(res.detail.error_class)) break;
+    }
     return out;
   }
   // Resolved — but inspect the payload FAIL-CLOSED: a resolved bulk result can
@@ -517,7 +532,12 @@ async function applyChangeset(changeset, options = {}) {
   //      never mutates, so it skips the preflight entirely.
   if (!dryRun) {
     try {
-      await authPreflight();
+      // Defense in depth (#50): route the preflight result through throwOnErrorResult so a
+      // vendored `{ isError: true }` auth envelope that RESOLVED (didn't reject) still
+      // aborts fail-closed here — the same guard the categorize port wrappers apply, now
+      // code-enforced at the executor's shared preflight gate for every path that routes
+      // through it (categorize / delete / allocate).
+      throwOnErrorResult(await authPreflight());
     } catch (err) {
       const { error_class, applied_state } = classifyError(err);
       return {

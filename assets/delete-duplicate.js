@@ -42,6 +42,7 @@
  */
 
 const { ALLOWED_TOOLS } = require('./write-safety-guardrail');
+const { throwOnErrorResult } = require('./write-error');
 
 /** The op type this write path handles — the executor toolMap registration key. */
 const OP_TYPE = 'delete_duplicate';
@@ -282,7 +283,12 @@ function makeAuditingDeleteApplyOp({ applyOp, audit, changeset, dryRun = false }
         dryRun,
       });
     }
-    return applyOp(toolName, op);
+    // Defense in depth (#50): route the delete dispatch through throwOnErrorResult so a
+    // vendored `{ isError: true }` auth / rate / 5xx envelope that RESOLVED (didn't reject)
+    // throws — the executor's auth-abort machinery then fail-closes on the irreversible
+    // write path, code-enforcing the "ports throw on a non-2xx" contract rather than
+    // trusting the injected port to have done it.
+    return throwOnErrorResult(await applyOp(toolName, op));
   };
 }
 
