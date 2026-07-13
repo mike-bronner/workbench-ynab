@@ -30,7 +30,7 @@ an empty string (the surrounding `<section>` stays in the document).
 | `<!-- SLOT:section-10-anomalies -->` | `<div class="card">` — **anomalies/flags**. Long transaction lists go in `<details><summary>…</summary><div class="details__body">…</div></details>`. |
 | `<!-- SLOT:section-11-recommendations -->` | `<div class="card">` — **recommendations**, action-oriented. |
 | `<!-- SLOT:section-12-tax-summary -->` | `<div class="card">` — **tax summary** (tier-dependent; empty string when the tier has no tax section). |
-| `<!-- SLOT:footer-persona -->` | The resolved **persona name** as plain text (already HTML-escaped). Resolved by `bin/persona.sh`; never the literal default name. |
+| `<!-- SLOT:footer-persona -->` | The resolved **persona name** as plain text (already HTML-escaped). Rendered by `bin/persona.sh html-name`; never the literal default name, never hand-escaped. |
 
 > **Long transaction lists** belong inside `<details>/<summary>` so they collapse
 > on screen. The print stylesheet forces every `<details>` open, so nothing is
