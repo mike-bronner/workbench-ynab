@@ -193,6 +193,66 @@ assert_contains "adversarial persona token does not hijack the date splice" \
 assert_absent   "no real {{generated_at}} placeholder leaks at the footer tail" \
   "— {{generated_at}}" "$footer_tok"
 
+# ---- _render_template hardening: degenerate empty placeholder key --------------
+
+# _render_template is a general-purpose varargs helper. A degenerate EMPTY key
+# used to hang it forever: `${rest%%""*}` is a zero-length match at position 0,
+# so the empty key was picked as the earliest match yet advanced nothing, spinning
+# the outer loop (#126 review blocker). The current call sites only pass literal
+# `{{persona}}` / `{{generated_at}}`, so the CLI can't reach this — the helper is
+# exercised directly by SOURCING persona.sh, whose dispatch is guarded by
+# BASH_SOURCE==$0 (same pattern as tests/unit/test-audit-log.sh sourcing
+# bin/audit-log.sh) so sourcing defines the functions without running the CLI.
+
+# render_tmpl_timed <secs> <template> <key> <val> [<key> <val>...]
+# Runs _render_template under a portable watchdog (macOS ships no timeout(1);
+# poll-until-exit mirrors tests/lib/bundle-integrity.sh) so a regressed hang
+# fails cleanly instead of stalling CI. Prints the render on stdout; returns 124
+# if the call overran (hung), else the call's own exit code.
+render_tmpl_timed() {
+  local secs="$1"; shift
+  local out_file; out_file="$(mktemp "${TMPDIR_TEST}/rt.XXXXXX")"
+  # shellcheck source=/dev/null
+  ( source "$PERSONA_SH"; _render_template "$@" ) >"$out_file" 2>/dev/null &
+  local pid=$! waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+      return 124
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  wait "$pid"; local rc=$?
+  cat "$out_file"
+  return "$rc"
+}
+
+# assert_render_tmpl <desc> <expected> <secs> <template> <key> <val> [<key> <val>...]
+# Fails loudly (not by hanging) if the call times out — the regression this pins.
+assert_render_tmpl() {
+  local desc="$1" expected="$2" secs="$3"; shift 3
+  local got rc
+  got="$(render_tmpl_timed "$secs" "$@")"; rc=$?
+  if [ "$rc" -eq 124 ]; then
+    printf 'FAIL — %s: _render_template hung (regressed the empty-key guard)\n' "$desc"
+    fail=$((fail + 1))
+  elif [ "$got" = "$expected" ]; then
+    printf 'ok   — %s (got %q)\n' "$desc" "$got"; pass=$((pass + 1))
+  else
+    printf 'FAIL — %s: expected %q, got %q\n' "$desc" "$expected" "$got"
+    fail=$((fail + 1))
+  fi
+}
+
+# An all-empty-keys arg list must TERMINATE and emit the template intact — the
+# empty key is ignored, no placeholder matches, so the tail passes straight through.
+assert_render_tmpl "empty placeholder key is ignored, not hung" \
+  "abc" 4 "abc" "" "X"
+# An empty key alongside a real placeholder: the empty key is skipped and the real
+# `{{name}}` still fills, proving the guard drops ONLY the degenerate key.
+assert_render_tmpl "empty key skipped, real placeholder still filled" \
+  "Hi Bob!" 4 "Hi {{name}}!" "" "X" "{{name}}" "Bob"
+
 # ---- html-name subcommand (SLOT:footer-persona) -------------------------------
 
 # The report chrome injects the persona name into `SLOT:footer-persona` as an
@@ -210,6 +270,13 @@ assert_absent   "html-name injects no raw markup from the name" "x</p>" "$html_n
 
 html_name_t3="$(run "$NO_FILE" "$NO_FILE" html-name)"
 assert_contains "html-name emits the resolved name (Hobbes fallback)" "Hobbes" "$html_name_t3"
+
+# All five escapable chars through html-name too, so the SLOT:footer-persona path
+# pins " and ' (entities the earlier html-name assertions didn't exercise), not
+# just & and markup. Reuses the O'Reilly & "Q" <x> fixture from footer_all.
+html_name_all="$(run "$ynab_all" "$NO_FILE" html-name)"
+assert_contains "html-name escapes all of & < > \" ' to entities" \
+  "O&#39;Reilly &amp; &quot;Q&quot; &lt;x&gt;" "$html_name_all"
 
 # ---- dispatch sign-off (AC 8) -------------------------------------------------
 

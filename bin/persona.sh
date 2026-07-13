@@ -131,6 +131,11 @@ _html_escape() {
 #     trailing placeholder and misplacing the date (#126, review blocker #1).
 #   * An absent placeholder simply never matches, so a template missing one is
 #     emitted intact rather than duplicated.
+#   * A degenerate EMPTY placeholder key is ignored, never treated as a match: a
+#     zero-length token matches at every position yet consumes nothing, so
+#     selecting it would spin the loop forever — the inner scan considers only
+#     non-empty keys, and an all-empty-keys arg list falls through to the
+#     `out+="$rest"` terminator.
 # Values are inserted verbatim (no `${//}` replacement anywhere), so bash 5.2's
 # patsub_replacement `&`-as-matched-text semantics never apply.
 #
@@ -145,9 +150,13 @@ _render_template() {
     while [ "$i" -lt "$#" ]; do
       local ph="${!i}" j=$((i + 1))
       local val="${!j}" prefix="${rest%%"$ph"*}"
-      # `${rest%%"$ph"*}` equals "$rest" only when $ph does not occur in $rest;
-      # otherwise the strip leaves a strictly shorter prefix ending at $ph.
-      if [ "$prefix" != "$rest" ]; then
+      # Skip an EMPTY key outright: `${rest%%""*}` always strips to "" (a
+      # zero-length match at position 0), which would be picked as the earliest
+      # match yet advance nothing (`${rest#*""}` strips nothing), hanging the
+      # outer loop. For a non-empty key, `${rest%%"$ph"*}` equals "$rest" only
+      # when $ph does not occur in $rest; otherwise the strip leaves a strictly
+      # shorter prefix ending at $ph.
+      if [ -n "$ph" ] && [ "$prefix" != "$rest" ]; then
         if [ "$best_idx" -lt 0 ] || [ "${#prefix}" -lt "$best_idx" ]; then
           best_idx=${#prefix}; best_ph="$ph"; best_val="$val"; best_prefix="$prefix"
         fi
@@ -202,17 +211,23 @@ render_signoff() {
   printf '— %s, your financial assistant\n' "$(persona_name)"
 }
 
-case "${1:-name}" in
-  name)      persona_name ;;
-  # The HTML-escaped name, for the report chrome's `SLOT:footer-persona` block
-  # slot (see skills/review/ynab-review.md §8). Routes through the SAME tested
-  # `_html_escape` the footer uses, so the review skill injects it verbatim
-  # rather than hand-escaping the raw name a second time (#126 review follow-up).
-  html-name) printf '%s\n' "$(_html_escape "$(persona_name)")" ;;
-  footer)    shift; render_footer "$@" ;;
-  signoff)   render_signoff ;;
-  *)
-    printf 'persona.sh: unknown subcommand %q (expected: name|html-name|footer|signoff)\n' "$1" >&2
-    exit 2
-    ;;
-esac
+# Dispatch the CLI only when executed directly. When another script sources this
+# file to unit-test the helpers (e.g. _render_template / _html_escape), the guard
+# is false so the CLI never runs — the same pattern as tests/unit/test-audit-log.sh
+# sourcing bin/audit-log.sh.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  case "${1:-name}" in
+    name)      persona_name ;;
+    # The HTML-escaped name, for the report chrome's `SLOT:footer-persona` block
+    # slot (see skills/review/ynab-review.md §8). Routes through the SAME tested
+    # `_html_escape` the footer uses, so the review skill injects it verbatim
+    # rather than hand-escaping the raw name a second time (#126 review follow-up).
+    html-name) printf '%s\n' "$(_html_escape "$(persona_name)")" ;;
+    footer)    shift; render_footer "$@" ;;
+    signoff)   render_signoff ;;
+    *)
+      printf 'persona.sh: unknown subcommand %q (expected: name|html-name|footer|signoff)\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+fi
