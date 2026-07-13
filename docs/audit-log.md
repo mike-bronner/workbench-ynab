@@ -98,7 +98,7 @@ Every record contains exactly these fields:
   "before": { "category_id": null, "category_name": null },
   "after":  { "category_id": "c9", "category_name": "Groceries" },
   "tool": "mcp__ynab__ynab_update_transaction",
-  "result_status": "success",
+  "result_status": "applied",
   "dry_run": false
 }
 ```
