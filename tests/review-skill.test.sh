@@ -162,6 +162,8 @@ assert_present    "calls the report-writer helper"             "bin/report-write
 # shellcheck disable=SC2016  # a literal needle: no $ / backtick expansion wanted
 assert_present    "captures the writer's stdout as report_path" 'report_path="$('
 assert_present_re "surfaces the saved path (\$report_path) to the user" 'Surface.*report_path'
+# ---- dispatch summary points at its format contract (issue #43) ---------------
+assert_present    "references the dispatch-format contract" "docs/dispatch-format.md"
 
 # ---- trust boundary: HTML-escape YNAB strings --------------------------------
 assert_present "HTML-escapes untrusted YNAB strings" "HTML-escape"

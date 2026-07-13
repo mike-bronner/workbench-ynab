@@ -394,6 +394,12 @@ warnings/notes (`empty_budget`, `tax_profile_error`, `ynab_mcp_offline`, plan
 keep the tone of [`../../assets/persona/hobbes.md`](../../assets/persona/hobbes.md):
 warm, plain-spoken, action-oriented, no jargon-as-drama.
 
+The exact rendering contract — the fixed **five-finding** shape, the 🔴/🟡/🟢
+severity emoji (aligned with the M2-5 report badges), the per-finding
+`{emoji} **statement.** action.` structure, the report-pointer line, and the
+sign-off — is frozen in [`../../docs/dispatch-format.md`](../../docs/dispatch-format.md),
+with a worked example for every tier. Render the dispatch to that contract.
+
 ---
 
 ## Hard rules
