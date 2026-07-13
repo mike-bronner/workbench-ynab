@@ -322,7 +322,7 @@ fragment (or an empty string when out of scope; the `<section>` stays):
 | `SLOT:section-10-anomalies` | §2 + §4 + §5 + §7 (duplicates, uncategorized, stale, unusual) |
 | `SLOT:section-11-recommendations` | §11 Recommended Actions |
 | `SLOT:section-12-tax-summary` | §12 Tax Summary YTD (empty string when the tier has none) |
-| `SLOT:footer-persona` | `bash "${CLAUDE_PLUGIN_ROOT}/bin/persona.sh" html-name` — the resolved persona name, already HTML-escaped by the loader's single tested `_html_escape`. Inject verbatim; never hand-escape the raw `name` yourself (one escape function, not an LLM re-implementation). |
+| `SLOT:footer-persona` | `bash "${CLAUDE_PLUGIN_ROOT}/bin/persona.sh" html-name` — the resolved persona name, already HTML-escaped through the one shared `html_escape` in [`bin/html-escape.sh`](../../bin/html-escape.sh). Inject verbatim; never hand-escape the raw `name` yourself (one escape function, not an LLM re-implementation). |
 
 **Scalar slots** (`{{name}}`): `{{tier}}` (e.g. `Monthly`, `Quarterly Tax`),
 `{{report_date}}`, `{{output_path}}` (the save path is decided by the report
