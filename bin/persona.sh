@@ -15,6 +15,7 @@
 #
 # Usage:
 #   bash bin/persona.sh name           # print the resolved persona name (default)
+#   bash bin/persona.sh html-name      # the resolved name, HTML-escaped (footer slot)
 #   bash bin/persona.sh footer [when]  # render the report footer  (AC 7)
 #   bash bin/persona.sh signoff        # render the dispatch sign-off (AC 8)
 #
@@ -90,13 +91,15 @@ _trim() {
 # HTML-escape a value for safe substitution into the HTML footer. Walk the
 # string one character at a time and append the entity for each special char.
 # A character loop — rather than a chain of `${s//c/&ent;}` substitutions — is
-# deliberate: bash 5.0 made an unquoted `&` in a `${//}` replacement stand for
-# the text matched by the pattern, so `${s//</&lt;}` corrupts `<` into `<lt;`
-# there (bash 3.2 keeps `&` literal, which is why the bug only surfaced on the
-# GNU/Linux CI runner). Appending literal single-quoted entities sidesteps that
-# reinterpretation entirely and behaves identically on bash 3.2 and 5.x (#126).
-# Only the footer needs this — it is an HTML fragment; the sign-off is plain text
-# (a different output context) and stays literal.
+# deliberate: bash 5.2 turned on the `patsub_replacement` shell option by
+# default, which makes an unquoted `&` in a `${//}` replacement stand for the
+# text matched by the pattern, so `${s//</&lt;}` corrupts `<` into `<lt;` there
+# (bash < 5.2 keeps `&` literal — the option is `#if 0` dead code in 5.0/5.1 —
+# which is why the bug only surfaced on the GNU/Linux CI runner, where
+# ubuntu-latest ships bash 5.2). Appending literal single-quoted entities
+# sidesteps that reinterpretation entirely and behaves identically on bash 3.2
+# and 5.2 (#126). Only the footer needs this — it is an HTML fragment; the
+# sign-off is plain text (a different output context) and stays literal.
 _html_escape() {
   local s="$1" out="" i c
   for (( i = 0; i < ${#s}; i++ )); do
@@ -113,17 +116,51 @@ _html_escape() {
   printf '%s' "$out"
 }
 
-# Splice <value> into <template> at the first <placeholder>, inserting the value
-# VERBATIM. Unlike `${template//{{x}}/$value}`, this never reinterprets the
-# value: bash 5.0 treats an unquoted `&` in a `${//}` replacement as the text
-# matched by the pattern, so an already-escaped value like `Smith &amp; Sons`
-# corrupts into `Smith {{persona}}amp; Sons`. Prefix/suffix removal splices the
-# value in as-is on both bash 3.2 and 5.x (#126). The footer templates (the
-# shipped asset and the inline fallback) each carry exactly one of each
-# placeholder, so a single-occurrence splice is sufficient.
-_splice() {
-  local template="$1" placeholder="$2" value="$3"
-  printf '%s' "${template%%"$placeholder"*}${value}${template#*"$placeholder"}"
+# Render <template> by substituting each {{placeholder}} with its paired value in
+# a SINGLE left-to-right pass: at each step, find the earliest-occurring
+# remaining placeholder in the still-unconsumed template tail, emit the text
+# before it followed by that value VERBATIM, then advance past the placeholder.
+#
+# Only the template's own tail is ever scanned for placeholders — an inserted
+# value is emitted and never re-examined. Two consequences matter here:
+#   * A value that itself contains a `{{…}}` token (an HTML-escaped persona name
+#     preserves `{`/`}`) can never be mistaken for a LATER placeholder. A chain
+#     of first-occurrence splices would do exactly that: a hostile name like
+#     `pwned {{generated_at}} pwned` spliced into `{{persona}}` smuggles in a
+#     `{{generated_at}}` that the next splice then consumes, leaking the real
+#     trailing placeholder and misplacing the date (#126, review blocker #1).
+#   * An absent placeholder simply never matches, so a template missing one is
+#     emitted intact rather than duplicated.
+# Values are inserted verbatim (no `${//}` replacement anywhere), so bash 5.2's
+# patsub_replacement `&`-as-matched-text semantics never apply.
+#
+# Usage: _render_template <template> <placeholder> <value> [<placeholder> <value>]...
+_render_template() {
+  local template="$1"; shift
+  local out="" rest="$template"
+  while [ -n "$rest" ]; do
+    # Pick the placeholder that occurs earliest in the unconsumed tail.
+    local best_ph="" best_val="" best_prefix="" best_idx=-1
+    local i=1
+    while [ "$i" -lt "$#" ]; do
+      local ph="${!i}" j=$((i + 1))
+      local val="${!j}" prefix="${rest%%"$ph"*}"
+      # `${rest%%"$ph"*}` equals "$rest" only when $ph does not occur in $rest;
+      # otherwise the strip leaves a strictly shorter prefix ending at $ph.
+      if [ "$prefix" != "$rest" ]; then
+        if [ "$best_idx" -lt 0 ] || [ "${#prefix}" -lt "$best_idx" ]; then
+          best_idx=${#prefix}; best_ph="$ph"; best_val="$val"; best_prefix="$prefix"
+        fi
+      fi
+      i=$((i + 2))
+    done
+    if [ "$best_idx" -lt 0 ]; then
+      out+="$rest"; break        # no placeholder left in the tail
+    fi
+    out+="${best_prefix}${best_val}"
+    rest="${rest#*"$best_ph"}"
+  done
+  printf '%s' "$out"
 }
 
 persona_name() {
@@ -151,10 +188,13 @@ render_footer() {
   # The footer is an HTML fragment, so escape both substituted values for the
   # HTML output context: an ordinary name like "Smith & Sons" must emit a valid
   # entity (&amp;), and any stray markup is neutralised rather than injected.
-  # Splice the escaped values in verbatim — a plain `${//}` would let bash 5.0
-  # reinterpret the `&` in an entity as the matched placeholder (see _splice).
-  template="$(_splice "$template" '{{persona}}' "$(_html_escape "$name")")"
-  template="$(_splice "$template" '{{generated_at}}' "$(_html_escape "$when")")"
+  # Render both placeholders in one left-to-right pass so an escaped value that
+  # happens to contain a `{{…}}` token can't be picked up as a later placeholder,
+  # and so bash 5.2's patsub_replacement never sees a `${//}` to reinterpret
+  # (see _render_template).
+  template="$(_render_template "$template" \
+    '{{persona}}'      "$(_html_escape "$name")" \
+    '{{generated_at}}' "$(_html_escape "$when")")"
   printf '%s\n' "$template"
 }
 
@@ -163,11 +203,16 @@ render_signoff() {
 }
 
 case "${1:-name}" in
-  name)    persona_name ;;
-  footer)  shift; render_footer "$@" ;;
-  signoff) render_signoff ;;
+  name)      persona_name ;;
+  # The HTML-escaped name, for the report chrome's `SLOT:footer-persona` block
+  # slot (see skills/review/ynab-review.md §8). Routes through the SAME tested
+  # `_html_escape` the footer uses, so the review skill injects it verbatim
+  # rather than hand-escaping the raw name a second time (#126 review follow-up).
+  html-name) printf '%s\n' "$(_html_escape "$(persona_name)")" ;;
+  footer)    shift; render_footer "$@" ;;
+  signoff)   render_signoff ;;
   *)
-    printf 'persona.sh: unknown subcommand %q (expected: name|footer|signoff)\n' "$1" >&2
+    printf 'persona.sh: unknown subcommand %q (expected: name|html-name|footer|signoff)\n' "$1" >&2
     exit 2
     ;;
 esac
