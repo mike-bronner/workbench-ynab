@@ -87,18 +87,43 @@ _trim() {
   printf '%s' "$s"
 }
 
-# HTML-escape a value for safe substitution into the HTML footer. Order matters:
-# `&` first, so the entities introduced by the later rules are not re-escaped.
+# HTML-escape a value for safe substitution into the HTML footer. Walk the
+# string one character at a time and append the entity for each special char.
+# A character loop — rather than a chain of `${s//c/&ent;}` substitutions — is
+# deliberate: bash 5.0 made an unquoted `&` in a `${//}` replacement stand for
+# the text matched by the pattern, so `${s//</&lt;}` corrupts `<` into `<lt;`
+# there (bash 3.2 keeps `&` literal, which is why the bug only surfaced on the
+# GNU/Linux CI runner). Appending literal single-quoted entities sidesteps that
+# reinterpretation entirely and behaves identically on bash 3.2 and 5.x (#126).
 # Only the footer needs this — it is an HTML fragment; the sign-off is plain text
 # (a different output context) and stays literal.
 _html_escape() {
-  local s="$1" sq="'"   # hold the single quote in a var: a bare ' inside the
-  s="${s//&/&amp;}"     # parameter expansion below would confuse the parser.
-  s="${s//</&lt;}"
-  s="${s//>/&gt;}"
-  s="${s//\"/&quot;}"
-  s="${s//$sq/&#39;}"
-  printf '%s' "$s"
+  local s="$1" out="" i c
+  for (( i = 0; i < ${#s}; i++ )); do
+    c="${s:i:1}"
+    case "$c" in
+      '&') out+='&amp;'  ;;
+      '<') out+='&lt;'   ;;
+      '>') out+='&gt;'   ;;
+      '"') out+='&quot;' ;;
+      "'") out+='&#39;'  ;;
+      *)   out+="$c"     ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# Splice <value> into <template> at the first <placeholder>, inserting the value
+# VERBATIM. Unlike `${template//{{x}}/$value}`, this never reinterprets the
+# value: bash 5.0 treats an unquoted `&` in a `${//}` replacement as the text
+# matched by the pattern, so an already-escaped value like `Smith &amp; Sons`
+# corrupts into `Smith {{persona}}amp; Sons`. Prefix/suffix removal splices the
+# value in as-is on both bash 3.2 and 5.x (#126). The footer templates (the
+# shipped asset and the inline fallback) each carry exactly one of each
+# placeholder, so a single-occurrence splice is sufficient.
+_splice() {
+  local template="$1" placeholder="$2" value="$3"
+  printf '%s' "${template%%"$placeholder"*}${value}${template#*"$placeholder"}"
 }
 
 persona_name() {
@@ -126,8 +151,10 @@ render_footer() {
   # The footer is an HTML fragment, so escape both substituted values for the
   # HTML output context: an ordinary name like "Smith & Sons" must emit a valid
   # entity (&amp;), and any stray markup is neutralised rather than injected.
-  template="${template//\{\{persona\}\}/$(_html_escape "$name")}"
-  template="${template//\{\{generated_at\}\}/$(_html_escape "$when")}"
+  # Splice the escaped values in verbatim — a plain `${//}` would let bash 5.0
+  # reinterpret the `&` in an entity as the matched placeholder (see _splice).
+  template="$(_splice "$template" '{{persona}}' "$(_html_escape "$name")")"
+  template="$(_splice "$template" '{{generated_at}}' "$(_html_escape "$when")")"
   printf '%s\n' "$template"
 }
 
