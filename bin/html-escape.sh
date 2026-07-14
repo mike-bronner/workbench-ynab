@@ -84,6 +84,18 @@ html_escape() {
   printf '%s' "$s"
 }
 
+# _byte_len <str> — the length of <str> in BYTES, independent of the caller's
+# locale. `${#var}` counts CHARACTERS under a UTF-8 locale (macOS's default
+# LANG=en_US.UTF-8, CI's C.UTF-8), silently under-counting multibyte input by
+# up to 4× — so a gate that compares `${#var}` against a BYTE bound only
+# enforces that bound for pure-ASCII values (issue #28 round-6 blocker). The
+# C-locale subshell makes `${#s}` the cheap O(1) byte count — the same idiom
+# as _byte_bound_utf8 below — and keeps the override from leaking.
+_byte_len() (
+  LC_ALL=C
+  printf '%s' "${#1}"
+)
+
 # _byte_bound_utf8 <str> <max-bytes> — hard-slice <str> to at most <max-bytes>
 # BYTES, landing the cut on a UTF-8 character boundary (the slice backs off past
 # any continuation bytes, so a multibyte character is dropped whole, never split).
@@ -266,16 +278,19 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     # --raw skips the sanitize path's byte gate, but html_escape's `${//}`
     # substitutions are super-linear on match-dense input (its COST CONTRACT
     # above) — so the CLI still enforces the caller contract with an O(1)
-    # length check. --raw exists for caller-owned, ALREADY-BOUNDED values; any
-    # plausible owned scalar fits well inside 4096, and a bigger value is a
-    # contract violation refused LOUDLY rather than truncated silently (a
-    # silently-sliced owned value — a path, say — is worse than an error).
-    # Untrusted/unbounded input belongs on the default sanitize path, which
-    # bounds and truncates by design.
+    # BYTE-length check via _byte_len (`${#raw_value}` in the ambient UTF-8
+    # locale counts CHARACTERS, under-counting multibyte input up to 4× —
+    # round-6 blocker). --raw exists for caller-owned, ALREADY-BOUNDED values;
+    # any plausible owned scalar fits well inside 4096 bytes, and a bigger
+    # value is a contract violation refused LOUDLY rather than truncated
+    # silently (a silently-sliced owned value — a path, say — is worse than an
+    # error). Untrusted/unbounded input belongs on the default sanitize path,
+    # which bounds and truncates by design.
     raw_value="${1-}"
-    if [ "${#raw_value}" -gt 4096 ]; then
-      printf 'html-escape.sh: --raw value length %s exceeds 4096 — --raw is for caller-owned, already-bounded values; pass untrusted input through the default sanitize mode instead\n' \
-        "${#raw_value}" >&2
+    raw_bytes="$(_byte_len "$raw_value")"
+    if [ "$raw_bytes" -gt 4096 ]; then
+      printf 'html-escape.sh: --raw value byte length %s exceeds 4096 — --raw is for caller-owned, already-bounded values; pass untrusted input through the default sanitize mode instead\n' \
+        "$raw_bytes" >&2
       exit 2
     fi
     html_escape "$raw_value"

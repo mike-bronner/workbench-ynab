@@ -276,6 +276,30 @@ test_cli_raw_accepts_a_value_at_the_bound() {
   # Exactly 4096 is inside the contract and comes back escaped, not refused.
   assert_eq "$(a_string 4096)" "$(bash "$MODULE" --raw -- "$(a_string 4096)")"
 }
+test_cli_raw_gate_counts_bytes_not_chars() {
+  # #28 round-6 blocker: the gate compared `${#raw_value}` — a CHARACTER count
+  # under a UTF-8 locale — against the 4096-BYTE bound the header documents, so
+  # a 2048-char / 6144-byte CJK value sailed straight through. The invocation
+  # FORCES a UTF-8 locale: under LC_ALL=C bytes == chars and even the buggy
+  # char-counting gate would refuse this fixture, making the guard vacuous —
+  # the round-5 "test that passes with the protection deleted" class.
+  local loc unit small payload i=0 rc=0 err
+  loc="$(locale -a 2>/dev/null | grep -Eim1 '^(c|en_us)\.utf-?8$' || true)"
+  [ -n "$loc" ] || loc="en_US.UTF-8"
+  unit="$(printf '\xe6\x97\xa5')"                                    # 日 — 1 char, 3 bytes
+  payload="$unit"
+  while [ "$i" -lt 10 ]; do payload+="$payload"; i=$((i + 1)); done  # 1024 chars, 3072 bytes
+  small="$payload"
+  payload+="$payload"                                                # 2048 chars, 6144 bytes
+  err="$(LC_ALL="$loc" bash "$MODULE" --raw -- "$payload" 2>&1 >/dev/null)" || rc=$?
+  assert_eq "2" "$rc" "2048-char / 6144-byte --raw value → exit 2 (the gate must count bytes)"
+  assert_contains "$err" "byte length 6144 exceeds 4096" "refusal reports the BYTE length"
+  # Complement: multibyte INSIDE the byte bound (1024 chars / 3072 bytes) is
+  # accepted and comes back unchanged (CJK carries no HTML metacharacters) —
+  # the fix tightened the gate to bytes, not to something stricter.
+  assert_eq "$small" "$(LC_ALL="$loc" bash "$MODULE" --raw -- "$small")" \
+    "3072-byte multibyte value is inside the 4096-byte contract"
+}
 test_cli_flag_like_values_are_escaped_as_data_not_dispatched() {
   # issue #30 blocker: a payee/memo/category literally named like a flag must be
   # sanitized as DATA, never select an option branch. The call site always passes
