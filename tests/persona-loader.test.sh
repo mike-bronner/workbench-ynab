@@ -534,9 +534,10 @@ assert_contains "text around the stripped control byte survives"     "dingdong" 
 # Same portable watchdog idiom as render_tmpl_timed above.
 run_voice_timed() {
   local secs="$1" cfg="$2" sub="${3:-voice}"
+  shift 2; [ "$#" -gt 0 ] && shift   # anything left is extra argv for the subcommand
   local out_file="${TMPDIR_TEST}/voice-timed-out" err_file="${TMPDIR_TEST}/voice-timed-err"
   YNAB_CONFIG_FILE="$cfg" WORKBENCH_CORE_CONFIG_FILE="$NO_FILE" \
-    bash "$PERSONA_SH" "$sub" >"$out_file" 2>"$err_file" &
+    bash "$PERSONA_SH" "$sub" "$@" >"$out_file" 2>"$err_file" &
   local pid=$! waited=0
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge "$secs" ]; then
@@ -618,6 +619,78 @@ elif [ "$name_mb" = "Hobbes" ]; then
     "persona.name" "$(cat "${TMPDIR_TEST}/voice-timed-err")"
 else
   printf 'FAIL — 6000-char CJK persona.name: expected Hobbes, got %q\n' "$name_mb"; fail=$((fail + 1))
+fi
+
+# Whitespace-flood DoS (#28 escalation ruling): _trim previously ran on the RAW
+# config value BEFORE the byte gate, and its whitespace-strip pattern matches
+# are super-linear on whitespace-dense input (measured on bash 3.2: "hi" +
+# 32 KB of trailing spaces ≈ 24 s — minutes at this fixture's size). The gate
+# now slices at the config read (_gated_cfg), so the trim only ever sees ~2 KB.
+# The slice keeps LEADING content, so "hi" + flood still renders correctly.
+sp_unit='        '   # 8 spaces
+sp_flood=""; i=0; while [ "$i" -lt 17000 ]; do sp_flood+="$sp_unit"; i=$((i + 1)); done   # ~136 KB
+ynab_vsp="${TMPDIR_TEST}/ynab-vsp.json"
+printf '{"persona":{"voice_overrides":"hi%s"}}' "$sp_flood" > "$ynab_vsp"
+voice_sp="$(run_voice_timed 20 "$ynab_vsp")"; sp_rc=$?
+if [ "$sp_rc" -eq 124 ]; then
+  printf 'FAIL — voice render of a ~136 KB space-padded value overran the watchdog (pre-gate _trim DoS regressed)\n'
+  fail=$((fail + 1))
+else
+  printf 'ok   — voice bounds a ~136 KB space-padded value before trimming (no whitespace DoS)\n'; pass=$((pass + 1))
+  voice_sp_value="$(printf '%s\n' "$voice_sp" | sed -n '3p')"
+  if [ "$voice_sp_value" = "hi" ]; then
+    printf 'ok   — space-padded voice value still renders its leading content\n'; pass=$((pass + 1))
+  else
+    printf 'FAIL — space-padded voice value: expected %q in the data slot, got %q\n' "hi" "$voice_sp_value"; fail=$((fail + 1))
+  fi
+fi
+# Same class on the name path: persona_name's tiers also trimmed the raw value.
+# A "Bob" + ~136 KB-of-spaces name must resolve to Bob in bounded time (the
+# gate keeps "Bob" + 257 spaces; the trim then strips them cheaply).
+ynab_nsp="${TMPDIR_TEST}/ynab-nsp.json"
+printf '{"persona":{"name":"Bob%s"}}' "$sp_flood" > "$ynab_nsp"
+name_sp="$(run_voice_timed 20 "$ynab_nsp" name)"; nsp_rc=$?
+if [ "$nsp_rc" -eq 124 ]; then
+  printf 'FAIL — name render of a ~136 KB space-padded name overran the watchdog (pre-gate _trim DoS regressed)\n'
+  fail=$((fail + 1))
+elif [ "$name_sp" = "Bob" ]; then
+  printf 'ok   — ~136 KB space-padded persona.name resolves to its content in bounded time\n'; pass=$((pass + 1))
+else
+  printf 'FAIL — space-padded persona.name: expected Bob, got %q\n' "$name_sp"; fail=$((fail + 1))
+fi
+# The documented cost of slicing before trimming (see _gated_cfg): a value
+# whose first (max + 1) * 4 bytes are PURE padding has trimmed to empty by the
+# time the renderer looks — it renders nothing / falls through, never
+# excavating content buried past the gate. Cheap fixtures pin the semantics.
+sp3k=""; i=0; while [ "$i" -lt 384 ]; do sp3k+="$sp_unit"; i=$((i + 1)); done   # ~3 KB
+ynab_vlead="${TMPDIR_TEST}/ynab-vlead.json"
+printf '{"persona":{"voice_overrides":"%shello"}}' "$sp3k" > "$ynab_vlead"
+voice_lead="$(run "$ynab_vlead" "$NO_FILE" voice)"
+if [ -z "$voice_lead" ]; then
+  printf 'ok   — voice value buried past the byte gate in leading whitespace renders no block\n'; pass=$((pass + 1))
+else
+  printf 'FAIL — leading-whitespace-buried voice value: expected no output, got %q\n' "$voice_lead"; fail=$((fail + 1))
+fi
+ynab_nlead="${TMPDIR_TEST}/ynab-nlead.json"
+printf '{"persona":{"name":"%sBob"}}' "$sp3k" > "$ynab_nlead"
+assert_name "name buried past the byte gate in leading whitespace falls back to Hobbes" \
+  "Hobbes" "$ynab_nlead"
+
+# render_footer's [when] argument is caller argv — unbounded — and flows into
+# html_escape, whose ${//} metacharacter substitutions are super-linear on
+# match-dense input (measured on bash 3.2: 32 KB of '&' ≈ 2 min). The renderer
+# byte-bounds `when` to 256 bytes first: a ~64 KB all-'&' argument renders in
+# bounded time, and what survives the bound is escaped (no raw '&&' run — every
+# '&' becomes '&amp;').
+amp_flood=""; i=0; while [ "$i" -lt 8192 ]; do amp_flood+='&&&&&&&&'; i=$((i + 1)); done   # ~64 KB
+footer_amp="$(run_voice_timed 20 "$NO_FILE" footer "$amp_flood")"; famp_rc=$?
+if [ "$famp_rc" -eq 124 ]; then
+  printf 'FAIL — footer render with a ~64 KB hostile [when] overran the watchdog (unbounded html_escape regressed)\n'
+  fail=$((fail + 1))
+else
+  printf 'ok   — footer bounds a ~64 KB hostile [when] argument (no html_escape DoS)\n'; pass=$((pass + 1))
+  assert_contains "bounded [when] is escaped into entities" '&amp;' "$footer_amp"
+  assert_absent   "no adjacent raw ampersands survive in the footer" '&&' "$footer_amp"
 fi
 
 # Length cap (AC 4): a 600-char value is truncated to 500 chars (+ ellipsis) with

@@ -208,6 +208,22 @@ test_cli_raw_escapes_only_without_truncation() {
   assert_eq "$(a_string 201)" "$(bash "$MODULE" --raw "$(a_string 201)")"
   assert_eq "&lt;a&gt;"       "$(bash "$MODULE" --raw '<a>')"
 }
+test_cli_raw_refuses_an_unbounded_value() {
+  # #28 cost invariant: html_escape's ${//} substitutions are super-linear on
+  # match-dense input (32 KB of '&' ≈ 2 min on bash 3.2), and --raw skips the
+  # sanitize path's byte gate — so the CLI refuses a value over 4096 LOUDLY
+  # (exit 2, stderr names the contract) instead of truncating an owned value
+  # silently or pegging the CPU. 4097 'a's: over the gate, cheap to build.
+  local rc=0 err
+  err="$(bash "$MODULE" --raw -- "$(a_string 4097)" 2>&1 >/dev/null)" || rc=$?
+  assert_eq "2" "$rc" "over-4096 --raw value → exit 2"
+  assert_contains "$err" "exceeds 4096" "refusal names the bound"
+  assert_contains "$err" "sanitize" "refusal points at the sanitize path for untrusted input"
+}
+test_cli_raw_accepts_a_value_at_the_bound() {
+  # Exactly 4096 is inside the contract and comes back escaped, not refused.
+  assert_eq "$(a_string 4096)" "$(bash "$MODULE" --raw -- "$(a_string 4096)")"
+}
 test_cli_flag_like_values_are_escaped_as_data_not_dispatched() {
   # issue #30 blocker: a payee/memo/category literally named like a flag must be
   # sanitized as DATA, never select an option branch. The call site always passes

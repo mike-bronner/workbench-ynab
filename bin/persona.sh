@@ -64,11 +64,18 @@ DEFAULT_PERSONA_NAME="Hobbes"
 #     tier falls through).
 #   * voice_overrides: max 500 CHARACTERS; longer values are truncated with a
 #     logged warning naming the field.
-# COST INVARIANT (#28 round-3 DoS blocker): every character-accurate scan below
-# sits behind a cheap O(1) byte-length gate (see _byte_bound_utf8 in
-# bin/html-escape.sh), so no super-linear `${var//[range]/}` pass ever touches
-# an unbounded value — a giant (or giant multibyte) config string can never peg
-# the CPU on a render.
+# COST INVARIANT (#28 round-3 DoS blocker, extended by the escalation ruling):
+# NO super-linear string pass may ever touch an unbounded value. That covers
+# not just the `${var//[range]/}` character scans but ALSO _trim (its
+# whitespace-strip pattern matches are super-linear on whitespace-dense input —
+# measured on bash 3.2: "hi" + 32 KB of trailing spaces ≈ 24 s) and
+# html_escape's `${//}` metacharacter substitutions (32 KB of '&' ≈ 2 min). So
+# every config read is hard-sliced by a cheap O(1) byte-length gate
+# (_byte_bound_utf8, bin/html-escape.sh) BEFORE anything — including _trim —
+# scans it (_gated_cfg below), and render_footer's caller-supplied [when]
+# argument is byte-bounded before it is escaped. A giant (or giant multibyte,
+# or whitespace-padded, or metacharacter-dense) config string can never peg the
+# CPU on a render.
 PERSONA_NAME_MAX_LEN=64
 VOICE_OVERRIDES_MAX_LEN=500
 
@@ -127,6 +134,22 @@ _trim() {
   s="${s#"${s%%[![:space:]]*}"}"   # strip leading whitespace
   s="${s%"${s##*[![:space:]]}"}"   # strip trailing whitespace
   printf '%s' "$s"
+}
+
+# _gated_cfg <file> <jq-path> <max-chars> — read one config string, hard-sliced
+# to (max-chars + 1) * 4 BYTES before ANYTHING else touches it. The O(1) byte
+# gate must run before _trim, not merely before the character scans: _trim's
+# whitespace-strip pattern matches are themselves super-linear on
+# whitespace-dense input (measured on bash 3.2: "hi" + 32 KB of trailing spaces
+# ≈ 24 s, quadratic — minutes at config-plausible sizes), so a padded config
+# value would peg the CPU inside the trim before any later gate ran — the same
+# DoS class the character scans had (#28). UTF-8 spends ≤ 4 bytes/char, so
+# nothing a caller may legitimately keep is ever cut. The documented cost:
+# a degenerate value whose first (max + 1) * 4 bytes are PURE whitespace has
+# trimmed to empty by the time the caller looks, so it falls through / renders
+# nothing instead of excavating content buried past the gate.
+_gated_cfg() {
+  _byte_bound_utf8 "$(_cfg "$1" "$2")" $(( ($3 + 1) * 4 ))
 }
 
 # Render <template> by substituting each {{placeholder}} with its paired value in
@@ -257,12 +280,18 @@ _checked_name() {
 
 persona_name() {
   local name core
+  # Both tiers read via _gated_cfg: the raw config value is byte-gated BEFORE
+  # _trim scans it (cost invariant above). A name whose content survives inside
+  # the first (64 + 1) * 4 bytes — i.e. every non-degenerate name, however much
+  # trailing whitespace pads it — resolves exactly as before; one drowned past
+  # the gate in leading whitespace trims to empty and falls through silently,
+  # the established failure mode for an absent name.
   # 1. ynab plugin's explicit persona.name
-  name="$(_checked_name "$(_trim "$(_cfg "$YNAB_CONFIG_FILE" '.persona.name')")" 'persona.name')"
+  name="$(_checked_name "$(_trim "$(_gated_cfg "$YNAB_CONFIG_FILE" '.persona.name' "$PERSONA_NAME_MAX_LEN")")" 'persona.name')"
   # 2. the requesting agent's own name from workbench-core
   if [ -z "$name" ]; then
     core="$(_core_config)"
-    [ -n "$core" ] && name="$(_checked_name "$(_trim "$(_cfg "$core" '.agent_name')")" 'agent_name')"
+    [ -n "$core" ] && name="$(_checked_name "$(_trim "$(_gated_cfg "$core" '.agent_name' "$PERSONA_NAME_MAX_LEN")")" 'agent_name')"
   fi
   # 3. shipped standalone default
   printf '%s\n' "${name:-$DEFAULT_PERSONA_NAME}"
@@ -277,14 +306,16 @@ persona_name() {
 # authority framing, and the value cannot break out of it:
 #   1. Unset/empty/null → NO output (exit 0), so callers can inject conditionally.
 #   2. The value is bounded FIRST, in two stages, so every later pass runs on a
-#      ≤500-char value and NO super-linear op ever touches an unbounded one
-#      (issue #28 review blockers — DoS, twice: stripping an unbounded value
-#      was super-linear, and then the char-length gate ITSELF was super-linear
-#      on match-dense multibyte input):
+#      bounded value and NO super-linear op ever touches an unbounded one
+#      (issue #28 review blockers — DoS, three times: stripping an unbounded
+#      value was super-linear, then the char-length gate ITSELF was
+#      super-linear on match-dense multibyte input, then _trim was super-linear
+#      on whitespace-dense input):
 #        a. an O(1) BYTE-length gate hard-slices the raw value to
-#           (VOICE_OVERRIDES_MAX_LEN + 1) * 4 bytes on a character boundary
-#           (_byte_bound_utf8 — UTF-8 spends ≤ 4 bytes/char, so anything sliced
-#           was over the character cap anyway);
+#           (VOICE_OVERRIDES_MAX_LEN + 1) * 4 bytes on a character boundary AT
+#           THE CONFIG READ, before even _trim scans it (_gated_cfg —
+#           UTF-8 spends ≤ 4 bytes/char, so anything sliced was over the
+#           character cap anyway);
 #        b. the character-accurate cap then truncates to VOICE_OVERRIDES_MAX_LEN
 #           characters (ellipsis appended) with a stderr warning naming the
 #           field. The cap counts pre-strip characters; stripping may shrink
@@ -314,14 +345,15 @@ persona_name() {
 # tests/unit/persona-write-gate-isolation.test.sh.
 render_voice() {
   local v
-  v="$(_trim "$(_cfg "$YNAB_CONFIG_FILE" '.persona.voice_overrides')")"
+  # Bound FIRST (step 2a), at the read itself: the O(1) byte gate in _gated_cfg
+  # runs before _trim AND before _char_len / _truncate_utf8 — the trim's
+  # whitespace-strip and the continuation-byte scans are each super-linear on
+  # their match-dense input class (the round-3 DoS, and the escalation ruling's
+  # whitespace variant). A sliced over-cap value still exceeds the character
+  # cap, so the truncation warning below still fires.
+  v="$(_trim "$(_gated_cfg "$YNAB_CONFIG_FILE" '.persona.voice_overrides' "$VOICE_OVERRIDES_MAX_LEN")")"
   [ -z "$v" ] && return 0
-  # Bound FIRST (step 2a): the O(1) byte gate runs before _char_len /
-  # _truncate_utf8, whose continuation-byte scans are super-linear on
-  # match-dense multibyte input — the round-3 DoS. A sliced value always still
-  # exceeds the character cap, so the truncation warning below still fires.
-  v="$(_byte_bound_utf8 "$v" $(( (VOICE_OVERRIDES_MAX_LEN + 1) * 4 )))"
-  # Step 2b: every strip below runs on at most 500 characters.
+  # Step 2b: every strip below runs on at most ~2 KB of already-gated value.
   if [ "$(_char_len "$v")" -gt "$VOICE_OVERRIDES_MAX_LEN" ]; then
     printf 'persona.sh: persona.voice_overrides exceeds %d characters — truncating (field: persona.voice_overrides)\n' \
       "$VOICE_OVERRIDES_MAX_LEN" >&2
@@ -349,6 +381,12 @@ render_voice() {
 
 render_footer() {
   local when="${1:-$(date '+%Y-%m-%d')}" name template
+  # [when] is caller-supplied argv — unbounded — and flows into html_escape,
+  # whose ${//} metacharacter substitutions are super-linear on match-dense
+  # input (cost invariant above; html_escape's contract is "already bounded").
+  # 256 bytes is generous for any date display string; the O(1) gate keeps a
+  # hostile argv from pegging the CPU in the escape.
+  when="$(_byte_bound_utf8 "$when" 256)"
   name="$(persona_name)"
   if [ -f "$FOOTER_TEMPLATE" ]; then
     template="$(cat "$FOOTER_TEMPLATE")"

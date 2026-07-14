@@ -65,6 +65,15 @@ HTML_ESCAPE_MAX_LEN=200
 # later rules introduce are never double-escaped. The apostrophe (`&#39;`) is
 # defense-in-depth: it lets a value be safely placed inside a single-quoted
 # attribute as well as a double-quoted one or a text node.
+# COST CONTRACT (#28 cost invariant): the five global `${//}` substitutions are
+# severely super-linear on match-dense input (measured on bash 3.2: 32 KB of
+# '&' ≈ 2 min), so the "caller OWNS and has already length-bounded" contract in
+# the header is load-bearing for cost, not just layout. Every in-repo call site
+# complies: escape_ynab_string byte-gates first; persona.sh bounds the name
+# (validated ≤ 64 chars) and the footer's [when] argv (256-byte gate);
+# report-writer.sh enum/regex-validates tier/date and refuses an out_dir over
+# 1024 bytes; the CLI's --raw path below refuses an over-4096-byte value. A new
+# caller MUST bound its value the same way before calling this.
 html_escape() {
   local s="${1-}" sq="'"   # hold the single quote in a var: a bare ' inside the
   s="${s//&/&amp;}"        # parameter expansion below would confuse the parser.
@@ -254,7 +263,22 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     esac
   done
   if [ "$mode" = raw ]; then
-    html_escape "${1-}"
+    # --raw skips the sanitize path's byte gate, but html_escape's `${//}`
+    # substitutions are super-linear on match-dense input (its COST CONTRACT
+    # above) — so the CLI still enforces the caller contract with an O(1)
+    # length check. --raw exists for caller-owned, ALREADY-BOUNDED values; any
+    # plausible owned scalar fits well inside 4096, and a bigger value is a
+    # contract violation refused LOUDLY rather than truncated silently (a
+    # silently-sliced owned value — a path, say — is worse than an error).
+    # Untrusted/unbounded input belongs on the default sanitize path, which
+    # bounds and truncates by design.
+    raw_value="${1-}"
+    if [ "${#raw_value}" -gt 4096 ]; then
+      printf 'html-escape.sh: --raw value length %s exceeds 4096 — --raw is for caller-owned, already-bounded values; pass untrusted input through the default sanitize mode instead\n' \
+        "${#raw_value}" >&2
+      exit 2
+    fi
+    html_escape "$raw_value"
   else
     escape_ynab_string "${1-}"
   fi
