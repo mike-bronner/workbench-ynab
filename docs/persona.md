@@ -198,14 +198,19 @@ The wrapper — not the value — carries all the framing:
 - **The framing label is fixed and non-overridable.** The bracketed line is
   emitted by the renderer on every non-empty render; no config value can alter,
   move, or suppress it.
-- **The value cannot break out of the block.** Any `<voice-overrides` /
-  `</voice-overrides` sequence inside the value is stripped (repeatedly, so
-  removal can never reconstruct an occurrence); C0 control characters other
-  than tab/newline, and DEL, are stripped too. The model always sees exactly
-  one block whose boundaries the renderer wrote.
-- **Length is capped at 500 characters.** A longer value is truncated with a
-  visible ellipsis and a stderr warning naming `persona.voice_overrides`, so a
-  giant override can never crowd the context window or the report layout.
+- **The value cannot break out of the block.** The renderer strips C0 control
+  characters other than tab/newline, DEL, invisible Unicode format characters
+  (bidi overrides/isolates, zero-width space, word joiner, BOM), and **every
+  `<` and `>`** — angle brackets have no legitimate purpose in style notes, and
+  removing them outright neutralizes the entire tag-lookalike class (byte-exact
+  wrappers, case variants, embedded-whitespace and zero-width tricks alike).
+  The emitted data contains no tag-shaped text at all: the only delimiters the
+  model sees are the wrapper lines the renderer wrote.
+- **Length is capped at 500 characters, applied before any stripping.** A
+  longer value is truncated with a visible ellipsis and a stderr warning naming
+  `persona.voice_overrides` — bounding the value FIRST caps the cost of every
+  later sanitization pass, so a giant override can neither crowd the context
+  window nor burn CPU during stripping. The cap counts pre-strip characters.
 - Consumers (the review skill) inject the block **verbatim** and treat its
   contents as stylistic preference data only.
 
@@ -256,8 +261,10 @@ malformed configs fall back to `"Hobbes"`, and (e) the footer and sign-off
 substitute the resolved name with no leftover token and no hardcoded `"Hobbes"`.
 It also covers the issue #28 sanitization contract: name validation (length /
 control characters, loud `validate-name` failure, runtime fall-through) and the
-`voice` renderer (framing label, delimiter-breakout stripping, 500-character
-cap with warning, hostile input stays inert data). The write-gate isolation
+`voice` renderer (framing label, angle-bracket / invisible-character
+neutralization of tag-lookalikes, bound-before-strip 500-character cap with
+warning, hostile input stays inert data, bounded cost on giant hostile input).
+The write-gate isolation
 half lives in `tests/unit/persona-write-gate-isolation.test.sh`.
 The tests pin both config paths via the override env vars, so they are hermetic
 — they never read the host's real plugin config.

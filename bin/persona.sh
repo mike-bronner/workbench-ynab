@@ -247,16 +247,27 @@ persona_name() {
 # injects the block verbatim. The wrapper — not the value — carries all the
 # authority framing, and the value cannot break out of it:
 #   1. Unset/empty/null → NO output (exit 0), so callers can inject conditionally.
-#   2. C0 control characters except tab/newline, and DEL, are stripped (same
-#      rationale as escape_ynab_string: invisible layout/context wreckers).
-#   3. Any '<voice-overrides' / '</voice-overrides' sequence in the VALUE is
-#      removed — repeatedly, so removal can never reconstruct a new occurrence —
-#      which makes it impossible for the data to close the wrapper early or spoof
-#      a sibling block. The model always sees exactly ONE block whose framing
-#      line was emitted by THIS renderer.
-#   4. The value is truncated to VOICE_OVERRIDES_MAX_LEN characters (ellipsis
-#      appended) with a stderr warning naming the field, so a giant override can
-#      never crowd the context window (AC 4).
+#   2. The value is truncated to VOICE_OVERRIDES_MAX_LEN characters (ellipsis
+#      appended) with a stderr warning naming the field — FIRST, before any
+#      stripping, so every later sanitization pass runs on a ≤500-char value.
+#      Bounding N first is what makes the renderer's cost bounded: stripping an
+#      unbounded value was measurably super-linear, so a giant override could
+#      peg the CPU on every render (issue #28 review blocker — DoS). The cap
+#      counts pre-strip characters; stripping may shrink the value further.
+#   3. C0 control characters except tab/newline, and DEL, are stripped (same
+#      rationale as escape_ynab_string: invisible layout/context wreckers),
+#      then invisible Unicode format characters (bidi overrides/isolates,
+#      zero-width space, word joiner, BOM) via the shared
+#      strip_invisible_format_chars (bin/html-escape.sh).
+#   4. EVERY '<' and '>' in the VALUE is removed. Angle brackets have no
+#      legitimate purpose in style notes, and removing them outright
+#      neutralizes the whole tag-lookalike class — byte-exact wrappers, case
+#      variants (`</VOICE-OVERRIDES>`), and embedded tab/newline or zero-width
+#      tricks alike (issue #28 review blocker: a byte-exact substring strip was
+#      defeatable by all three). The emitted DATA therefore contains no
+#      tag-shaped text at all: the only angle brackets in the output — and the
+#      only delimiters the model sees — are the wrapper lines and framing label
+#      emitted by THIS renderer.
 #
 # The block shapes TONE ONLY. It can never authorize, expand, or alter a YNAB
 # write: the write-authorization gate (assets/write-safety-guardrail.js +
@@ -266,20 +277,19 @@ render_voice() {
   local v
   v="$(_trim "$(_cfg "$YNAB_CONFIG_FILE" '.persona.voice_overrides')")"
   [ -z "$v" ] && return 0
-  v="$(printf '%s' "$v" | LC_ALL=C tr -d '\000-\010\013-\037\177')"
-  # Patterns live in variables and are expanded QUOTED: bash 3.2 (macOS system
-  # bash) mis-parses quoted literals written inline in a ${var//pat/} pattern,
-  # and the '/' in the closing tag would otherwise terminate the pattern.
-  local open='<voice-overrides' close='</voice-overrides'
-  while case "$v" in (*"$open"*|*"$close"*) true ;; (*) false ;; esac; do
-    v="${v//"$close"/}"
-    v="${v//"$open"/}"
-  done
+  # Bound FIRST (step 2): every strip below runs on at most 500 characters.
   if [ "$(_char_len "$v")" -gt "$VOICE_OVERRIDES_MAX_LEN" ]; then
     printf 'persona.sh: persona.voice_overrides exceeds %d characters — truncating (field: persona.voice_overrides)\n' \
       "$VOICE_OVERRIDES_MAX_LEN" >&2
     v="$(_truncate_utf8 "$v" "$VOICE_OVERRIDES_MAX_LEN")"
   fi
+  v="$(printf '%s' "$v" | LC_ALL=C tr -d '\000-\010\013-\037\177')"
+  v="$(strip_invisible_format_chars "$v")"
+  # Patterns live in variables and are expanded QUOTED: bash 3.2 (macOS system
+  # bash) mis-parses quoted literals written inline in a ${var//pat/} pattern.
+  local lt='<' gt='>'
+  v="${v//"$lt"/}"
+  v="${v//"$gt"/}"
   printf '<voice-overrides>\n[%s]\n%s\n</voice-overrides>\n' "$VOICE_OVERRIDES_FRAMING" "$v"
 }
 
@@ -295,10 +305,14 @@ render_footer() {
   # The footer is an HTML fragment, so escape both substituted values through the
   # shared html_escape for the HTML output context: an ordinary name like
   # "Smith & Sons" must emit a valid entity (&amp;), and any stray markup is
-  # neutralised rather than injected.
-  template="${template//\{\{persona\}\}/$(html_escape "$name")}"
-  template="${template//\{\{generated_at\}\}/$(html_escape "$when")}"
-  printf '%s\n' "$template"
+  # neutralised rather than injected. Substitution goes through _render_template
+  # (single left-to-right pass, values spliced VERBATIM and never re-scanned), so
+  # a name that smuggles a literal `{{generated_at}}` token stays inert data in
+  # the name slot instead of being consumed by a later `${//}` pass (#28 review
+  # follow-up — the same splice-chain class _render_template was written for).
+  printf '%s\n' "$(_render_template "$template" \
+    '{{persona}}'      "$(html_escape "$name")" \
+    '{{generated_at}}' "$(html_escape "$when")")"
 }
 
 render_signoff() {

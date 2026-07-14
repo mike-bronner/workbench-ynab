@@ -106,6 +106,34 @@ _truncate_utf8() (
   fi
 )
 
+# strip_invisible_format_chars <str> — remove invisible Unicode FORMAT
+# characters that carry no legitimate content in this plugin's rendered strings
+# yet enable visual spoofing or delimiter obfuscation:
+#   * Bidirectional override / isolate controls (U+202A–U+202E, U+2066–U+2069):
+#     they inject no markup, but they visually reorder surrounding text, so a
+#     payee like `PayPal<U+202E>txt.exe` can masquerade as another name in an
+#     anomaly/fraud report.
+#   * Zero-width space (U+200B), word joiner (U+2060), and zero-width no-break
+#     space / BOM (U+FEFF): they invisibly split a token so a human, a filter,
+#     or a lenient downstream reader each see different words — e.g. a
+#     `</voice<U+200B>-overrides>` wrapper-lookalike smuggled through a
+#     byte-exact delimiter check (issue #28 review blocker).
+# ZWNJ / ZWJ (U+200C / U+200D) are deliberately KEPT: they are functional
+# joiners inside emoji sequences and several scripts, and removing them corrupts
+# legitimate text. Removal is literal substring replacement (encoding-agnostic).
+# Shared by escape_ynab_string (HTML sink) and persona.sh's render_voice
+# (model-context sink), so there is exactly ONE audited list — never a private
+# copy that can silently drift.
+strip_invisible_format_chars() {
+  local s="${1-}" ch
+  for ch in $'\xe2\x80\xaa' $'\xe2\x80\xab' $'\xe2\x80\xac' $'\xe2\x80\xad' $'\xe2\x80\xae' \
+            $'\xe2\x81\xa6' $'\xe2\x81\xa7' $'\xe2\x81\xa8' $'\xe2\x81\xa9' \
+            $'\xe2\x80\x8b' $'\xe2\x81\xa0' $'\xef\xbb\xbf'; do
+    s="${s//"$ch"/}"
+  done
+  printf '%s' "$s"
+}
+
 # escape_ynab_string <str> — sanitize one untrusted, externally-sourced value for
 # safe interpolation into an HTML report fragment. Four ordered steps, each a
 # prerequisite of the next:
@@ -115,11 +143,10 @@ _truncate_utf8() (
 #      (continuation bytes are 0x80–0xBF), so right-to-left text, accents, and
 #      emoji pass through untouched — only the invisible layout-wrecking controls
 #      are removed.
-#   2. Strip Unicode bidirectional override / isolate format characters
-#      (U+202A–U+202E, U+2066–U+2069). They inject no markup, but they visually
-#      reorder surrounding text, so a payee like `PayPal<U+202E>txt.exe` can
-#      masquerade as another name in an anomaly/fraud report. Removed as
-#      defense-in-depth via literal substring replacement (encoding-agnostic).
+#   2. Strip invisible Unicode format characters (bidi overrides/isolates,
+#      zero-width space, word joiner, BOM) via the shared
+#      strip_invisible_format_chars above — defense-in-depth against visual
+#      spoofing and token-splitting obfuscation.
 #   3. Truncate to HTML_ESCAPE_MAX_LEN CHARACTERS (not bytes) with a visible
 #      ellipsis (…) when longer, so one unusually long payee or memo can never
 #      break the layout. Character-safe (see _truncate_utf8) and done BEFORE
@@ -127,12 +154,9 @@ _truncate_utf8() (
 #   4. html_escape the result LAST, so nothing steps 1–3 leave behind can reach the
 #      markup unescaped.
 escape_ynab_string() {
-  local s="${1-}" bidi
+  local s="${1-}"
   s="$(printf '%s' "$s" | LC_ALL=C tr -d '\000-\010\013-\037')"
-  for bidi in $'\xe2\x80\xaa' $'\xe2\x80\xab' $'\xe2\x80\xac' $'\xe2\x80\xad' $'\xe2\x80\xae' \
-              $'\xe2\x81\xa6' $'\xe2\x81\xa7' $'\xe2\x81\xa8' $'\xe2\x81\xa9'; do
-    s="${s//"$bidi"/}"
-  done
+  s="$(strip_invisible_format_chars "$s")"
   s="$(_truncate_utf8 "$s" "$HTML_ESCAPE_MAX_LEN")"
   html_escape "$s"
 }
