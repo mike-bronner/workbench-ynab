@@ -251,7 +251,10 @@ architectural aside. That MCP cannot read this plugin's config
 `docs/config-loader.md`), and it only ever receives the YNAB token plus its
 package-native environment — nothing about the persona. The persona shapes how
 *the skill* writes the report and dispatch; it has no bearing on the data
-calls.
+calls. This is regression-tested, not just discipline:
+`tests/launcher.test.sh`'s MCP-boundary section asserts the launcher's
+executable code contains no persona / `config.sh` / `config.json` /
+`YNAB_CONFIG_FILE` reference and exports nothing beyond `YNAB_ACCESS_TOKEN`.
 
 ## Verification
 
