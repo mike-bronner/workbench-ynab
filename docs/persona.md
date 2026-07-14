@@ -161,9 +161,9 @@ surface is rendered through the shared loader, which owns the one
   #   -> Smith &amp; Sons   (the resolved name, HTML-escaped)
   ```
 
-  This routes the slot through the **same** `_html_escape` the `footer` renderer
-  uses — one tested escape function, never a second copy hand-rolled at the
-  call site.
+  This routes the slot through the **same** shared `html_escape`
+  (`bin/html-escape.sh`) the `footer` renderer uses — one tested escape
+  function, never a second copy hand-rolled at the call site.
 
 Both renderers resolve the name through the same precedence above, so the
 footer template and the sign-off carry **no literal name** — substitution is the
