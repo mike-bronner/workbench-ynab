@@ -158,7 +158,10 @@ for case_name in blocked passing; do
     ok "guardrail verdict on the ${case_name} change-set is byte-identical with the hostile persona config present"
   else
     bad "guardrail verdict on the ${case_name} change-set CHANGED under the hostile persona config"
-    printf '--- without config ---\n%s\n--- with hostile config ---\n%s\n' "$bare" "$with_hostile"
+    # `--` terminates option parsing: bash 3.2's builtin printf treats a format
+    # string starting with `--` as an invalid option and exits 2 (#28 round-7
+    # blocker) — same idiom as tests/integration/ynab-migrate.test.sh.
+    printf -- '--- without config ---\n%s\n--- with hostile config ---\n%s\n' "$bare" "$with_hostile"
   fi
 done
 

@@ -143,13 +143,12 @@
       "type": "object",
       "description": "The financial-review persona. The name is a CONFIG FIELD, not a constant: the default voice is supplied by the persona skill (issue #36), and the user may rename it here.",
       "additionalProperties": false,
-      "required": ["name"],
       "properties": {
         "name": {
           "type": "string",
           "maxLength": 64,
           "pattern": "^[^\\u0000-\\u001f\\u007f]*$",
-          "description": "Display name of the review persona. When omitted, the persona skill applies its shipped default name. Validated at config-load time (issue #28): at most 64 characters, no control characters — bin/persona.sh validate-name enforces this loudly during setup."
+          "description": "Display name of the review persona. When omitted, the persona skill applies its shipped default name. Validated at config-load time (issue #28): at most 64 characters, no control characters — bin/persona.sh validate-name enforces this loudly during setup. Not marked required here to match that default behaviour (AC 7: a missing or empty name falls back silently to the shipped default), mirroring report.output_dir below."
         },
         "voice_overrides": {
           "type": ["string", "null"],

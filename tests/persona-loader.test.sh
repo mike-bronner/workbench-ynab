@@ -96,6 +96,20 @@ ynab_bad="${TMPDIR_TEST}/ynab-bad.json"
 printf 'this is not json {' > "$ynab_bad"
 assert_name "malformed config falls back to Hobbes" "Hobbes" "$ynab_bad"
 
+# (5b) schema/runtime alignment (#28 round-7 follow-up): the config schema must
+# not mark persona.name required — tests (3)–(4) pin that the RUNTIME treats an
+# absent/null name as valid (silent fallback, AC 7), so a schema rejecting the
+# same config would contradict the loader. Optional-with-default fields are not
+# required, mirroring the report.output_dir precedent in the same schema.
+schema_requires_name="$(jq -r '.properties.persona.required // [] | index("name") != null' "${REPO_ROOT}/assets/config.schema.json")"
+if [ "$schema_requires_name" = "false" ]; then
+  printf 'ok   — schema does not mark persona.name required (matches the AC-7 fallback)\n'
+  pass=$((pass + 1))
+else
+  printf 'FAIL — assets/config.schema.json marks persona.name required, contradicting the AC-7 silent fallback pinned above\n'
+  fail=$((fail + 1))
+fi
+
 # (6) tier 2: no ynab persona.name, core agent_name present -> agent's name
 core_holmes="${TMPDIR_TEST}/core-holmes.json"
 printf '{"agent_name":"Holmes"}' > "$core_holmes"
