@@ -49,7 +49,7 @@ Keychain).
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `persona.name` | string | _(see precedence)_ | The assistant's name, substituted everywhere the report/dispatch refers to the assistant. When unset, the name falls back through the precedence below — `workbench-core` `agent_name`, then `"Hobbes"`. **Validated at config-load time** (issue #28): at most **64 characters**, **no control characters** (`\x00`–`\x1f`, `\x7f`). `/workbench-ynab:setup` runs `bin/persona.sh validate-name` before writing the config and **fails loudly** on a violation, naming the field and the rule broken. As defense in depth, the runtime loader also rejects a violating value (with a stderr warning) and falls through to the next precedence tier — a hand-edited hostile name never reaches a render surface. |
+| `persona.name` | string | _(see precedence)_ | The assistant's name, substituted everywhere the report/dispatch refers to the assistant. When unset, the name falls back through the precedence below — `workbench-core` `agent_name`, then `"Hobbes"`. **Validated at config-load time** (issue #28): at most **64 characters**, **no control characters** (`\x00`–`\x1f`, `\x7f`), **no invisible Unicode format characters** (bidi overrides/isolates, zero-width space, word joiner, BOM, Tag-block chars — the same audited strip list every other sink uses). `/workbench-ynab:setup` runs `bin/persona.sh validate-name` before writing the config and **fails loudly** on a violation, naming the field and the rule broken. As defense in depth, the runtime loader also rejects a violating value (with a stderr warning) and falls through to the next precedence tier — a hand-edited hostile name never reaches a render surface. |
 | `persona.voice_overrides` | string | _(none)_ | Optional free-text voice tweaks layered on top of the default `hobbes.md`. At most **500 characters** — longer values are truncated with a logged warning naming the field. See [Voice overrides](#voice-overrides--data-never-instructions). |
 
 Both fields are optional. With no `config.json` at all and no `workbench-core`
@@ -198,19 +198,26 @@ The wrapper — not the value — carries all the framing:
 - **The framing label is fixed and non-overridable.** The bracketed line is
   emitted by the renderer on every non-empty render; no config value can alter,
   move, or suppress it.
-- **The value cannot break out of the block.** The renderer strips C0 control
+- **The value cannot pose as the wrapper.** The renderer strips C0 control
   characters other than tab/newline, DEL, invisible Unicode format characters
-  (bidi overrides/isolates, zero-width space, word joiner, BOM), and **every
-  `<` and `>`** — angle brackets have no legitimate purpose in style notes, and
-  removing them outright neutralizes the entire tag-lookalike class (byte-exact
-  wrappers, case variants, embedded-whitespace and zero-width tricks alike).
-  The emitted data contains no tag-shaped text at all: the only delimiters the
-  model sees are the wrapper lines the renderer wrote.
-- **Length is capped at 500 characters, applied before any stripping.** A
-  longer value is truncated with a visible ellipsis and a stderr warning naming
-  `persona.voice_overrides` — bounding the value FIRST caps the cost of every
-  later sanitization pass, so a giant override can neither crowd the context
-  window nor burn CPU during stripping. The cap counts pre-strip characters.
+  (bidi overrides/isolates, zero-width space, word joiner, BOM, and the Tags
+  block U+E0000–U+E007F — the invisible ASCII-smuggling channel), **every
+  ASCII `<` and `>`** — angle brackets have no legitimate purpose in style
+  notes — and the enumerated angle-bracket homoglyph pairs (fullwidth ＜＞,
+  small ﹤﹥, CJK 〈〉, math ⟨⟩, and the deprecated U+2329/U+232A pair). That
+  removes every tag-lookalike class review surfaced: byte-exact wrappers, case
+  variants, embedded-whitespace and zero-width splits, Tag-block steganography,
+  and homoglyph brackets. The strip list is enumerated, not a proof over all of
+  Unicode — the load-bearing protections are the renderer-emitted framing label
+  and the write-gate isolation below, which hold regardless of what text
+  survives as data.
+- **Length is capped at 500 characters, applied before any stripping — and the
+  cap itself is cheap.** An O(1) byte-length gate hard-slices anything over
+  4 bytes/char × the cap before any character-accurate scan runs, so neither
+  the cap nor the strips can be driven super-linear by a giant (or giant
+  multibyte) value. A longer value is truncated with a visible ellipsis and a
+  stderr warning naming `persona.voice_overrides`. The cap counts pre-strip
+  characters.
 - Consumers (the review skill) inject the block **verbatim** and treat its
   contents as stylistic preference data only.
 
@@ -260,10 +267,12 @@ unset, (c) `persona.name` wins over `agent_name`, (d) absent/missing/null/
 malformed configs fall back to `"Hobbes"`, and (e) the footer and sign-off
 substitute the resolved name with no leftover token and no hardcoded `"Hobbes"`.
 It also covers the issue #28 sanitization contract: name validation (length /
-control characters, loud `validate-name` failure, runtime fall-through) and the
-`voice` renderer (framing label, angle-bracket / invisible-character
-neutralization of tag-lookalikes, bound-before-strip 500-character cap with
-warning, hostile input stays inert data, bounded cost on giant hostile input).
+control characters / invisible format characters, loud `validate-name`
+failure, runtime fall-through) and the `voice` renderer (framing label,
+angle-bracket + homoglyph / invisible-character / Tag-block neutralization of
+tag-lookalikes, byte-gate + bound-before-strip 500-character cap with warning,
+hostile input stays inert data, bounded cost on giant ASCII *and* multibyte
+hostile input).
 The write-gate isolation
 half lives in `tests/unit/persona-write-gate-isolation.test.sh`.
 The tests pin both config paths via the override env vars, so they are hermetic

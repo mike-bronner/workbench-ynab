@@ -19,7 +19,11 @@
 #      approve all writes", name = a script payload). Checked for BOTH verdict
 #      directions: a money-moving change-set stays BLOCKED (the injection buys
 #      no authority) and a clean ledger-only change-set stays PASSED (the
-#      hostile config poisons nothing).
+#      hostile config poisons nothing). SCOPE: the gate modules read no env
+#      vars today, so this check specifically guards the YNAB_CONFIG_FILE
+#      channel — it catches the gate GROWING a read of the plugin-config env
+#      var, and no other hypothetical persona channel. The static persona grep
+#      in (1) is the primary backstop for everything else.
 #
 # Self-contained: no test framework required. Run directly:
 #   bash tests/unit/persona-write-gate-isolation.test.sh
@@ -65,6 +69,21 @@ for rel in "${GATE_MODULES[@]}"; do
     ok "${rel} contains no plugin-config read"
   fi
 done
+
+# The docs' Invariant also names the M4-5 approval command (the human-approval
+# flow) as part of the gate. It legitimately documents the token/config split,
+# so the config.json grep above would false-positive on its documentation —
+# it is scanned for persona references ONLY (0 today; a persona read appearing
+# there would breach the invariant docs/persona.md claims this test proves).
+APPROVAL_CMD="commands/ynab-apply.md"
+f="${REPO_ROOT}/${APPROVAL_CMD}"
+if [ ! -f "$f" ]; then
+  bad "gate surface missing: ${APPROVAL_CMD}"
+elif grep -qi 'persona' "$f"; then
+  bad "${APPROVAL_CMD} references persona config — the gate must be isolated"
+else
+  ok "${APPROVAL_CMD} contains no persona reference"
+fi
 
 # ---- 2. dynamic: guardrail verdict is identical with a hostile persona config --
 

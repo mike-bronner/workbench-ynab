@@ -172,7 +172,8 @@ Notes for the walk:
   ```
 
   A non-zero exit means the name violates the contract (longer than 64
-  characters, or contains control characters). **Fail loudly**: surface the
+  characters, contains control characters, or contains invisible Unicode
+  format characters — bidi overrides, zero-width chars, Tag-block chars). **Fail loudly**: surface the
   loader's stderr message (it names the field and the violation) and re-ask for
   the name — never write a violating `persona.name` into `config.json`. An
   empty answer is fine (the loader falls back silently), and `--` guards

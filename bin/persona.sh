@@ -57,10 +57,18 @@ DEFAULT_PERSONA_NAME="Hobbes"
 # model context. Both are validated/bounded HERE, in the one shared loader, so no
 # consumer ever sees an unbounded or control-character-laden value.
 #   * persona.name: max 64 CHARACTERS, no C0 control chars (U+0000–U+001F) or DEL
-#     (U+007F). Violations are rejected loudly at setup time (validate-name) and
-#     ignored with a stderr warning at read time (the tier falls through).
+#     (U+007F), no invisible Unicode format characters (bidi overrides/isolates,
+#     zero-width space, word joiner, BOM, the Tags block — the shared
+#     strip_invisible_format_chars list). Violations are rejected loudly at setup
+#     time (validate-name) and ignored with a stderr warning at read time (the
+#     tier falls through).
 #   * voice_overrides: max 500 CHARACTERS; longer values are truncated with a
 #     logged warning naming the field.
+# COST INVARIANT (#28 round-3 DoS blocker): every character-accurate scan below
+# sits behind a cheap O(1) byte-length gate (see _byte_bound_utf8 in
+# bin/html-escape.sh), so no super-linear `${var//[range]/}` pass ever touches
+# an unbounded value — a giant (or giant multibyte) config string can never peg
+# the CPU on a render.
 PERSONA_NAME_MAX_LEN=64
 VOICE_OVERRIDES_MAX_LEN=500
 
@@ -190,19 +198,40 @@ _char_len() (
 )
 
 # _persona_name_violation <name> — when <name> violates the persona.name contract
-# (control characters, or longer than PERSONA_NAME_MAX_LEN characters), print a
-# human-readable reason and return 0. Returns 1 (printing nothing) for a valid
-# name. Empty is VALID here — an absent name falls back silently by design (AC 7).
-# Runs in a C-locale subshell so the control-character bracket range is byte-wise
-# and can never split a UTF-8 sequence.
+# (control characters, invisible Unicode format characters, or longer than
+# PERSONA_NAME_MAX_LEN characters), print a human-readable reason and return 0.
+# Returns 1 (printing nothing) for a valid name. Empty is VALID here — an absent
+# name falls back silently by design (AC 7). Runs in a C-locale subshell so the
+# control-character bracket range is byte-wise and can never split a UTF-8
+# sequence.
 _persona_name_violation() (
   LC_ALL=C
   local s="$1"
+  # O(1) byte gate FIRST (#28 round-3 DoS blocker): this runs on EVERY name
+  # resolution (footer/signoff/html-name), and the continuation-byte scan below
+  # is super-linear on match-dense multibyte input. UTF-8 spends at most 4
+  # bytes per character, so anything longer than (MAX + 1) * 4 bytes is over
+  # the character cap without scanning it to prove so.
+  if [ "${#s}" -gt $(( (PERSONA_NAME_MAX_LEN + 1) * 4 )) ]; then
+    printf 'is longer than %d characters (max %d)' \
+      "$PERSONA_NAME_MAX_LEN" "$PERSONA_NAME_MAX_LEN"
+    return 0
+  fi
   case "$s" in
     (*[$'\x01'-$'\x1f'$'\x7f']*)
       printf 'contains control characters'
       return 0 ;;
   esac
+  # Invisible Unicode format characters are rejected like control characters
+  # (#28 round-3 blocker: `Smith<U+202E>txt.exe<U+202C>` previously validated
+  # clean, then emitted raw bidi-override bytes into the report footer — the
+  # exact visual-spoofing threat html-escape.sh strips from payees). The name
+  # gets the same ONE audited list as the voice and HTML sinks; a name is short
+  # visible text, so rejecting beats silently altering it.
+  if [ "$(strip_invisible_format_chars "$s")" != "$s" ]; then
+    printf 'contains invisible format characters'
+    return 0
+  fi
   local noncont="${s//[$'\x80'-$'\xbf']/}"
   if [ "${#noncont}" -gt "$PERSONA_NAME_MAX_LEN" ]; then
     printf 'is %d characters (max %d)' "${#noncont}" "$PERSONA_NAME_MAX_LEN"
@@ -247,27 +276,37 @@ persona_name() {
 # injects the block verbatim. The wrapper — not the value — carries all the
 # authority framing, and the value cannot break out of it:
 #   1. Unset/empty/null → NO output (exit 0), so callers can inject conditionally.
-#   2. The value is truncated to VOICE_OVERRIDES_MAX_LEN characters (ellipsis
-#      appended) with a stderr warning naming the field — FIRST, before any
-#      stripping, so every later sanitization pass runs on a ≤500-char value.
-#      Bounding N first is what makes the renderer's cost bounded: stripping an
-#      unbounded value was measurably super-linear, so a giant override could
-#      peg the CPU on every render (issue #28 review blocker — DoS). The cap
-#      counts pre-strip characters; stripping may shrink the value further.
+#   2. The value is bounded FIRST, in two stages, so every later pass runs on a
+#      ≤500-char value and NO super-linear op ever touches an unbounded one
+#      (issue #28 review blockers — DoS, twice: stripping an unbounded value
+#      was super-linear, and then the char-length gate ITSELF was super-linear
+#      on match-dense multibyte input):
+#        a. an O(1) BYTE-length gate hard-slices the raw value to
+#           (VOICE_OVERRIDES_MAX_LEN + 1) * 4 bytes on a character boundary
+#           (_byte_bound_utf8 — UTF-8 spends ≤ 4 bytes/char, so anything sliced
+#           was over the character cap anyway);
+#        b. the character-accurate cap then truncates to VOICE_OVERRIDES_MAX_LEN
+#           characters (ellipsis appended) with a stderr warning naming the
+#           field. The cap counts pre-strip characters; stripping may shrink
+#           the value further.
 #   3. C0 control characters except tab/newline, and DEL, are stripped (same
 #      rationale as escape_ynab_string: invisible layout/context wreckers),
 #      then invisible Unicode format characters (bidi overrides/isolates,
-#      zero-width space, word joiner, BOM) via the shared
-#      strip_invisible_format_chars (bin/html-escape.sh).
-#   4. EVERY '<' and '>' in the VALUE is removed. Angle brackets have no
-#      legitimate purpose in style notes, and removing them outright
-#      neutralizes the whole tag-lookalike class — byte-exact wrappers, case
-#      variants (`</VOICE-OVERRIDES>`), and embedded tab/newline or zero-width
-#      tricks alike (issue #28 review blocker: a byte-exact substring strip was
-#      defeatable by all three). The emitted DATA therefore contains no
-#      tag-shaped text at all: the only angle brackets in the output — and the
-#      only delimiters the model sees — are the wrapper lines and framing label
-#      emitted by THIS renderer.
+#      zero-width space, word joiner, BOM, and the Tags block U+E0000–U+E007F —
+#      the invisible ASCII-smuggling channel, #28 round-3 blocker) via the
+#      shared strip_invisible_format_chars (bin/html-escape.sh).
+#   4. EVERY ASCII '<' and '>' in the VALUE is removed — angle brackets have no
+#      legitimate purpose in style notes — along with the enumerated
+#      angle-bracket HOMOGLYPH pairs (fullwidth ＜＞, small ﹤﹥, CJK 〈〉, math
+#      ⟨⟩, and the deprecated U+2329/U+232A pair), which read as tag delimiters
+#      to a lenient consumer just like ASCII brackets do (#28 round-3 blocker).
+#      Together with step 3 this neutralizes every tag-lookalike class the
+#      reviews surfaced: byte-exact wrappers, case variants, embedded
+#      tab/newline, zero-width splits, Tag-block steganography, and homoglyph
+#      brackets. The strip list is ENUMERATED, not a proof over all of Unicode —
+#      the load-bearing protections are the renderer-emitted framing label (the
+#      wrapper, never the value, carries the authority) and the write-gate
+#      isolation below, which hold regardless of what text survives as data.
 #
 # The block shapes TONE ONLY. It can never authorize, expand, or alter a YNAB
 # write: the write-authorization gate (assets/write-safety-guardrail.js +
@@ -277,7 +316,12 @@ render_voice() {
   local v
   v="$(_trim "$(_cfg "$YNAB_CONFIG_FILE" '.persona.voice_overrides')")"
   [ -z "$v" ] && return 0
-  # Bound FIRST (step 2): every strip below runs on at most 500 characters.
+  # Bound FIRST (step 2a): the O(1) byte gate runs before _char_len /
+  # _truncate_utf8, whose continuation-byte scans are super-linear on
+  # match-dense multibyte input — the round-3 DoS. A sliced value always still
+  # exceeds the character cap, so the truncation warning below still fires.
+  v="$(_byte_bound_utf8 "$v" $(( (VOICE_OVERRIDES_MAX_LEN + 1) * 4 )))"
+  # Step 2b: every strip below runs on at most 500 characters.
   if [ "$(_char_len "$v")" -gt "$VOICE_OVERRIDES_MAX_LEN" ]; then
     printf 'persona.sh: persona.voice_overrides exceeds %d characters — truncating (field: persona.voice_overrides)\n' \
       "$VOICE_OVERRIDES_MAX_LEN" >&2
@@ -290,6 +334,16 @@ render_voice() {
   local lt='<' gt='>'
   v="${v//"$lt"/}"
   v="${v//"$gt"/}"
+  # Angle-bracket homoglyphs (step 4): fullwidth ＜ ＞ (U+FF1C/FF1E), small
+  # ﹤ ﹥ (U+FE64/FE65), CJK 〈 〉 (U+3008/3009), math ⟨ ⟩ (U+27E8/27E9), and
+  # the deprecated angle pair (U+2329/U+232A). Literal substring removal,
+  # encoding-agnostic, on the already-bounded value.
+  local hg
+  for hg in $'\xef\xbc\x9c' $'\xef\xbc\x9e' $'\xef\xb9\xa4' $'\xef\xb9\xa5' \
+            $'\xe3\x80\x88' $'\xe3\x80\x89' $'\xe2\x9f\xa8' $'\xe2\x9f\xa9' \
+            $'\xe2\x8c\xa9' $'\xe2\x8c\xaa'; do
+    v="${v//"$hg"/}"
+  done
   printf '<voice-overrides>\n[%s]\n%s\n</voice-overrides>\n' "$VOICE_OVERRIDES_FRAMING" "$v"
 }
 

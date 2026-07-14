@@ -169,6 +169,32 @@ test_strips_all_bidi_override_and_isolate_chars() {
   assert_eq "abc" "$out"
 }
 
+# ---- Unicode Tags block (U+E0000–U+E007F) is stripped (ASCII smuggling) -------
+test_strips_unicode_tag_block_chars() {
+  # Tag characters encode invisible ASCII — the canonical LLM smuggling channel
+  # (#28 round-3 blocker). U+E0041 (TAG LATIN CAPITAL LETTER A) must be removed
+  # by the shared strip list, leaving the visible text intact.
+  local tag_a out
+  tag_a="$(printf '\xf3\xa0\x81\x81')"
+  out="$(escape_ynab_string "friendly${tag_a}${tag_a}payee")"
+  assert_eq "friendlypayee" "$out"
+}
+
+# ---- Giant multibyte input is bounded (no super-linear scan, #28 round 3) -----
+test_giant_multibyte_value_is_bounded_and_truncated() {
+  # The continuation-byte scans in strip_invisible_format_chars/_truncate_utf8
+  # were super-linear on match-dense multibyte input; the O(1) byte gate slices
+  # first, so 6 000 CJK chars (~18 KB) sanitize fast and still truncate to
+  # exactly HTML_ESCAPE_MAX_LEN characters + ellipsis.
+  local cjk unit s="" expected="" i=0 out
+  cjk="$(printf '\xe6\x97\xa5')"
+  unit="$cjk$cjk$cjk$cjk$cjk$cjk$cjk$cjk$cjk$cjk"                # 10 chars
+  while [ "$i" -lt 600 ]; do s+="$unit"; i=$((i + 1)); done      # 6 000 chars
+  out="$(escape_ynab_string "$s")"
+  i=0; while [ "$i" -lt 20 ]; do expected+="$unit"; i=$((i + 1)); done  # 200 chars
+  assert_eq "${expected}…" "$out"
+}
+
 # ---- CLI surface: the review skill's per-value filter ------------------------
 test_cli_default_sanitizes() {
   assert_eq "&lt;script&gt;" "$(bash "$MODULE" '<script>')"
