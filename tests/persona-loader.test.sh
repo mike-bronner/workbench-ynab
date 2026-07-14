@@ -257,8 +257,8 @@ assert_render_tmpl "empty key skipped, real placeholder still filled" \
 
 # The report chrome injects the persona name into `SLOT:footer-persona` as an
 # already-escaped plain-text value. `html-name` renders it through the SAME
-# shared `html_escape` (bin/html-escape.sh) the footer uses, so the review skill injects it verbatim
-# instead of re-implementing the escape (#126 review follow-up).
+# shared `html_escape` (bin/html-escape.sh) the footer uses, so the review skill
+# injects it verbatim instead of re-implementing the escape (#126 review follow-up).
 html_name_amp="$(run "$ynab_amp" "$NO_FILE" html-name)"
 assert_contains "html-name HTML-escapes the resolved name"   "Smith &amp; Sons" "$html_name_amp"
 assert_absent   "html-name emits no raw unescaped ampersand" "Smith & Sons"     "$html_name_amp"

@@ -188,17 +188,17 @@ render_signoff() {
 }
 
 # Dispatch the CLI only when executed directly. When another script sources this
-# file to unit-test the helpers (e.g. _render_template), the guard
+# file to unit-test the helpers (e.g. _render_template / html_escape), the guard
 # is false so the CLI never runs — the same pattern as tests/unit/test-audit-log.sh
 # sourcing bin/audit-log.sh.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   case "${1:-name}" in
     name)      persona_name ;;
     # The HTML-escaped name, for the report chrome's `SLOT:footer-persona` block
-    # slot (see skills/review/ynab-review.md §8). Routes through the SAME shared
-    # html_escape (bin/html-escape.sh) the footer uses, so the review skill
-    # injects it verbatim rather than hand-escaping the raw name a second time
-    # (#126 review follow-up).
+    # slot (see skills/review/ynab-review.md §8). Routes through the SAME shared,
+    # audited `html_escape` (bin/html-escape.sh) the footer uses, so the review
+    # skill injects it verbatim rather than hand-escaping the raw name a second
+    # time (#126 review follow-up).
     html-name) printf '%s\n' "$(html_escape "$(persona_name)")" ;;
     footer)    shift; render_footer "$@" ;;
     signoff)   render_signoff ;;
