@@ -426,6 +426,14 @@ severity emoji (aligned with the M2-5 report badges), the per-finding
 sign-off — is frozen in [`../../docs/dispatch-format.md`](../../docs/dispatch-format.md),
 with a worked example for every tier. Render the dispatch to that contract.
 
+When the dispatch surfaces **any tax figure, quarterly estimate, or Schedule
+amount**, include the canonical **not-tax-advice tag** on its own line between the
+five findings and the report pointer:
+`⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.`
+Use the exact wording from [`../shared/disclaimer.md`](../shared/disclaimer.md) —
+verbatim, never reworded, never per-profile. It is not a finding and never counts
+toward the fixed five; omit it entirely when no tax content appears.
+
 ---
 
 ## Hard rules

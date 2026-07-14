@@ -18,7 +18,10 @@
 #   * the exact tight set is pinned (2 read globs + 4 write tools), so silently
 #     widening it (e.g. adding delete or create) fails the build;
 #   * the permission notes doc (docs/mcp-capability-map.md) explains the
-#     namespacing, the /ynab-apply (M4-5) gate, and the withheld delete verb.
+#     namespacing, the /ynab-apply (M4-5) gate, and the withheld delete verb;
+#   * the pasteable config snippet in that doc — the artifact a user literally
+#     copies into ~/.claude/settings.json — carries exactly the same tight set,
+#     and never the delete verb or the family glob (issue #156).
 #
 # To keep this file itself clean under bin/check-tool-name-sources.sh, it never
 # inlines a full concrete tool name: the plugin prefix and the operation
@@ -76,6 +79,34 @@ permission_notes_subsection() {
     /^## / { f = 0 }
     f
   ' "$MAP"
+}
+
+# The `permissions.allow` entries of the pasteable JSONC snippet in the
+# "### The exact config snippet" subsection of the capability map: every quoted
+# mcp__… string inside the subsection's ```jsonc fence. Quote-scoping is what
+# keeps the extraction honest in both directions:
+#   * the snippet's `// NOT ynab_delete_transaction …` comment lines are NOT
+#     entries, so they can't trip the delete/family-glob exclusion checks;
+#   * any string entry starting with mcp__ IS captured — including a bad
+#     bare-form (mcp__ynab__…) addition — so it lands in the exact-set pin.
+# Deleting the subsection (or its fence) empties the output, failing the count.
+config_snippet_allow_entries() {
+  awk '/^### The exact config snippet/{f=1;next} /^### /{f=0} /^## /{f=0} f' "$MAP" \
+    | awk '/^```/{c=!c;next} c' \
+    | grep -o '"mcp__[^"]*"' | tr -d '"' || true
+}
+
+# The delete-exclusion bullet inside the SSoT pre-approval section: the "- "
+# bullet whose first token is the full-namespaced delete verb, plus its indented
+# continuation lines. A blank line or the next bullet terminates it, so sibling
+# bullets and the section intro are out of scope. `verb` is composed from PREFIX
+# at runtime, keeping this file clean under bin/check-tool-name-sources.sh.
+delete_exclusion_bullet() {
+  preapproval_section | awk -v verb="${PREFIX}ynab_delete_transaction" '
+    index($0, "- `" verb "`") == 1 { f = 1; print; next }
+    f && /^[[:space:]]+[^[:space:]]/ { print; next }
+    { f = 0 }
+  '
 }
 
 # The SSoT section exists and declares a non-empty pre-approval set.
@@ -156,12 +187,50 @@ test_delete_and_family_glob_are_excluded_from_preapproval() {
 #     AC #3 requires); the section intro mentions delete only in the bare
 #     backticked short form. So deleting that bullet block drops the full name
 #     from the section and fails here — the exact mutation the old check missed.
+# The M4-8 pointer is checked against the BULLET, not the whole section
+# (issue #156): the section intro independently mentions M4-8, so a
+# section-scoped check stayed green when only the bullet's (**M4-8**)
+# annotation was removed. Bullet-scoping makes that mutation fail.
 test_ssot_documents_delete_exclusion() {
   local section; section="$(preapproval_section)"
   assert_contains "$section" "${PREFIX}ynab_delete_transaction" \
     "the pre-approval section explicitly excludes the full-namespaced delete verb"
-  assert_contains "$section" "M4-8" \
-    "the pre-approval section points the delete exclusion at the M4-8 confirmation path"
+  local bullet; bullet="$(delete_exclusion_bullet)"
+  [ -n "$bullet" ] || fail "the pre-approval section has no delete-exclusion bullet for the full-namespaced delete verb"
+  assert_contains "$bullet" "M4-8" \
+    "the delete-exclusion bullet itself points at the M4-8 confirmation path"
+}
+
+# Issue #156: pin the pasteable config snippet — the one artifact a user copies
+# into ~/.claude/settings.json, i.e. the surface most directly wired to a real
+# standing permission grant on a financial write path. Same technique as
+# test_preapproval_set_is_the_exact_tight_six, applied to the snippet's
+# `permissions.allow` entries: exactly the 2 read globs + 4 write tools, and
+# explicitly never the delete verb or the family glob. Before this test, a
+# regression confined to the snippet (delete added to the pasteable block, SSoT
+# untouched) passed CI silently — proven by mutation during review of PR #155.
+test_config_snippet_pins_the_exact_tight_six() {
+  local entries; entries="$(config_snippet_allow_entries)"
+  local count; count="$(printf '%s\n' "$entries" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+  assert_eq "6" "$count" "config snippet allow array must hold exactly 2 read globs + 4 write tools"
+
+  # Read-phase globs, by full name.
+  assert_exact_line "$entries" "${PREFIX}ynab_list_*"  "snippet pre-approves read glob ynab_list_*"
+  assert_exact_line "$entries" "${PREFIX}ynab_get_*"   "snippet pre-approves read glob ynab_get_*"
+  # Write-phase tools — the four M4 write verbs, by full name.
+  assert_exact_line "$entries" "${PREFIX}ynab_update_transaction"  "snippet pre-approves update_transaction"
+  assert_exact_line "$entries" "${PREFIX}ynab_update_transactions" "snippet pre-approves update_transactions"
+  assert_exact_line "$entries" "${PREFIX}ynab_update_category"     "snippet pre-approves update_category"
+  assert_exact_line "$entries" "${PREFIX}ynab_reconcile_account"   "snippet pre-approves reconcile_account"
+
+  # Redundant with the exact-set pin above, but explicit: the two entries that
+  # must NEVER appear in the pasteable block, each with its own diagnosis.
+  if printf '%s\n' "$entries" | grep -qxF -- "${PREFIX}ynab_delete_transaction"; then
+    fail "the config snippet pre-approves delete_transaction — it must keep its M4-8 confirmation path"
+  fi
+  if printf '%s\n' "$entries" | grep -qxF -- "${PREFIX}ynab_*"; then
+    fail "the config snippet pre-approves the family glob — it would sweep in the delete verb"
+  fi
 }
 
 # AC #5: a permission-notes section explains (a) the namespacing, (b) the
