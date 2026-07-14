@@ -96,6 +96,34 @@ _trim() {
   printf '%s' "$s"
 }
 
+# HTML-escape a value for safe substitution into the HTML footer. Walk the
+# string one character at a time and append the entity for each special char.
+# A character loop — rather than a chain of `${s//c/&ent;}` substitutions — is
+# deliberate: bash 5.2 turned on the `patsub_replacement` shell option by
+# default, which makes an unquoted `&` in a `${//}` replacement stand for the
+# text matched by the pattern, so `${s//</&lt;}` corrupts `<` into `<lt;` there
+# (bash < 5.2 keeps `&` literal — the option is `#if 0` dead code in 5.0/5.1 —
+# which is why the bug only surfaced on the GNU/Linux CI runner, where
+# ubuntu-latest ships bash 5.2). Appending literal single-quoted entities
+# sidesteps that reinterpretation entirely and behaves identically on bash 3.2
+# and 5.2 (#126). Only the footer needs this — it is an HTML fragment; the
+# sign-off is plain text (a different output context) and stays literal.
+_html_escape() {
+  local s="$1" out="" i c
+  for (( i = 0; i < ${#s}; i++ )); do
+    c="${s:i:1}"
+    case "$c" in
+      '&') out+='&amp;'  ;;
+      '<') out+='&lt;'   ;;
+      '>') out+='&gt;'   ;;
+      '"') out+='&quot;' ;;
+      "'") out+='&#39;'  ;;
+      *)   out+="$c"     ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 # Render <template> by substituting each {{placeholder}} with its paired value in
 # a SINGLE left-to-right pass: at each step, find the earliest-occurring
 # remaining placeholder in the still-unconsumed template tail, emit the text
@@ -188,18 +216,17 @@ render_signoff() {
 }
 
 # Dispatch the CLI only when executed directly. When another script sources this
-# file to unit-test the helpers (e.g. _render_template), the guard
+# file to unit-test the helpers (e.g. _render_template / _html_escape), the guard
 # is false so the CLI never runs — the same pattern as tests/unit/test-audit-log.sh
 # sourcing bin/audit-log.sh.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   case "${1:-name}" in
     name)      persona_name ;;
     # The HTML-escaped name, for the report chrome's `SLOT:footer-persona` block
-    # slot (see skills/review/ynab-review.md §8). Routes through the SAME shared,
-    # tested `html_escape` the footer uses (bin/html-escape.sh), so the review
-    # skill injects it verbatim rather than hand-escaping the raw name a second
-    # time (#126 review follow-up).
-    html-name) printf '%s\n' "$(html_escape "$(persona_name)")" ;;
+    # slot (see skills/review/ynab-review.md §8). Routes through the SAME tested
+    # `_html_escape` the footer uses, so the review skill injects it verbatim
+    # rather than hand-escaping the raw name a second time (#126 review follow-up).
+    html-name) printf '%s\n' "$(_html_escape "$(persona_name)")" ;;
     footer)    shift; render_footer "$@" ;;
     signoff)   render_signoff ;;
     *)
