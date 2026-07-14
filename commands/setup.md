@@ -182,21 +182,60 @@ mkdir -p "$CONFIG_DIR"
 # $NEW_JSON is the object Step 3 assembled (schema_version + budget + optional
 # business + tax_profile + persona + report). Merge it over the existing file so
 # unknown/hand-added keys survive. `*` deep-merges objects; the new values win.
+#
+# Every gate below fails CLOSED (issue #154): any failure removes the staged
+# .tmp, leaves the real $CONFIG_FILE byte-for-byte untouched, prints a ❌, and
+# exits non-zero so Steps 5–7 never run against a corrupted config. Without
+# these gates a failed merge truncates the .tmp to 0 bytes, the token gate
+# fails open on the unparseable file, and the empty .tmp is published over the
+# user's config with a ✅ — data loss reported as success.
 EXISTING='{}'
-[ -f "$CONFIG_FILE" ] && EXISTING="$(cat "$CONFIG_FILE")"
-printf '%s\n' "$EXISTING" \
+if [ -f "$CONFIG_FILE" ]; then
+  EXISTING="$(cat "$CONFIG_FILE")"
+  # Validate BEFORE merging: a malformed pre-existing config is detected here,
+  # not inferred later from a failed merge — and it is never overwritten.
+  if ! printf '%s\n' "$EXISTING" | jq -e . >/dev/null 2>&1; then
+    echo "❌ Existing $CONFIG_FILE is not valid JSON — refusing to touch it. Fix or remove the file, then re-run /workbench-ynab:setup." >&2
+    exit 1
+  fi
+fi
+
+# Check the merge's exit code explicitly: on failure the > redirect has already
+# truncated the .tmp, so drop it instead of letting it near the real path.
+if ! printf '%s\n' "$EXISTING" \
   | jq --argjson new "$NEW_JSON" '. * $new' \
-  > "$CONFIG_FILE.tmp"
+  > "$CONFIG_FILE.tmp"; then
+  rm -f "$CONFIG_FILE.tmp"
+  echo "❌ jq merge failed — $CONFIG_FILE left untouched." >&2
+  exit 1
+fi
+
+# The staged file must be non-empty, valid JSON before it is eligible to
+# publish. (`jq -e .` rejects an empty file; `jq empty` would wave it through.)
+if ! jq -e . "$CONFIG_FILE.tmp" >/dev/null 2>&1; then
+  rm -f "$CONFIG_FILE.tmp"
+  echo "❌ Staged config is empty or invalid JSON — $CONFIG_FILE left untouched." >&2
+  exit 1
+fi
 
 # Sanity: the token must NEVER be in config.json. Scan the STAGED file *before*
 # publishing it, so a token-shaped value never reaches the real path. Aggregate
 # every string test with `any` — `jq -e` keys its exit code off only the LAST
 # streamed value, so a bare `getpath(paths) | strings | test(…)` silently misses
-# a token anywhere but the final string position. On a hit, drop the staged file
-# and never `mv` it into place.
-if jq -e '[getpath(paths) | strings | test("^[0-9a-f]{64}$")] | any' "$CONFIG_FILE.tmp" >/dev/null 2>&1; then
+# a token anywhere but the final string position. The gate keys on jq's full
+# exit code and fails CLOSED: 0 = token found, 1 = scan ran clean (the ONLY
+# pass), anything else = jq could not scan the staged file, which counts as
+# "cannot verify safety" — never as "no token found, safe to proceed". On
+# anything but 1, drop the staged file and never `mv` it into place.
+TOKEN_SCAN=0
+jq -e '[getpath(paths) | strings | test("^[0-9a-f]{64}$")] | any' "$CONFIG_FILE.tmp" >/dev/null 2>&1 || TOKEN_SCAN=$?
+if [ "$TOKEN_SCAN" -eq 0 ]; then
   rm -f "$CONFIG_FILE.tmp"
   echo "❌ Refusing to keep a token-shaped value in config.json — the token belongs in the Keychain only." >&2
+  exit 1
+elif [ "$TOKEN_SCAN" -ne 1 ]; then
+  rm -f "$CONFIG_FILE.tmp"
+  echo "❌ Could not verify the staged config is token-free (jq failed to scan it) — $CONFIG_FILE left untouched." >&2
   exit 1
 fi
 mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
