@@ -94,9 +94,11 @@ write path (M4-8).
 > registered tool ids in that bundle. On a future re-vendor or MCP swap,
 > re-confirm each suffix against the new bundle and correct any drift **here, in
 > [`ynab-tools.md`](../skills/protocol/ynab-tools.md), and (for a changed suffix
-> the orchestrator actually wires) in the orchestrator's `tools:` list** — the
-> three allowlisted files. The guard script (below) proves nothing else has
-> copied a name.
+> the orchestrator actually wires) in the orchestrator's `tools:` list** —
+> three of the six allowlisted files — and review the write-safety guardrail
+> trio (the other three allowlist entries below), whose security denylist
+> deliberately enumerates the concrete write verbs and MUST be re-checked on
+> any swap. The guard script (below) proves nothing else has copied a name.
 
 ## Single source of truth
 
@@ -119,6 +121,9 @@ allowlist. The allowlist is exactly these files:
 | [`skills/protocol/ynab-tools.md`](../skills/protocol/ynab-tools.md) | the machine-referenced SSoT — the names themselves |
 | `docs/mcp-capability-map.md` (this file) | the human-readable contract — the *why* |
 | [`agents/ynab-orchestrator.md`](../agents/ynab-orchestrator.md) | the read-only orchestrator's `tools:` frontmatter — Claude Code requires literal names there (no file reference, no glob, and a read-only agent must not use the write-inclusive family glob), so it wires the subset of the SSoT read tools the planner stub needs (Sprint 3 widens it to the full read set) and is allowlisted as a deliberate, documented swap consumer |
+| [`assets/write-safety-guardrail.js`](../assets/write-safety-guardrail.js) | the money-gate denylist — by its security nature the guardrail must enumerate the exact write verbs it gates; a security denylist cannot indirect through markdown parsing, and a namespace swap MUST force a review of this gate regardless, so it is a deliberate, documented swap consumer |
+| [`assets/test/write-safety-guardrail.test.js`](../assets/test/write-safety-guardrail.test.js) | pins the denylist classification — the test proving the gate blocks money movement names the same concrete verbs the `.js` enumerates |
+| [`skills/write-safety-guardrail.md`](../skills/write-safety-guardrail.md) | the human-readable gate contract — documents the exact denylist the `.js` enforces |
 
 Everywhere else, a hard-coded name fails the guard. The bare prefix
 (`mcp__plugin_workbench-ynab_ynab__`) and the family glob
@@ -127,7 +132,9 @@ and are safe to mention anywhere — the guard never flags them. The guard ships
 with a self-test,
 [`tests/check-tool-name-sources.test.sh`](../tests/check-tool-name-sources.test.sh),
 which proves it catches a planted name on every scanned surface, honours the
-allowlist, and passes on a clean tree.
+allowlist, passes on a clean tree — and that the real tree itself is clean, so
+`scripts/test.sh` (and therefore CI's `test` workflow) fails on any new
+hard-coded name. CI also runs the guard directly as an explicit workflow step.
 
 ## Consumers — everything points back here
 
