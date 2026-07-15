@@ -49,8 +49,11 @@ run_step4() {
 # The extraction still finds the block (and it's the merge block, not another).
 test_step4_block_extracts() {
   local block; block="$(extract_step4_block)"
+  # The needles are literal command source text — never expanded here.
+  # shellcheck disable=SC2016
   assert_contains "$block" 'jq --argjson new "$NEW_JSON"' \
     "the extracted Step 4 block contains the jq merge"
+  # shellcheck disable=SC2016
   assert_contains "$block" 'mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"' \
     "the extracted Step 4 block contains the publish mv"
 }

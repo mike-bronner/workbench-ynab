@@ -1,0 +1,147 @@
+name: ci
+
+# The consolidated lint+test gate (issue #16) — this workflow REPLACES the
+# earlier test.yml (its `test` and `assets-integration` jobs moved here
+# unchanged in substance), so every PR gets one green/red signal covering:
+#
+#   * lint            — shellcheck (default severity) over all repo-authored
+#                       .sh + `jq empty` over every tracked .json
+#                       (scripts/lint.sh is the single entrypoint)
+#   * test            — the full bash + Node suite via scripts/test.sh on
+#                       ubuntu-latest, including the offline-boot proof (#14)
+#   * bash-3-2        — the persona footer-escaping tests under macOS's
+#                       bash 3.2, mechanically enforcing the dual-bash
+#                       guarantee (issue #126 AC-3)
+#   * assets-tests    — the assets/ Node integration suites (needs npm ci)
+#   * docs-links      — offline relative-link + fragment check over
+#                       assets/*.md and docs/*.md
+#
+# secret-scan.yml stays a separate workflow: secret hygiene is a distinct
+# concern with its own cadence and blast radius.
+#
+# See docs/ci.md for what each job checks, what a failure means, and how to
+# reproduce every step locally.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Parallel pushes to the same PR/branch supersede each other — cancel the
+# stale run instead of stacking runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # shellcheck at default severity over bin/, hooks/, scripts/, tests/ — any
+  # finding fails — plus `jq empty` over every tracked JSON file. shellcheck
+  # and jq are preinstalled on ubuntu-latest; scripts/lint.sh is the one true
+  # entrypoint so a local run reproduces CI exactly.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Shellcheck + JSON validation
+        run: bash scripts/lint.sh
+
+  # System `node` only — deliberately NO `npm install`/cache, so no
+  # node_modules lands on the resolution path and the offline-boot proof
+  # (issue #14) stays faithful: it launches the vendored bundle
+  # (node vendor/ynab-mcp/index.cjs) from a clean sandbox with a fake
+  # YNAB_ACCESS_TOKEN env var — no Keychain anywhere in CI (the launcher's
+  # `security(1)` read is fully stubbed by the test suite; see docs/ci.md).
+  # scripts/test.sh discovers every tests/**/*.test.{sh,mjs,js} itself, so new
+  # test files gate here automatically. Single current-LTS node (v1 policy).
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # Swap-ready invariant (issue #87, CI-gated per issue #131): no concrete
+      # YNAB tool name outside the documented allowlist. The suite below also
+      # covers this via the guard's self-test real-tree case; this explicit step
+      # fails fast and names the violation in its own check line.
+      - name: Check the swap-ready tool-name invariant on the real tree
+        run: bash bin/check-tool-name-sources.sh
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+
+      - name: Run the test suite
+        run: bash scripts/test.sh
+
+  # The dual-bash guarantee (issue #126 AC-3): bin/persona.sh's footer escaping
+  # must be correct on macOS's default bash 3.2.x AND bash ≥5.0. The `test` job
+  # covers modern bash; this lane runs the escaping-relevant suites under the
+  # macOS runner's bash 3.2 so an inverse-class regression (green on 5.x, broken
+  # on 3.2) fails the PR mechanically instead of relying on manual local runs.
+  bash-3-2:
+    runs-on: macos-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # Guard the lane's premise: if the runner image ever puts a newer bash on
+      # PATH, fail loudly rather than silently testing the wrong interpreter
+      # (scripts/test.sh runs each test file via PATH `bash`).
+      - name: Assert PATH bash is 3.2.x
+        run: |
+          v="$(bash -c 'echo "$BASH_VERSION"')"
+          case "$v" in
+            3.2.*) echo "bash $v" ;;
+            *)
+              echo "expected bash 3.2.x on PATH, got $v — the bash-3.2 lane no longer tests bash 3.2" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Run the persona footer-escaping tests under bash 3.2
+        run: bash scripts/test.sh tests/persona-loader.test.sh tests/unit/html-escape.test.sh
+
+  # The assets/ change-set integration suites (M4) exercise the real apply
+  # executor and the Ajv-backed validator end to end (assets/test/*.test.js),
+  # so unlike the dependency-free `test` job this one MUST install assets/
+  # deps (ajv, ajv-formats) first. Kept a SEPARATE job so the offline-boot
+  # proof in `test` stays pristine — no node_modules ever lands on that job's
+  # resolution path. `npm ci` against the committed assets/package-lock.json
+  # keeps the install reproducible and pinned; discovery is npm's built-in
+  # `node --test`, so new assets integration tests gate here with no edit.
+  assets-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+
+      - name: Install assets deps and run the integration suites
+        run: |
+          npm --prefix assets ci
+          npm --prefix assets test
+
+  # Relative links and internal cross-references across the docs set: a broken
+  # local link or dangling #fragment in assets/*.md or docs/*.md fails the PR.
+  # --offline keeps the check hermetic — remote URLs are out of scope (no
+  # network flakiness in the gate), local file + anchor resolution is the point.
+  docs-links:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Check docs links (offline, fragments included)
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --offline --include-fragments --no-progress 'assets/*.md' 'docs/*.md'
+          fail: true

@@ -3,8 +3,8 @@
 The mapping engine ([`lib/tax/classifyTransaction.mjs`](../lib/tax/classifyTransaction.mjs),
 issue #23 / M3-4) is the data-driven replacement for the prototype's inline prose
 heuristics. Given an **already-fetched** YNAB transaction it returns a suggested
-tax line, a confidence, and a human-readable reason — or an explicit
-`unclassified` result when nothing matches with sufficient confidence.
+tax line, a confidence, a routing band, and a human-readable reason — or an
+explicit `unclassified` result when nothing matches with sufficient confidence.
 
 ```js
 import { classify } from '../lib/tax/classifyTransaction.mjs';
@@ -13,8 +13,18 @@ import { loadProfile } from '../lib/tax/loadProfile.mjs';
 const { profile } = loadProfile();            // resolved, frozen tax profile
 const suggestion = classify(transaction, profile);
 // → { taxLineId: 'schedC.27a', businessEntityId: 'biz-a', confidence: 0.6,
-//     matchedRuleId: 'dev-tools-saas-hosting', reason: "Payee 'GitHub Inc' …" }
+//     band: 'medium', matchedRuleId: 'dev-tools-saas-hosting',
+//     reason: "Payee 'GitHub Inc' …" }
 ```
+
+Every result carries a `band` (`'high' | 'medium' | 'low' | 'unclassified'`)
+assigned by the confidence policy ([`lib/tax/confidence.mjs`](../lib/tax/confidence.mjs),
+issue #19). The band governs **proposal composition only** — the human approval
+gate is mandatory and independent of confidence. Splits and transfer legs are
+hard-coded to `band: 'unclassified'` regardless of the computed score. Pass
+`options.thresholds` (from `loadThresholds()`) to honour the user's configured
+thresholds; the full consumer contract lives in
+[`docs/confidence-contract.md`](confidence-contract.md).
 
 > **Not tax advice.** This organizes financial data and surfaces tax-relevant
 > signals; it is not a substitute for professional tax advice.

@@ -65,20 +65,26 @@ assert_jq() {
 # shellcheck source=/dev/null
 source "$HELPER"
 
-# Deterministic fixtures.
+# Deterministic fixtures. Every result fixture's `status` uses the trail's
+# documented result_status vocabulary: the apply executor's frozen four-value
+# STATUS enum (applied | skipped-stale | blocked | error —
+# assets/apply-executor.js) plus the delete path's pending_delete intent
+# sentinel (assets/delete-duplicate.js, two-phase trail #50). This matches the
+# real contract: _audit_append is a trusted pass-through fed only these
+# normalized statuses, never a raw MCP call status like `success`.
 CATEGORIZE_OP='{"id":"op-cat-1","type":"categorize","budget_id":"b1","transaction_id":"txn-1","before":{"category_id":null,"category_name":null},"after":{"category_id":"c9","category_name":"Groceries"},"rationale":"reclassify","risk":"low"}'
-CATEGORIZE_RES='{"tool":"mcp__ynab__ynab_update_transaction","status":"success","schema_version":"1.0.0","run_id":"run-A"}'
+CATEGORIZE_RES='{"tool":"mcp__ynab__ynab_update_transaction","status":"applied","schema_version":"1.0.0","run_id":"run-A"}'
 ALLOCATE_OP='{"id":"op-alloc-1","type":"allocate","budget_id":"b1","category_id":"cat-7","month":"2026-06-01","before":{"budgeted":250000},"after":{"budgeted":300000},"rationale":"top up","risk":"low"}'
-ALLOCATE_RES='{"tool":"mcp__ynab__ynab_update_category","status":"success","schema_version":"1.0.0","run_id":"run-A"}'
+ALLOCATE_RES='{"tool":"mcp__ynab__ynab_update_category","status":"applied","schema_version":"1.0.0","run_id":"run-A"}'
 RECONCILE_OP='{"id":"op-rec-1","type":"reconcile","budget_id":"b1","account_id":"acct-1","transaction_ids":["t1","t2"],"before":{"cleared_balance":100000,"reconciled_balance":90000},"after":{"reconciled_balance":100000},"rationale":"month-end","risk":"low"}'
-RECONCILE_RES='{"tool":"mcp__ynab__ynab_reconcile_account","status":"success","schema_version":"1.0.0","run_id":"run-B"}'
+RECONCILE_RES='{"tool":"mcp__ynab__ynab_reconcile_account","status":"applied","schema_version":"1.0.0","run_id":"run-B"}'
 # delete_duplicate carries the `amount` milliunit field (a REQUIRED before-field per
 # assets/changeset-schema.json:255) — the fourth and final field fixmu divides. This
 # fixture carries `amount` in BOTH before and after so the ÷1000 read transform is
 # proven in each position (the real op's after is {deleted:true}; here we add an
 # amount to exercise the after branch of fixmu too — the writer stores both verbatim).
 DELETE_OP='{"id":"op-del-1","type":"delete_duplicate","budget_id":"b1","transaction_id":"txn-dup-1","before":{"amount":-54990,"date":"2026-06-12","payee_name":"Amazon","category_name":"Shopping","import_id":"YNAB:-54990:2026-06-12:1"},"after":{"amount":12340,"deleted":true},"rationale":"exact duplicate","risk":"destructive"}'
-DELETE_RES='{"tool":"mcp__ynab__ynab_delete_transaction","status":"success","schema_version":"1.0.0","run_id":"run-C"}'
+DELETE_RES='{"tool":"mcp__ynab__ynab_delete_transaction","status":"applied","schema_version":"1.0.0","run_id":"run-C"}'
 
 # ---------------------------------------------------------------------------
 echo "AC: a normal operation appends one record with all required fields:"
@@ -111,7 +117,7 @@ assert_eq "run_id from change-set source"    "run-A"                "$(printf '%
 assert_eq "operation_id from operation"      "op-cat-1"             "$(printf '%s' "$REC" | jq -r '.operation_id')"
 assert_eq "operation_type from operation"    "categorize"          "$(printf '%s' "$REC" | jq -r '.operation_type')"
 assert_eq "tool is the namespaced MCP tool"  "mcp__ynab__ynab_update_transaction" "$(printf '%s' "$REC" | jq -r '.tool')"
-assert_eq "result_status from result"        "success"             "$(printf '%s' "$REC" | jq -r '.result_status')"
+assert_eq "result_status from result"        "applied"             "$(printf '%s' "$REC" | jq -r '.result_status')"
 assert_jq "dry_run is boolean false"         "$REC" '.dry_run == false'
 assert_jq "target_entity_ids = [transaction_id]" "$REC" '.target_entity_ids == ["txn-1"]'
 assert_jq "before stored verbatim"           "$REC" '.before == {"category_id":null,"category_name":null}'
@@ -120,12 +126,15 @@ assert_jq "after stored verbatim"            "$REC" '.after == {"category_id":"c
 # ---------------------------------------------------------------------------
 echo "AC: dry-run operations are written with dry_run:true:"
 export YNAB_AUDIT_TIMESTAMP="2026-06-15T12:05:00Z"
-dry_stdout="$(_audit_append "$CATEGORIZE_OP" '{"tool":"mcp__ynab__ynab_update_transaction","status":"dry_run","schema_version":"1.0.0","run_id":"run-A"}' true)"
+# A dry-run simulation arrives with the executor's normalized status `applied`
+# (assets/apply-executor.js simulateResult) — the dry_run flag, not the status,
+# is what marks it as a simulation.
+dry_stdout="$(_audit_append "$CATEGORIZE_OP" '{"tool":"mcp__ynab__ynab_update_transaction","status":"applied","schema_version":"1.0.0","run_id":"run-A"}' true)"
 assert_empty "dry-run writer prints nothing to STDOUT"   "$dry_stdout"
 assert_eq "two records now in the file"      "2" "$(wc -l < "$FILE" | tr -d ' ')"
 DRY_REC="$(tail -1 "$FILE")"
 assert_jq "dry-run record has dry_run:true"  "$DRY_REC" '.dry_run == true'
-assert_eq "dry-run record records its status" "dry_run" "$(printf '%s' "$DRY_REC" | jq -r '.result_status')"
+assert_eq "dry-run record keeps the normalized status (applied)" "applied" "$(printf '%s' "$DRY_REC" | jq -r '.result_status')"
 
 # ---------------------------------------------------------------------------
 echo "AC: append-only — earlier lines are never rewritten or truncated:"
@@ -258,7 +267,7 @@ export YNAB_AUDIT_MONTH="2026-06"; export YNAB_AUDIT_TIMESTAMP="2026-06-10T10:00
 _audit_append "$ALLOCATE_OP" "$ALLOCATE_RES" false
 export YNAB_AUDIT_TIMESTAMP="2026-06-11T10:00:00Z"
 _audit_append "$RECONCILE_OP" "$RECONCILE_RES" false
-assert_eq "two separate monthly files exist" "2" "$(ls "$SANDBOX/p5"/audit-*.jsonl | wc -l | tr -d ' ')"
+assert_eq "two separate monthly files exist" "2" "$(find "$SANDBOX/p5" -name 'audit-*.jsonl' | wc -l | tr -d ' ')"
 RUNA_OUT="$(_audit_read_run run-A)"
 assert_eq "run-A matches two records across both months" "2" "$(printf '%s' "$RUNA_OUT" | jq -s 'length')"
 # Slurp the whole multi-record stream and quantify: a foreign run_id leaking
@@ -298,6 +307,25 @@ assert_jq "delete after.amount 12340 shown as 12.34 (÷1000)"           "$DEL_LA
 DEL_RUN="$(_audit_read_run run-C)"
 assert_jq "delete read via run-C: before.amount shown as -54.99 (÷1000)" "$DEL_RUN" '.before.amount == -54.99'
 assert_jq "delete read via run-C: after.amount shown as 12.34 (÷1000)"   "$DEL_RUN" '.after.amount == 12.34'
+
+# ---------------------------------------------------------------------------
+# #164 / #50: the delete path writes a pre-delete INTENT record carrying the
+# fifth on-trail result_status value, pending_delete (assets/delete-duplicate.js
+# makeAuditingDeleteApplyOp), before the irreversible delete runs. The trusted
+# pass-through must store it verbatim — proving the trail's documented
+# five-value vocabulary end to end, not just the executor's four.
+echo "pending_delete: the delete path's intent record passes through verbatim:"
+export YNAB_AUDIT_DIR="$SANDBOX/pending-delete"
+export YNAB_AUDIT_MONTH="2026-06"
+export YNAB_AUDIT_TIMESTAMP="2026-06-15T16:35:00Z"
+PENDING_DELETE_RES='{"tool":"mcp__ynab__ynab_delete_transaction","status":"pending_delete","schema_version":"1.0.0","run_id":"run-C"}'
+_audit_append "$DELETE_OP" "$PENDING_DELETE_RES" false; rc=$?
+assert_eq "pending_delete append exit code is 0" "0" "$rc"
+PD_REC="$(head -1 "$SANDBOX/pending-delete/audit-2026-06.jsonl")"
+assert_eq "result_status is pending_delete (stored verbatim)" "pending_delete" "$(printf '%s' "$PD_REC" | jq -r '.result_status')"
+assert_jq "error_class is null on an intent record"   "$PD_REC" '.error_class == null'
+assert_jq "applied_state is null on an intent record" "$PD_REC" '.applied_state == null'
+assert_jq "intent record is a real-run record (dry_run:false)" "$PD_REC" '.dry_run == false'
 
 # ---------------------------------------------------------------------------
 # Crash recovery (reader leniency, defense-in-depth): the writer now appends each
@@ -380,6 +408,8 @@ assert_contains "read_run body-corruption diagnostic names audit-log on STDERR" 
 # would silently drop it (exit 0) — an audit log inventing or losing a change is
 # the exact trust failure this feature exists to prevent. With the guard BOTH
 # readers must fail loudly (exit 1, audit-log: on STDERR).
+# Backticks are literal formatting around `null` — no expansion intended.
+# shellcheck disable=SC2016
 echo 'crash recovery: a `null` body line fails the read for BOTH helpers:'
 export YNAB_AUDIT_DIR="$SANDBOX/corrupt-null"
 export YNAB_AUDIT_MONTH="2026-06"

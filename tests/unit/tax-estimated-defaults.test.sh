@@ -31,14 +31,14 @@ command -v jq >/dev/null 2>&1 || { echo "jq is required to run these tests"; exi
 
 echo "== us-tax-lines.json — estimated-tax defaults (#82) =="
 
-jq empty "$FILE" >/dev/null 2>&1 && ok "file is valid JSON" || { no "file is valid JSON"; exit 1; }
+if jq empty "$FILE" >/dev/null 2>&1; then ok "file is valid JSON"; else no "file is valid JSON"; exit 1; fi
 
 # --- income-tax marginal brackets ------------------------------------------
 # Brackets exist for every filing status and the two seeded tax years.
 for fs in single mfj mfs hoh qw; do
   for yr in 2024 2025; do
     assert_jq "incomeTaxBracketsByYear.$fs.$yr is a non-empty array" \
-      ".incomeTaxBracketsByYear.$fs[\"$yr\"] | type==\"array\" and length>0"
+      ".incomeTaxBracketsByYear.${fs}[\"$yr\"] | type==\"array\" and length>0"
   done
 done
 # Brackets are ascending and the top bracket is unbounded (no upTo).
@@ -48,6 +48,8 @@ assert_jq "mfj 2025 top bracket omits upTo (unbounded)" \
   '.incomeTaxBracketsByYear.mfj["2025"][-1] | has("upTo") | not'
 # Every rate is a fraction in (0,1] (never a percentage like 22). del the
 # annotation-only $comment first so the walk only visits status objects.
+# $comment is a literal jq field name inside the single-quoted program.
+# shellcheck disable=SC2016
 assert_jq "every bracket rate is a fraction in (0,1]" \
   '[.incomeTaxBracketsByYear | del(.["$comment"]) | .[][][].rate] | all(. > 0 and . <= 1)'
 # Pin a couple of known thresholds so a transposed digit fails green.

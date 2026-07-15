@@ -43,6 +43,7 @@
 
 const { ALLOWED_TOOLS } = require('./write-safety-guardrail');
 const { throwOnErrorResult } = require('./write-error');
+const { isTransferLeg } = require('./transaction-shape');
 
 /** The op type this write path handles — the executor toolMap registration key. */
 const OP_TYPE = 'delete_duplicate';
@@ -67,6 +68,7 @@ const TWIN_REQUIRED_FIELDS = Object.freeze(['id', 'payee_name', 'amount', 'date'
  */
 const VICTIM_SNAPSHOT_FIELDS = Object.freeze([
   'amount', 'date', 'payee_name', 'category_id', 'account_id', 'cleared', 'memo', 'import_id',
+  'transfer_account_id', 'transfer_transaction_id',
 ]);
 
 /**
@@ -148,6 +150,36 @@ function validateTwinEvidence(op) {
     return { valid: false, error: { op_id: opId, rule: 'twin_is_victim', reason: 'delete_duplicate op names its surviving twin as the victim (transaction_id === twin.id); deleting it would remove the only copy of the transaction.', missing: [] } };
   }
   return { valid: true };
+}
+
+/**
+ * Hard block (GAP-19 / #49): a delete op must never target — or pair with — a
+ * TRANSFER LEG. A transfer inflow/outflow pair is legitimate, never duplicates,
+ * and deleting one leg corrupts the linked account's ledger. This is a HARD
+ * BLOCK, deliberately NOT `human_review_required`: no confirmation can make a
+ * one-leg deletion safe. Checked on BOTH candidates — the victim (`op.before`)
+ * and the surviving twin (`op.twin`) — via the shared isTransferLeg helper,
+ * before any read or delete is attempted.
+ * @param {object} op a delete_duplicate operation.
+ * @returns {{valid:true}|{valid:false, error:{op_id:string|null, rule:string, reason:string, transfer_leg:string[]}}}
+ */
+function validateNotTransferLeg(op) {
+  const opId = op && typeof op === 'object' && typeof op.id === 'string' ? op.id : null;
+  const legs = [];
+  if (op && typeof op === 'object') {
+    if (isTransferLeg(op.before)) legs.push('victim');
+    if (isTransferLeg(op.twin)) legs.push('twin');
+  }
+  if (legs.length === 0) return { valid: true };
+  return {
+    valid: false,
+    error: {
+      op_id: opId,
+      rule: 'transfer_leg_hard_block',
+      reason: `delete_duplicate op involves a transfer leg (${legs.join(', ')}); a transfer inflow/outflow pair is never a duplicate, and deleting one leg corrupts the linked account's ledger — hard-blocked, never deletable by this path.`,
+      transfer_leg: legs,
+    },
+  };
 }
 
 /**
@@ -338,11 +370,20 @@ async function applyDeleteDuplicates(changeset, options = {}) {
 
   const ops = changeset && Array.isArray(changeset.operations) ? changeset.operations : [];
   const twinErrors = [];
+  const transferLegBlocks = [];
   for (const op of ops) {
     if (op && op.type === OP_TYPE) {
+      const legVerdict = validateNotTransferLeg(op);
+      if (!legVerdict.valid) transferLegBlocks.push(legVerdict.error);
       const verdict = validateTwinEvidence(op);
       if (!verdict.valid) twinErrors.push(verdict.error);
     }
+  }
+  // Transfer-leg HARD BLOCK first (GAP-19 / #49): it outranks every other verdict —
+  // no read, no delete, no executor. Never `human_review_required`; one-leg deletion
+  // is never approvable.
+  if (transferLegBlocks.length > 0) {
+    return { ok: false, dry_run: dryRun, aborted: true, reason: 'transfer_leg_hard_block', transferLegBlocks, results: [] };
   }
   if (twinErrors.length > 0) {
     return { ok: false, dry_run: dryRun, aborted: true, reason: 'twin_evidence_missing', twinErrors, results: [] };
@@ -354,6 +395,57 @@ async function applyDeleteDuplicates(changeset, options = {}) {
   // an install, faithful to the offline-boot constraint.
   const { applyChangeset } = require('./apply-executor');
 
+  // LIVE SHAPE RE-DERIVATION (GAP-19 / #49, fail-open fix). The snapshot check above
+  // trusts the caller-supplied `op.before` / `op.twin`; the schema leaves the transfer
+  // fields optional, so a schema-valid op that simply OMITS them (or lies with nulls)
+  // walks straight past it. The one thing a payload cannot talk around is the LIVE
+  // read the executor already performs — so the hard block is re-derived there: wrap
+  // the injected readLiveState port and re-check isTransferLeg on BOTH live candidates,
+  // matching validateNotTransferLeg's "never target OR PAIR WITH a transfer leg"
+  // guarantee:
+  //   - the VICTIM — the executor's own live read of op.transaction_id;
+  //   - the TWIN — a second read through the same port with the twin's id swapped in
+  //     (the port resolves whatever `op.transaction_id` names, so no new port is
+  //     needed; see skills/delete-duplicate.md). A live transfer-leg twin proves the
+  //     "duplicate pair" is really a legitimate transfer pair, so deleting the victim
+  //     would be a wrong, irreversible delete even though the victim itself is clean.
+  // Either live leg throws, which the executor records as a terminal per-op `error`
+  // (never dispatched — the delete tool is unreachable for it) while the rest of the
+  // batch proceeds under normal per-op semantics. Structurally fail-closed: the ONLY
+  // route to `ynab_delete_transaction` runs through a successful live read, and every
+  // successful live read passes this gate first — a twin read that fails is a per-op
+  // read error, never a skipped check. Requires the port to project the full victim
+  // shape — shapeVictimSnapshot(liveTxn), transfer fields included — per
+  // skills/delete-duplicate.md.
+  const shapeGuardedRead = typeof readLiveState === 'function'
+    ? async (op) => {
+      const live = await readLiveState(op);
+      if (op && op.type === OP_TYPE) {
+        if (isTransferLeg(live)) {
+          const err = new Error(
+            `transfer_leg_hard_block: delete_duplicate op ${op.id != null ? op.id : '(no id)'} targets a LIVE transfer leg `
+            + '(the live read carries a non-null transfer_account_id / transfer_transaction_id); deleting one leg of a transfer '
+            + 'pair corrupts the linked account\'s ledger — hard-blocked from the live state, regardless of the op\'s snapshot evidence.',
+          );
+          err.rule = 'transfer_leg_hard_block';
+          throw err;
+        }
+        const twinId = op.twin && typeof op.twin.id === 'string' && op.twin.id.length > 0 ? op.twin.id : null;
+        if (twinId !== null && isTransferLeg(await readLiveState({ ...op, transaction_id: twinId }))) {
+          const err = new Error(
+            `transfer_leg_hard_block: delete_duplicate op ${op.id != null ? op.id : '(no id)'} pairs with a LIVE transfer-leg `
+            + 'TWIN (the live read of the surviving twin carries a non-null transfer_account_id / transfer_transaction_id); '
+            + 'the pair is a legitimate transfer, never duplicates — the victim delete is hard-blocked from the live state, '
+            + 'regardless of the op\'s snapshot evidence.',
+          );
+          err.rule = 'transfer_leg_hard_block';
+          throw err;
+        }
+      }
+      return live;
+    }
+    : readLiveState;
+
   const wrappedApplyOp = (!dryRun && typeof applyOp === 'function')
     ? makeAuditingDeleteApplyOp({ applyOp, audit, changeset, dryRun })
     : applyOp;
@@ -362,7 +454,7 @@ async function applyDeleteDuplicates(changeset, options = {}) {
     activeBudgetId,
     dryRun,
     toolMap: buildToolMap(),
-    readLiveState,
+    readLiveState: shapeGuardedRead,
     applyOp: wrappedApplyOp,
     authPreflight,
     audit,
@@ -376,6 +468,7 @@ module.exports = {
   VICTIM_SNAPSHOT_FIELDS,
   formatDollars,
   validateTwinEvidence,
+  validateNotTransferLeg,
   shapeVictimSnapshot,
   renderDeletePreview,
   requiresStrongConfirmation,

@@ -45,6 +45,7 @@ loader, the JSON Schema, or any default.
 | `persona` | object | **required** | The financial-review persona (configurable name). |
 | `report` | object | **required** | Report output directory + template path. |
 | `schedules` | object | optional | Scheduled-task cadences for background tasks (e.g. the monitoring poll). |
+| `classification` | object | optional | Confidence-band thresholds for the human-review routing policy (issue #19). |
 
 ---
 
@@ -219,6 +220,29 @@ disturbs the weekly-review task (`ynab-review`).
 
 ```json
 "schedules": { "monitor": { "cron": "0 8 * * *", "enabled": true } }
+```
+
+---
+
+### `classification` *(object, optional)*
+
+Confidence-band thresholds for the classification → human-review routing policy
+(issue #19; the full consumer contract lives in
+[`docs/confidence-contract.md`](confidence-contract.md)). Read by
+`loadThresholds()` in [`lib/tax/confidence.mjs`](../lib/tax/confidence.mjs) —
+**not** by `bin/config.sh`. Confidence governs **proposal composition only**
+(whether an op is pre-filled in the apply proposal); the human approval gate is
+mandatory and independent of confidence. Omit the whole block to accept the
+conservative shipped defaults. Invalid values — or a contradictory pair
+(`mediumThreshold ≥ highThreshold`) — fall back to the defaults.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `highThreshold` | number (0, 1] | optional | `0.85` | `confidence ≥ highThreshold` → band `high`: eligible for a pre-filled proposal op (still human-gated). |
+| `mediumThreshold` | number (0, 1] | optional | `0.6` | `mediumThreshold ≤ confidence < highThreshold` → band `medium`: "review suggested" only, never pre-filled. Must be `< highThreshold`. |
+
+```json
+"classification": { "highThreshold": 0.85, "mediumThreshold": 0.6 }
 ```
 
 ---

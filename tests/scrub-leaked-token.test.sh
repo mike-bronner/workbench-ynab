@@ -15,6 +15,8 @@ SCRUB="$REPO_ROOT/bin/scrub-leaked-token.sh"
 # A clearly-synthetic token, built at RUNTIME so the literal never appears in
 # any git-tracked file — which would otherwise trip --verify's repo-tree scan.
 SYNTH_TOKEN="$(printf 'a%.0s' $(seq 1 64))"
+# Referenced as \$MARKER inside eval'd assert conditions — shellcheck can't see it.
+# shellcheck disable=SC2034
 MARKER='[YNAB-TOKEN-REDACTED]'
 
 pass=0
@@ -89,8 +91,11 @@ assert "never prints the token value" "! contains_token \"\$out\""
 
 # ---------------------------------------------------------------------------
 echo "== scrub (default mode) =="
+# Referenced as \$before/\$after inside eval'd assert conditions below.
+# shellcheck disable=SC2034
 before="$(find "$SANDBOX" -type f | sort)"
 out="$(run '')"; rc=$?
+# shellcheck disable=SC2034
 after="$(find "$SANDBOX" -type f | sort)"
 assert "exits 0 on a successful scrub" "[ $rc -eq 0 ]"
 assert "prints a per-surface summary (Scanned/Modified)" \
@@ -105,8 +110,8 @@ for f in \
   "$PROJ/-Users-mike-foo/t.jsonl" \
   "$PROJ/-Users-mike-foo/tool-results/r.txt" \
   "$DESK"; do
-  assert "token redacted from ${f#$SANDBOX/}" "! grep -qF -- \"\$SYNTH_TOKEN\" \"$f\""
-  assert "marker present in ${f#$SANDBOX/}" "grep -qF -- \"\$MARKER\" \"$f\""
+  assert "token redacted from ${f#"$SANDBOX"/}" "! grep -qF -- \"\$SYNTH_TOKEN\" \"$f\""
+  assert "marker present in ${f#"$SANDBOX"/}" "grep -qF -- \"\$MARKER\" \"$f\""
 done
 
 assert "control file left untouched" \
@@ -286,6 +291,8 @@ else
   LOCKED="$SESS/2026-06-12/locked"
   mkdir -p "$LOCKED"
   chmod 000 "$LOCKED"
+  # Referenced as \$out inside eval'd assert conditions below.
+  # shellcheck disable=SC2034
   out="$(run '')"; rc=$?
   assert "scrub exits non-zero when find can't fully enumerate the surface" "[ $rc -ne 0 ]"
   assert "scrub flags the session-logs surface not fully enumerated (left unscrubbed)" \

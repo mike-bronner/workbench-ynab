@@ -85,6 +85,7 @@ const { STATUS, OUTCOME, applyChangeset } = require('./apply-executor');
 const { validateChangeset } = require('./validate-changeset');
 const { ALLOWED_TOOLS } = require('./write-safety-guardrail');
 const { throwOnErrorResult } = require('./write-error');
+const { HUMAN_REVIEW_REASONS, isSplitTransaction, isTransferLeg } = require('./transaction-shape');
 
 /** The op type this handler is the sole registered handler for (M4-4 registration). */
 const CATEGORIZE_TYPE = 'categorize';
@@ -475,6 +476,33 @@ async function applyCategorize(changeset, ctx = {}) {
       });
       continue;
     }
+    // TRANSACTION-SHAPE GATE (GAP-19 / #49) — v1 conservative posture: flag, never
+    // auto-modify. Runs BEFORE category resolution, so a flagged op triggers NO
+    // call of any kind (not even the read-only category lookup) and never reaches
+    // the executor's dispatch. Shape evidence is read from the op's `before`
+    // snapshot, which the M4-10 proposal carries (changeset-schema.json):
+    //  - a TRANSFER LEG's category is reserved by transfer semantics — routed to
+    //    human review (the M4-2 guardrail also blocks it, defense in depth);
+    //  - a SPLIT PARENT has no single category (its subtransactions do) — routed
+    //    to human review. Categorizing a specific subtransaction BY ITS OWN id is
+    //    allowed: such an op's `before` describes the leg, not the parent, so it
+    //    carries no non-empty `subtransactions` and passes straight through.
+    if (isTransferLeg(op.before)) {
+      merged[i] = catResult(op, STATUS.HUMAN_REVIEW_REQUIRED, dryRun, {
+        phase: 'shape',
+        reason: HUMAN_REVIEW_REASONS.TRANSFER_LEG_CATEGORY_RESERVED,
+        message: `categorize op ${op.id}: the target transaction is a transfer leg; its category is reserved by transfer semantics — routed to human review, no update-transaction call made.`,
+      });
+      continue;
+    }
+    if (isSplitTransaction(op.before)) {
+      merged[i] = catResult(op, STATUS.HUMAN_REVIEW_REQUIRED, dryRun, {
+        phase: 'shape',
+        reason: HUMAN_REVIEW_REASONS.SPLIT_PARENT_AMBIGUOUS_CATEGORY,
+        message: `categorize op ${op.id}: the target transaction is a split parent, which has no single category (its subtransactions do) — routed to human review, no update-transaction call made. Target a specific subtransaction by its own id instead.`,
+      });
+      continue;
+    }
     const resolved = await resolveCategory(op, { listCategories: listCategoriesPatient, activeBudgetId });
     if (resolved.error) {
       merged[i] = catResult(op, STATUS.ERROR, dryRun, { phase: 'resolve', message: resolved.error });
@@ -486,8 +514,9 @@ async function applyCategorize(changeset, ctx = {}) {
 
   // Nothing reached the executor, yet the envelope carried operations (an empty /
   // malformed envelope already returned `schema_invalid` up top). So every op was
-  // either a mis-routed foreign-type op or a categorize op that errored in resolution
-  // (e.g. an unresolvable name). Both are per-op errors, not a batch abort (mirroring
+  // either a mis-routed foreign-type op, a shape-flagged op (split parent / transfer
+  // leg -> human_review_required), or a categorize op that errored in resolution
+  // (e.g. an unresolvable name). All are per-op results, not a batch abort (mirroring
   // the executor's per-op error semantics), so the batch still "completes" with those
   // error results already in `merged`.
   if (toRun.length === 0) {
@@ -500,6 +529,31 @@ async function applyCategorize(changeset, ctx = {}) {
     };
   }
 
+  // LIVE SHAPE RE-DERIVATION (GAP-19 / #49, fail-open fix — same root cause as the
+  // delete path's guard). The shape gate above reads `op.before`, which the schema
+  // leaves free to OMIT the shape-evidence fields — a snapshot that omits (or lies
+  // about) them walks past the gate. The live read the executor already performs is
+  // the one thing the payload cannot talk around: wrap the readLiveState port and
+  // re-derive the shape from the LIVE transaction. A live transfer leg / split
+  // parent throws, which the executor records as a terminal per-op `error` — never
+  // dispatched, so no update-transaction call can target it — while the rest of the
+  // batch proceeds. Requires the port's live read to carry the shape-evidence fields
+  // alongside the category state (skills/categorize-write-path.md).
+  const shapeGuardedRead = typeof readLiveState === 'function'
+    ? async (op) => {
+      const live = await readLiveState(op);
+      if (op && op.type === CATEGORIZE_TYPE && (isTransferLeg(live) || isSplitTransaction(live))) {
+        const shape = isTransferLeg(live) ? 'transfer leg' : 'split parent';
+        throw new Error(
+          `transaction_shape_live_mismatch: categorize op ${op.id != null ? op.id : '(no id)'} targets a LIVE ${shape} `
+          + 'per the live read — its category may never be set by this path, regardless of the op\'s snapshot evidence; '
+          + 'routed to error (v1 conservative posture: flag, never auto-modify).',
+        );
+      }
+      return live;
+    }
+    : readLiveState;
+
   const outcome = await applyChangeset(
     { ...changeset, operations: toRun.map(({ op }) => op) },
     {
@@ -510,7 +564,7 @@ async function applyCategorize(changeset, ctx = {}) {
       bulkFits: categorizeBulkFits,
       applyOp: makeCategorizeApplyOp({ callTool, reloadSchemas, ...patience }),
       bulkApplyOp: makeCategorizeBulkApplyOp({ callTool, reloadSchemas, ...patience }),
-      readLiveState,
+      readLiveState: shapeGuardedRead,
       authPreflight,
       audit,
     },

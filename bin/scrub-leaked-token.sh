@@ -220,9 +220,13 @@ do_scrub() {
     printf '\nWARNING — %d file(s)/surface(s) could not be read and were left\n' "$total_unreadable" >&2
     printf 'UNSCRUBBED; the leaked token may still be present in them. Fix the\n' >&2
     printf 'permissions (or re-run with sufficient privileges), scrub again, and\n' >&2
+    # Backticks are literal markdown around the command name — no expansion intended.
+    # shellcheck disable=SC2016
     printf 'confirm with `%s --verify`.\n' "$(basename "$0")" >&2
     return 1
   fi
+  # Backticks are literal markdown around the command name — no expansion intended.
+  # shellcheck disable=SC2016
   printf 'Now run `%s --verify` to confirm zero remaining matches.\n' "$(basename "$0")"
 }
 
@@ -299,6 +303,8 @@ do_detect() {
   if [ "$rc" -ne 0 ]; then
     printf '⚠️  UNPARSEABLE DESKTOP CONFIG — cannot certify it token-free\n' >&2
     printf '    Location: %s\n' "$cfg" >&2
+    # Backticks are literal markdown around `jq` — no expansion intended.
+    # shellcheck disable=SC2016
     printf '    `jq` could not parse the config (malformed JSON, or jq is missing).\n' >&2
     printf '    A remediation tool must never report a file it cannot read as clean,\n' >&2
     printf '    so this fails closed. Inspect the config by hand, then re-run —\n' >&2
@@ -315,6 +321,8 @@ do_detect() {
   printf '    Field:    mcpServers.ynab.env.YNAB_ACCESS_TOKEN\n' >&2
   printf '    A token in a plaintext config is compromised. ROTATE it before\n' >&2
   printf '    removing the legacy connector — see docs/token-rotation.md, then\n' >&2
+  # Backticks are literal markdown around the command name — no expansion intended.
+  # shellcheck disable=SC2016
   printf '    run `%s` (no flag) to scrub the on-disk copies.\n' "$(basename "$0")" >&2
   return 1
 }

@@ -95,9 +95,9 @@ for entry in "single=14600 15000" "mfj=29200 30000" "mfs=14600 15000" "hoh=21900
   fs="${entry%%=*}"; amounts="${entry#*=}"
   d2024="${amounts%% *}"; d2025="${amounts##* }"
   assert_eq "standardDeductionByYear.$fs 2024 amount is $d2024 dollars" \
-    ".standardDeductionByYear.$fs[\"2024\"]" "$d2024"
+    ".standardDeductionByYear.${fs}[\"2024\"]" "$d2024"
   assert_eq "standardDeductionByYear.$fs 2025 amount is $d2025 dollars" \
-    ".standardDeductionByYear.$fs[\"2025\"]" "$d2025"
+    ".standardDeductionByYear.${fs}[\"2025\"]" "$d2025"
 done
 # AC: structure matches schema #20 (filing-status → four-digit year → number),
 # so adding a tax year is a pure data edit.
@@ -112,6 +112,8 @@ assert_jq "thresholds.saltCap == 10000" '.thresholds.saltCap==10000'
 # AC: monetary unit is explicitly documented (dollars, not milliunits). Match the
 # "milli" stem rather than the exact "milliunit" token so a legitimate reword
 # ("milli-units", "milliunits") doesn't false-fail this guard.
+# $comment is a literal jq field name inside the single-quoted program.
+# shellcheck disable=SC2016
 assert_jq "top-level \$comment documents dollars (not milliunits)" \
   '(.["$comment"] | ascii_downcase | (contains("dollar") and contains("milli")))'
 assert_jq "moneyUnit field is dollars" '.moneyUnit=="dollars"'

@@ -101,7 +101,11 @@ const {
 
 /**
  * The per-operation result statuses. This is the contract M4-5 renders for the
- * human; the four values are exhaustive.
+ * human; the five values are exhaustive. The executor itself emits the first
+ * four; HUMAN_REVIEW_REQUIRED is emitted by a handler's pre-flight (the M4-6
+ * categorize handler refusing a split parent or a transfer leg, GAP-19 / #49)
+ * for an op that must be routed to the human instead of applied — never
+ * auto-modified, never a hard error.
  * @type {Readonly<Record<string, string>>}
  */
 const STATUS = Object.freeze({
@@ -109,6 +113,7 @@ const STATUS = Object.freeze({
   SKIPPED_STALE: 'skipped-stale',
   BLOCKED: 'blocked',
   ERROR: 'error',
+  HUMAN_REVIEW_REQUIRED: 'human_review_required',
 });
 
 /**
