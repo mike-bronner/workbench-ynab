@@ -43,32 +43,40 @@ jobs:
       - name: Checkout plugin repo
         uses: actions/checkout@v4
 
+      # Every dynamic value threads through env: — never spliced into the
+      # script with ${{ }}, which is substituted BEFORE bash parses the text
+      # and would let a crafted tag name (release event or dispatch input)
+      # run arbitrary shell on a runner that later holds the cross-repo PAT.
       - name: Resolve plugin name + tag SHA
         id: resolve
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
           PLUGIN_NAME=$(jq -r '.name' .claude-plugin/plugin.json)
           echo "plugin_name=$PLUGIN_NAME" >> "$GITHUB_OUTPUT"
 
-          if [ "${{ github.event_name }}" = "release" ]; then
-            TAG="${{ github.event.release.tag_name }}"
-          elif [ -n "${{ inputs.tag }}" ]; then
-            TAG="${{ inputs.tag }}"
+          if [ "$EVENT_NAME" = "release" ]; then
+            TAG="$RELEASE_TAG"
+          elif [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
           else
-            TAG=$(gh release view --repo "${{ github.repository }}" --json tagName --jq '.tagName')
+            TAG=$(gh release view --repo "$REPO" --json tagName --jq '.tagName')
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
           # Resolve tag ref → commit SHA, dereferencing annotated tags.
-          REF=$(gh api "repos/${{ github.repository }}/git/refs/tags/$TAG")
+          REF=$(gh api "repos/$REPO/git/refs/tags/$TAG")
           OBJECT_TYPE=$(echo "$REF" | jq -r '.object.type')
           OBJECT_SHA=$(echo "$REF" | jq -r '.object.sha')
 
           if [ "$OBJECT_TYPE" = "tag" ]; then
-            SHA=$(gh api "repos/${{ github.repository }}/git/tags/$OBJECT_SHA" --jq '.object.sha')
+            SHA=$(gh api "repos/$REPO/git/tags/$OBJECT_SHA" --jq '.object.sha')
           else
             SHA="$OBJECT_SHA"
           fi
