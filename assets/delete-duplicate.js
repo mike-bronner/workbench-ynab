@@ -43,6 +43,7 @@
 
 const { ALLOWED_TOOLS } = require('./write-safety-guardrail');
 const { throwOnErrorResult } = require('./write-error');
+const { isTransferLeg } = require('./transaction-shape');
 
 /** The op type this write path handles — the executor toolMap registration key. */
 const OP_TYPE = 'delete_duplicate';
@@ -67,6 +68,7 @@ const TWIN_REQUIRED_FIELDS = Object.freeze(['id', 'payee_name', 'amount', 'date'
  */
 const VICTIM_SNAPSHOT_FIELDS = Object.freeze([
   'amount', 'date', 'payee_name', 'category_id', 'account_id', 'cleared', 'memo', 'import_id',
+  'transfer_account_id', 'transfer_transaction_id',
 ]);
 
 /**
@@ -148,6 +150,36 @@ function validateTwinEvidence(op) {
     return { valid: false, error: { op_id: opId, rule: 'twin_is_victim', reason: 'delete_duplicate op names its surviving twin as the victim (transaction_id === twin.id); deleting it would remove the only copy of the transaction.', missing: [] } };
   }
   return { valid: true };
+}
+
+/**
+ * Hard block (GAP-19 / #49): a delete op must never target — or pair with — a
+ * TRANSFER LEG. A transfer inflow/outflow pair is legitimate, never duplicates,
+ * and deleting one leg corrupts the linked account's ledger. This is a HARD
+ * BLOCK, deliberately NOT `human_review_required`: no confirmation can make a
+ * one-leg deletion safe. Checked on BOTH candidates — the victim (`op.before`)
+ * and the surviving twin (`op.twin`) — via the shared isTransferLeg helper,
+ * before any read or delete is attempted.
+ * @param {object} op a delete_duplicate operation.
+ * @returns {{valid:true}|{valid:false, error:{op_id:string|null, rule:string, reason:string, transfer_leg:string[]}}}
+ */
+function validateNotTransferLeg(op) {
+  const opId = op && typeof op === 'object' && typeof op.id === 'string' ? op.id : null;
+  const legs = [];
+  if (op && typeof op === 'object') {
+    if (isTransferLeg(op.before)) legs.push('victim');
+    if (isTransferLeg(op.twin)) legs.push('twin');
+  }
+  if (legs.length === 0) return { valid: true };
+  return {
+    valid: false,
+    error: {
+      op_id: opId,
+      rule: 'transfer_leg_hard_block',
+      reason: `delete_duplicate op involves a transfer leg (${legs.join(', ')}); a transfer inflow/outflow pair is never a duplicate, and deleting one leg corrupts the linked account's ledger — hard-blocked, never deletable by this path.`,
+      transfer_leg: legs,
+    },
+  };
 }
 
 /**
@@ -338,11 +370,20 @@ async function applyDeleteDuplicates(changeset, options = {}) {
 
   const ops = changeset && Array.isArray(changeset.operations) ? changeset.operations : [];
   const twinErrors = [];
+  const transferLegBlocks = [];
   for (const op of ops) {
     if (op && op.type === OP_TYPE) {
+      const legVerdict = validateNotTransferLeg(op);
+      if (!legVerdict.valid) transferLegBlocks.push(legVerdict.error);
       const verdict = validateTwinEvidence(op);
       if (!verdict.valid) twinErrors.push(verdict.error);
     }
+  }
+  // Transfer-leg HARD BLOCK first (GAP-19 / #49): it outranks every other verdict —
+  // no read, no delete, no executor. Never `human_review_required`; one-leg deletion
+  // is never approvable.
+  if (transferLegBlocks.length > 0) {
+    return { ok: false, dry_run: dryRun, aborted: true, reason: 'transfer_leg_hard_block', transferLegBlocks, results: [] };
   }
   if (twinErrors.length > 0) {
     return { ok: false, dry_run: dryRun, aborted: true, reason: 'twin_evidence_missing', twinErrors, results: [] };
@@ -376,6 +417,7 @@ module.exports = {
   VICTIM_SNAPSHOT_FIELDS,
   formatDollars,
   validateTwinEvidence,
+  validateNotTransferLeg,
   shapeVictimSnapshot,
   renderDeletePreview,
   requiresStrongConfirmation,

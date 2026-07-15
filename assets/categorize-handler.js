@@ -85,6 +85,7 @@ const { STATUS, OUTCOME, applyChangeset } = require('./apply-executor');
 const { validateChangeset } = require('./validate-changeset');
 const { ALLOWED_TOOLS } = require('./write-safety-guardrail');
 const { throwOnErrorResult } = require('./write-error');
+const { HUMAN_REVIEW_REASONS, isSplitTransaction, isTransferLeg } = require('./transaction-shape');
 
 /** The op type this handler is the sole registered handler for (M4-4 registration). */
 const CATEGORIZE_TYPE = 'categorize';
@@ -475,6 +476,33 @@ async function applyCategorize(changeset, ctx = {}) {
       });
       continue;
     }
+    // TRANSACTION-SHAPE GATE (GAP-19 / #49) — v1 conservative posture: flag, never
+    // auto-modify. Runs BEFORE category resolution, so a flagged op triggers NO
+    // call of any kind (not even the read-only category lookup) and never reaches
+    // the executor's dispatch. Shape evidence is read from the op's `before`
+    // snapshot, which the M4-10 proposal carries (changeset-schema.json):
+    //  - a TRANSFER LEG's category is reserved by transfer semantics — routed to
+    //    human review (the M4-2 guardrail also blocks it, defense in depth);
+    //  - a SPLIT PARENT has no single category (its subtransactions do) — routed
+    //    to human review. Categorizing a specific subtransaction BY ITS OWN id is
+    //    allowed: such an op's `before` describes the leg, not the parent, so it
+    //    carries no non-empty `subtransactions` and passes straight through.
+    if (isTransferLeg(op.before)) {
+      merged[i] = catResult(op, STATUS.HUMAN_REVIEW_REQUIRED, dryRun, {
+        phase: 'shape',
+        reason: HUMAN_REVIEW_REASONS.TRANSFER_LEG_CATEGORY_RESERVED,
+        message: `categorize op ${op.id}: the target transaction is a transfer leg; its category is reserved by transfer semantics — routed to human review, no update-transaction call made.`,
+      });
+      continue;
+    }
+    if (isSplitTransaction(op.before)) {
+      merged[i] = catResult(op, STATUS.HUMAN_REVIEW_REQUIRED, dryRun, {
+        phase: 'shape',
+        reason: HUMAN_REVIEW_REASONS.SPLIT_PARENT_AMBIGUOUS_CATEGORY,
+        message: `categorize op ${op.id}: the target transaction is a split parent, which has no single category (its subtransactions do) — routed to human review, no update-transaction call made. Target a specific subtransaction by its own id instead.`,
+      });
+      continue;
+    }
     const resolved = await resolveCategory(op, { listCategories: listCategoriesPatient, activeBudgetId });
     if (resolved.error) {
       merged[i] = catResult(op, STATUS.ERROR, dryRun, { phase: 'resolve', message: resolved.error });
@@ -486,8 +514,9 @@ async function applyCategorize(changeset, ctx = {}) {
 
   // Nothing reached the executor, yet the envelope carried operations (an empty /
   // malformed envelope already returned `schema_invalid` up top). So every op was
-  // either a mis-routed foreign-type op or a categorize op that errored in resolution
-  // (e.g. an unresolvable name). Both are per-op errors, not a batch abort (mirroring
+  // either a mis-routed foreign-type op, a shape-flagged op (split parent / transfer
+  // leg -> human_review_required), or a categorize op that errored in resolution
+  // (e.g. an unresolvable name). All are per-op results, not a batch abort (mirroring
   // the executor's per-op error semantics), so the batch still "completes" with those
   // error results already in `merged`.
   if (toRun.length === 0) {

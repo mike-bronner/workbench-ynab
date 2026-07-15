@@ -79,6 +79,7 @@
 const { STATUS, OUTCOME, isStale } = require('./apply-executor');
 const { evaluateOperation, evaluateTool } = require('./write-safety-guardrail');
 const { classifyError, isAuthFailure, throwOnErrorResult } = require('./write-error');
+const { clearedBalanceContribution } = require('./transaction-shape');
 
 /**
  * The two reconcile sub-actions. Exhaustive — anything else is an error.
@@ -213,6 +214,41 @@ async function loadDeferredSchemas(toolSearch, options = {}) {
   throw lastErr;
 }
 
+/** Whether a cleared status counts toward an account's CLEARED balance. */
+function countsTowardCleared(status) {
+  return status === 'cleared' || status === 'reconciled';
+}
+
+/**
+ * The net cleared-balance impact (integer milliunits) of a mark_cleared op, from
+ * the perspective of the account being reconciled (GAP-19 / #49 ledger math):
+ *  - each target's amount comes from the shared clearedBalanceContribution — a
+ *    SPLIT parent contributes the SUM of its subtransaction amounts (never the
+ *    parent amount), and a TRANSFER LEG belonging to another account contributes
+ *    0 (each leg counts once, in its own account — no double-counting);
+ *  - only a cleared-MEMBERSHIP change moves the cleared balance: entering
+ *    (uncleared → cleared/reconciled) adds the contribution, leaving subtracts
+ *    it, and cleared → reconciled changes nothing;
+ *  - returns null (never a fabricated number) when any target is unresolved or
+ *    its amount cannot be computed from the live read.
+ * @param {object} op a mark_cleared reconcile op.
+ * @param {Map<string, object>} byId live transactions indexed by id.
+ * @returns {number|null}
+ */
+function markClearedBalanceImpact(op, byId) {
+  const afterCounts = countsTowardCleared(op.after.cleared);
+  let total = 0;
+  for (const id of op.transaction_ids) {
+    const t = byId.get(id);
+    if (t == null) return null;
+    if (countsTowardCleared(t.cleared) === afterCounts) continue;
+    const contribution = clearedBalanceContribution(t, op.account_id);
+    if (contribution === null) return null;
+    total += afterCounts ? contribution : -contribution;
+  }
+  return total;
+}
+
 /**
  * Drift detection for a reconcile op (both sub-actions). Stale = live state no
  * longer matches the op's `before` snapshot the human approved against.
@@ -271,9 +307,13 @@ async function processMarkCleared(op, ctx, live, opId) {
     return { transaction_id: id, before: t ? t.cleared : null, after: target };
   });
 
+  // Cleared-balance impact of the op, split/transfer-correct (GAP-19 / #49).
+  // Null when the live read carries no amounts — reported as unknown, never guessed.
+  const clearedBalanceImpact = markClearedBalanceImpact(op, byId);
+
   if (dryRun) {
     return result(opId, STATUS.APPLIED, true, {
-      simulated: true, sub_action: SUB_ACTIONS.MARK_CLEARED, diff,
+      simulated: true, sub_action: SUB_ACTIONS.MARK_CLEARED, diff, cleared_balance_impact: clearedBalanceImpact,
     });
   }
 
@@ -296,7 +336,7 @@ async function processMarkCleared(op, ctx, live, opId) {
     // port wrappers apply, code-enforced on the reconcile mutation rather than prose-only.
     const apiResult = throwOnErrorResult(await applyOp(toolName, payload, op));
     return result(opId, STATUS.APPLIED, false, {
-      tool: toolName, sub_action: SUB_ACTIONS.MARK_CLEARED, diff, result: apiResult == null ? null : apiResult,
+      tool: toolName, sub_action: SUB_ACTIONS.MARK_CLEARED, diff, cleared_balance_impact: clearedBalanceImpact, result: apiResult == null ? null : apiResult,
     });
   } catch (err) {
     // Classify the mutation failure (#50): error_class drives the batch-level
@@ -566,6 +606,7 @@ module.exports = {
   isInputValidationError,
   loadDeferredSchemas,
   isReconcileStale,
+  markClearedBalanceImpact,
   processReconcileOp,
   applyReconcile,
   reconcileHandler,
