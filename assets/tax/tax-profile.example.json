@@ -9,13 +9,6 @@
   "schemaVersion": "1",
   "filingStatus": "mfj",
   "taxYear": 2025,
-  "standardDeductionByYear": {
-    "single": { "2024": 14600, "2025": 15000 },
-    "mfj": { "2024": 29200, "2025": 30000 },
-    "mfs": { "2024": 14600, "2025": 15000 },
-    "hoh": { "2024": 21900, "2025": 22500 },
-    "qw": { "2024": 29200, "2025": 30000 }
-  },
   "businessEntities": [
     {
       "id": "biz-a",
