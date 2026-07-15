@@ -72,11 +72,20 @@ symlink loop, `ENOTDIR`, …) means the true target is unknowable, so the path i
 treated as outside every root and refused, never vouched for with a fabricated
 in-root path.
 
-The containment error message is **redacted**: it echoes only the caller's own
-supplied path with the home directory masked to `~`, and drops the absolute
-resolved roots from the human-readable text (they survive, redacted, in the
-structured `params` for debugging). This keeps the OS username / absolute
-plugin-data path from leaking should the failure cross an MCP/JSON-RPC boundary.
+The **failure envelope is redacted end-to-end**: every path echoed on an error
+path — the `containment` message (which echoes only the caller's own supplied
+path, with the absolute resolved roots dropped from the human-readable text and
+surviving, redacted, in the structured `params`), the pre-existing `io`/`parse`
+messages (including the OS-level `err.message`, which embeds the raw path), the
+`sources` field of a failure result, and the packaging-invariant throw messages
+— has the home directory masked to `~`. **Both spellings** of home are masked:
+as reported by `os.homedir()` *and* as the kernel canonicalizes it, so the
+masking holds even when `$HOME` itself resolves through a symlink or macOS
+firmlink (`homedir() !== realpath(homedir())`). This keeps the OS username /
+absolute plugin-data path from leaking should the failure cross an MCP/JSON-RPC
+boundary. On a **successful** load, `sources` deliberately carries the real,
+unredacted paths — callers consume those programmatically, and success values
+never ride an error message across that boundary.
 
 **Residual race (known limitation).** The guard canonicalizes the path, then the
 read reopens that same raw path (the check-then-open shape the AC prescribes). A
@@ -244,7 +253,13 @@ with a structured `containment` failure and a wiped result envelope; a symlink
 loop (`ELOOP`) proves the canonicalizer **fails closed** on a non-`ENOENT` error;
 and the `YNAB_DATA_DIR` env seam is exercised as an allowlist root, with a bare
 escaping `profilePath` (no `dataDir`) confirmed not to widen it. The tests' own
-`mkdtemp` dir is admitted via the explicit `dataDir` root.
+`mkdtemp` dir is admitted via the explicit `dataDir` root. Out-of-process tests
+(a spawned child with a re-pointed `$HOME`) pin the redaction under a
+**symlinked home** — neither the raw nor the canonical home spelling leaks from
+a `containment` or `io` failure envelope — and guard the real **no-options
+default chain**: a profile under `~/.claude/plugins/data/…` loads and merges
+with zero options, and a fresh install with no data dir at all still resolves
+defaults-only rather than tripping containment.
 
 > **Not tax advice.** This tool organizes financial data and surfaces tax-relevant
 > signals. It is not a substitute for professional tax advice.

@@ -688,9 +688,126 @@ test('(#169) a bare profilePath with no dataDir does NOT widen the allowlist —
   assertContained(loadProfile({ profilePath: join(OUTSIDE, 'secret.json') }));
 });
 
+// --- (#169) redaction + the real no-options default chain (out-of-process) ---
+// The loader captures homedir() at module import, and os.homedir() honours
+// $HOME on POSIX — so these run in a spawned child (the stdout-discipline
+// pattern above) whose $HOME points at a controlled fixture. The module writes
+// nothing to stdout, so the child's stdout is exactly the JSON the script
+// prints — parsing it doubles as one more stdout-discipline check.
+
+const REAL_HOME = mkdtempSync(join(tmpdir(), 'ynab-tax-realhome-'));
+// A home that is ITSELF a symlink (homedir() !== realpath(homedir()) — the
+// macOS-firmlink / NFS / containerized-home shape the redaction must survive).
+const LINK_HOME = join(tmpdir(), `ynab-tax-linkhome-${basename(REAL_HOME)}`);
+symlinkSync(REAL_HOME, LINK_HOME);
+const FAKE_HOME = mkdtempSync(join(tmpdir(), 'ynab-tax-home-'));
+const EMPTY_HOME = mkdtempSync(join(tmpdir(), 'ynab-tax-emptyhome-'));
+
+// Child env: $HOME re-pointed, and the loader's env seams STRIPPED so the child
+// exercises the genuine no-options resolution chain, not an inherited override.
+function childEnv(home) {
+  const env = { ...process.env, HOME: home };
+  delete env.YNAB_DATA_DIR;
+  delete env.YNAB_TAX_PROFILE_FILE;
+  return env;
+}
+
+function loadInChild(home, optionsLiteral, resultExpr) {
+  const script = `
+    import(${JSON.stringify(pathToFileURL(MODULE_PATH).href)}).then((m) => {
+      const r = m.loadProfile(${optionsLiteral});
+      process.stdout.write(JSON.stringify(${resultExpr}));
+    });
+  `;
+  const res = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env: childEnv(home) });
+  assert.equal(res.status, 0, res.stderr);
+  return JSON.parse(res.stdout);
+}
+
+test('(#169) the containment failure stays redacted when $HOME itself resolves through a symlink', () => {
+  // A path under $HOME but outside both roots → containment failure whose
+  // message echoes the caller's path. With a symlinked home, the RAW spelling
+  // (under LINK_HOME) never matches the canonical home, so a canonical-only
+  // mask ships the absolute path — this pins the both-spellings redaction.
+  const escaping = join(LINK_HOME, 'secret.json');
+  const out = loadInChild(
+    LINK_HOME,
+    `{ profilePath: ${JSON.stringify(escaping)} }`,
+    '{ kind: r.error.kind, message: r.error.message, path: r.error.errors[0].params.path }',
+  );
+  assert.equal(out.kind, 'containment');
+  // Neither spelling of the home dir may leak — raw (as supplied) or canonical
+  // (as resolved). includes() also catches the canonical /private-prefixed form.
+  assert.ok(!out.message.includes(LINK_HOME), `raw home leaked into message: ${out.message}`);
+  assert.ok(!out.message.includes(REAL_HOME), `canonical home leaked into message: ${out.message}`);
+  // The masking branch actually RAN (a no-op redaction would fail here) and the
+  // message agrees with the structured params for the same value.
+  assert.match(out.message, /~[/\\]secret\.json/);
+  assert.equal(out.path, join('~', 'secret.json'));
+});
+
+test('(#169) the io failure envelope is redacted under a symlinked $HOME (message + sources)', () => {
+  // An unreadable profile INSIDE the allowlist exercises the pre-existing
+  // io path: both the composed message (Node's err.message embeds the raw
+  // path) and the echoed sources must mask every home spelling.
+  const dataDir = join(REAL_HOME, '.claude', 'plugins', 'data', 'workbench-ynab-claude-workbench');
+  mkdirSync(dataDir, { recursive: true });
+  const unreadable = join(dataDir, 'tax-profile.json');
+  writeFileSync(unreadable, JSON.stringify(validBase()));
+  chmodSync(unreadable, 0o000);
+  try {
+    const out = loadInChild(
+      LINK_HOME,
+      '{}',
+      '{ kind: r.ok ? null : r.error.kind, message: r.ok ? "" : r.error.message, profileSource: r.ok ? null : r.sources.profile }',
+    );
+    assert.equal(out.kind, 'io');
+    assert.ok(!out.message.includes(LINK_HOME) && !out.message.includes(REAL_HOME), `home leaked into io message: ${out.message}`);
+    assert.ok(!out.profileSource.includes(LINK_HOME) && !out.profileSource.includes(REAL_HOME), `home leaked into failure sources: ${out.profileSource}`);
+  } finally {
+    chmodSync(unreadable, 0o600);
+    rmSync(unreadable);
+  }
+});
+
+test('(#169 / AC#5) zero-options loadProfile still succeeds through the real homedir() chain', () => {
+  // Every other success test passes an explicit dataDir / env seam, so this is
+  // the only guard on the production default: join(homedir(), <data-dir>) must
+  // canonicalize into the allowlist and load. A resolution bug here would flip
+  // every real install to a hard containment refusal — exactly AC#5's line.
+  const dataDir = join(FAKE_HOME, '.claude', 'plugins', 'data', 'workbench-ynab-claude-workbench');
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, 'tax-profile.json'), JSON.stringify({ ...validBase(), filingStatus: 'mfj' }));
+  const out = loadInChild(
+    FAKE_HOME,
+    '{}',
+    '{ ok: r.ok, defaultsOnly: r.defaultsOnly, filingStatus: r.ok ? r.profile.filingStatus : null, error: r.ok ? null : r.error }',
+  );
+  assert.equal(out.ok, true, `expected ok:true through the default chain, got: ${JSON.stringify(out.error)}`);
+  assert.equal(out.defaultsOnly, false);
+  assert.equal(out.filingStatus, 'mfj'); // the user profile actually merged
+});
+
+test('(#169 / AC#5) zero-options defaults-only load succeeds when no data dir exists at all', () => {
+  // Fresh-install state: the plugin-data dir is entirely absent. The dataDir
+  // root canonicalizes via the ENOENT ancestor walk, the missing profile is a
+  // normal defaults-only result — never a containment refusal.
+  const out = loadInChild(
+    EMPTY_HOME,
+    '{}',
+    '{ ok: r.ok, defaultsOnly: r.defaultsOnly, error: r.ok ? null : r.error }',
+  );
+  assert.equal(out.ok, true, `expected defaults-only ok:true, got: ${JSON.stringify(out.error)}`);
+  assert.equal(out.defaultsOnly, true);
+});
+
 // --- cleanup ----------------------------------------------------------------
 
 test.after(() => {
   rmSync(TMP, { recursive: true, force: true });
   rmSync(OUTSIDE, { recursive: true, force: true });
+  rmSync(LINK_HOME, { force: true });
+  rmSync(REAL_HOME, { recursive: true, force: true });
+  rmSync(FAKE_HOME, { recursive: true, force: true });
+  rmSync(EMPTY_HOME, { recursive: true, force: true });
 });
