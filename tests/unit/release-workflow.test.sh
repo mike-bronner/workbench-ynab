@@ -119,19 +119,36 @@ test_release_version_monotonicity_guard() {
 }
 
 test_release_guards_precede_writes() {
-  validate=$(first_line "Version must be SemVer" "$RELEASE")
+  # All three guards (SemVer + tag-exists + monotonicity) live in the single
+  # "Validate version" step — pin that STEP ahead of every write, then pin
+  # each guard's condition INSIDE it. Relocating any one guard below a write
+  # moves its condition out of this step's block and goes red; ordering the
+  # step alone (or one guard's message text, as before) would not.
+  validate=$(first_line "name: Validate version" "$RELEASE")
   bump=$(first_line "name: Bump version" "$RELEASE")
   commit=$(first_line "name: Commit, tag, push" "$RELEASE")
-  [ "$validate" -lt "$bump" ] || fail "SemVer/tag guards (line $validate) must precede the version bump (line $bump)"
+  [ "$validate" -lt "$bump" ] || fail "Validate version step (line $validate) must precede the version bump (line $bump)"
   [ "$bump" -lt "$commit" ] || fail "version bump (line $bump) must precede commit/tag (line $commit)"
+  step=$(step_block "name: Validate version" "name: Set up Node" "$RELEASE")
+  # Needles are literal workflow text — $NEW_VERSION/$CURRENT expand on the runner.
+  # shellcheck disable=SC2016
+  assert_contains "$step" 'if ! [[ "$NEW_VERSION" =~' "the SemVer guard must live inside the Validate version step"
+  # shellcheck disable=SC2016
+  assert_contains "$step" 'if git rev-parse "v$NEW_VERSION"' "the tag-exists guard must live inside the Validate version step"
+  # shellcheck disable=SC2016
+  assert_contains "$step" 'if [ "$NEW_VERSION" = "$CURRENT" ] ||' "the monotonicity guard must live inside the Validate version step"
 }
 
 # --- release.yml: frozen bundle, sole bump target ----------------------------
 
 test_release_bumps_plugin_json_only() {
-  assert_contains "$release" ".claude-plugin/plugin.json" "must bump plugin.json"
-  # Issue #75: the vendored marker is frozen provenance — never a bump target.
   bump_step=$(awk '/name: Bump version/{f=1} f && /name: Run the test suite/{exit} f' "$RELEASE")
+  # Scope the positive assertion to the bump step itself — anywhere-in-file
+  # is satisfied by the header comment alone, so it would stay green even if
+  # the bump were rewritten to target the wrong file. Pinning the write
+  # (`mv` destination) inside the step is what makes this test honest.
+  assert_contains "$bump_step" "mv tmp.json .claude-plugin/plugin.json" "the bump step's write target must be .claude-plugin/plugin.json"
+  # Issue #75: the vendored marker is frozen provenance — never a bump target.
   case "$bump_step" in
     *vendored.json*) fail "the bump step must never touch vendor/ynab-mcp/vendored.json (frozen, issue #75)" ;;
   esac
