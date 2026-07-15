@@ -90,6 +90,13 @@ Two layers keep credentials out of version control:
    proves a synthetic, token-shaped string makes the scan exit non-zero — without
    ever committing such a string.
 
+Beyond the YNAB token, the repo holds exactly one CI secret:
+`DEVELOPER_SETTINGS_TOKEN`, a fine-grained PAT scoped to **Contents: Read and
+write on `mike-bronner/claude-workbench` only**, used by release automation to
+pin the released commit SHA in the workbench marketplace. It lives in GitHub
+Actions secrets (never in the tree) and is documented in
+[`docs/ci.md`](docs/ci.md).
+
 ## Launcher logging policy
 
 The MCP launcher (`bin/launcher.sh`, issue #12) speaks the Model Context Protocol
