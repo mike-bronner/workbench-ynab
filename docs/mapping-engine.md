@@ -88,7 +88,7 @@ Each rule:
 
 | Criterion | Matches |
 | --- | --- |
-| `payeeKeywords: [...]` | ANY keyword against the payee. A plain string is a case-insensitive **substring**; a slash-wrapped string (`"/aws\|gcp/"`) is a case-insensitive **regex** (the `i` flag is always added). A malformed regex degrades to a non-match, never a throw. |
+| `payeeKeywords: [...]` | ANY keyword against the payee. A plain string is a case-insensitive **substring**; a slash-wrapped string (`"/aws\|gcp/"`) is a case-insensitive **regex** (the `i` flag is always added). A malformed regex degrades to a non-match, never a throw — and so does a regex the ReDoS bound rejects (#170): a pattern over 256 chars, a haystack over 1024 chars, or a high-risk shape (nested quantifiers like `(a+)+`, alternation under a quantifier like `(a\|aa)+`, backreferences). Substring keywords are unbounded (linear-time). |
 | `categoryName` | case-insensitive **exact** match |
 | `categoryGroup` | case-insensitive **exact** match |
 | `accountName` | case-insensitive **exact** match |

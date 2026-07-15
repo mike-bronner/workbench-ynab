@@ -18,6 +18,11 @@
 // rather than substituted or thrown on. renderReason() is module-private, so —
 // like the existing {businessEntityId} assertion below — the contract is pinned
 // through the public classify() call.
+//
+// Also covers the bounded ReDoS surface (issue #170): catastrophic-backtracking
+// regex keywords (nested quantifiers, overlapping alternation, backreferences)
+// and over-long patterns/haystacks degrade to a prompt non-match, while normal
+// regex keywords keep matching.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -349,4 +354,47 @@ test('reason template leaves an unknown {token} intact and does not throw', () =
     reason = reasonFor('{payee} at {nope}', { payeeKeywords: ['acme'] }, tx({ payee_name: 'Acme' }));
   });
   assert.equal(reason, 'Acme at {nope}');
+});
+
+// --- issue #170: bounded ReDoS surface in user-rule regex matching -----------
+//
+// A pathological user regex against a crafted haystack must never hang
+// classify(). Unmitigated, /(a+)+$/ against 'a'.repeat(32) + 'b' backtracks
+// ~2^32 times — many seconds to minutes — so the timing assertion below fails
+// loudly (rather than hanging the run forever) if the bound regresses.
+
+test('a catastrophic-backtracking regex keyword returns promptly as a non-match, never a crash', () => {
+  const adversarial = tx({ payee_name: `${'a'.repeat(32)}b` });
+  const started = process.hrtime.bigint();
+  let r;
+  assert.doesNotThrow(() => {
+    r = classify(adversarial, null, { rules: KW(['/(a+)+$/']) });
+  });
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.equal(r.taxLineId, 'unclassified');
+  assert.ok(elapsedMs < 1000, `expected a bounded match, took ${elapsedMs}ms`);
+});
+
+test('other high-risk regex shapes (non-capture nesting, overlapping alternation, backreference) → no match', () => {
+  const adversarial = tx({ payee_name: `${'a'.repeat(32)}b` });
+  for (const evil of ['/(?:a+)*$/', '/(a|aa)+$/', '/(a+)b\\1/']) {
+    assert.equal(classify(adversarial, null, { rules: KW([evil]) }).taxLineId, 'unclassified', `expected ${evil} to be rejected`);
+  }
+});
+
+// The caps are the reason these don't match: each pattern WOULD match its
+// haystack if compiled and tested unbounded.
+test('an over-long regex pattern or haystack yields no match; the substring path stays uncapped', () => {
+  const longPattern = `/${'a'.repeat(300)}/`;
+  assert.equal(classify(tx({ payee_name: 'a'.repeat(400) }), null, { rules: KW([longPattern]) }).taxLineId, 'unclassified');
+  assert.equal(classify(tx({ payee_name: 'x'.repeat(2000) }), null, { rules: KW(['/x/']) }).taxLineId, 'unclassified');
+  // Substring matching is linear — an over-long haystack still substring-matches.
+  assert.equal(classify(tx({ payee_name: 'x'.repeat(2000) }), null, { rules: KW(['xxx']) }).taxLineId, 'schedC.27a');
+});
+
+// The bound must not break legitimate regex rules (per the issue #170 AC).
+test('a normal regex keyword still matches under the ReDoS bound', () => {
+  const r = classify(tx({ payee_name: 'AWS Cloud Services' }), null, { rules: KW(['/aws|gcp/i']) });
+  assert.equal(r.taxLineId, 'schedC.27a');
+  assert.equal(r.matchedRuleId, 'kw');
 });
