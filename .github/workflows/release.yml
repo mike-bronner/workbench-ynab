@@ -1,0 +1,187 @@
+name: Release
+
+# One-button release (issue #74, design M5-5): validates the version, proves
+# the vendored YNAB MCP bundle is intact and boots offline, bumps the plugin
+# version, runs the full test suite, commits to main, tags, and creates a
+# GitHub release. Triggered manually from the Actions tab — pass the new
+# version (e.g. "1.0.0") and a one-line description.
+#
+# Ported from workbench-bujo's release.yml, adapted for this repo's
+# vendored-bundle layout: there is NO wheel build here. The vendored bundle
+# (vendor/ynab-mcp/index.cjs) is committed and FROZEN — this workflow never
+# re-fetches or rebuilds it; it only VERIFIES the bundle still matches the
+# SHA-256 recorded in vendored.json (issue #72) before anything is written.
+#
+# Version model (issue #75, README "Versioning"): the release workflow's SOLE
+# bump target is .claude-plugin/plugin.json. The vendored bundle's version
+# marker (vendor/ynab-mcp/vendored.json) is frozen, provenance-only, and is
+# never touched by release automation.
+#
+# After this workflow completes, `update-marketplace-sha.yml` pins the new
+# commit SHA in the claude-workbench marketplace. Releases created with
+# GITHUB_TOKEN emit sterile events that do NOT auto-trigger `on: release`
+# workflows (GitHub anti-recursion rule), so the last step chains it
+# explicitly via `gh workflow run`.
+#
+# Idempotency: re-running with a version that already exists fails on the
+# tag-exists guard. Versions go forward only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "New version (e.g. 1.0.0) — no `v` prefix"
+        required: true
+        type: string
+      description:
+        description: "Commit + release headline (e.g. 'tax-aware review + write-back gate')"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Guard rails first — both checks run BEFORE any write occurs.
+      - name: Validate version
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must be SemVer X.Y.Z, got: $NEW_VERSION"
+            exit 1
+          fi
+          if git rev-parse "v$NEW_VERSION" >/dev/null 2>&1; then
+            echo "::error::Tag v$NEW_VERSION already exists — versions go forward only"
+            exit 1
+          fi
+          CURRENT=$(jq -r '.version' .claude-plugin/plugin.json)
+          echo "Current: $CURRENT → New: $NEW_VERSION"
+
+      # System node only — deliberately NO npm install, so no node_modules
+      # lands on the resolution path and the offline-boot proof below stays
+      # faithful (the bundle must be self-contained with NONE present).
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      # Bundle integrity gate (issues #72 + #78): the committed bundle's
+      # SHA-256 must match vendored.json AND the bundle must boot offline from
+      # a node_modules-free sandbox. tests/lib/bundle-integrity.sh is the
+      # single source of truth for both assertions; a mismatch fails the
+      # release here, before any commit or tag exists.
+      - name: Verify vendored bundle integrity (checksum + offline boot)
+        run: |
+          set -uo pipefail
+          source tests/lib/bundle-integrity.sh
+          if ! bi_assert_integrity "$PWD"; then
+            echo "::error::Vendored bundle integrity check failed — the committed bundle has drifted from vendored.json or no longer boots offline. Re-vendor deliberately via bin/revendor.sh; never hand-edit the bundle."
+            exit 1
+          fi
+
+      # Sole bump target: .claude-plugin/plugin.json (issue #75). The vendored
+      # bundle version marker (vendor/ynab-mcp/vendored.json) is frozen
+      # provenance and is intentionally NOT bumped.
+      - name: Bump version
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          jq --arg v "$NEW_VERSION" '.version = $v' .claude-plugin/plugin.json > tmp.json
+          mv tmp.json .claude-plugin/plugin.json
+          echo "Bumped .claude-plugin/plugin.json to $(jq -r '.version' .claude-plugin/plugin.json)"
+
+      # scripts/test.sh is the single suite entrypoint — it discovers the raw
+      # bash suite and the Node suite, including the offline-boot proof
+      # (tests/integration/offline-boot.test.sh, issue #78). Runs with NO
+      # node_modules present, matching test.yml's dependency-free job.
+      - name: Run the test suite
+        run: bash scripts/test.sh
+
+      # The assets/ integration suite needs its own deps (ajv, ajv-formats) —
+      # run it AFTER the dependency-free suite so node_modules never exists
+      # while the offline-boot proof runs (mirrors test.yml's job split).
+      - name: Run the assets integration suite
+        run: |
+          set -euo pipefail
+          npm --prefix assets ci
+          npm --prefix assets test
+
+      - name: Commit, tag, push
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+          DESC: ${{ inputs.description }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .claude-plugin/plugin.json
+
+          if git diff --cached --quiet; then
+            echo "::error::No changes staged — version bump must have been a no-op"
+            exit 1
+          fi
+
+          git commit -m "chore: 🔖 Release v${NEW_VERSION} — ${DESC}"
+          git tag -a "v${NEW_VERSION}" -m "v${NEW_VERSION} — ${DESC}"
+          git push origin main
+          git push origin "v${NEW_VERSION}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ inputs.version }}
+          DESC: ${{ inputs.description }}
+        run: |
+          set -euo pipefail
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "v${NEW_VERSION}" | head -1 || true)
+          if [ -n "$PREV_TAG" ]; then
+            COMPARE="**Diff:** \`${PREV_TAG}...v${NEW_VERSION}\`"
+          else
+            COMPARE=""
+          fi
+
+          gh release create "v${NEW_VERSION}" \
+            --title "v${NEW_VERSION} — ${DESC}" \
+            --notes "## What changed
+
+          ${DESC}
+
+          ${COMPARE}
+
+          ## Vendored bundle
+
+          The YNAB MCP bundle (\`vendor/ynab-mcp/index.cjs\`) is frozen at the version recorded in \`vendor/ynab-mcp/vendored.json\` and verified against its committed SHA-256 before this release was tagged. Releases never rebuild or re-fetch it.
+
+          ## Auto-pin
+
+          \`update-marketplace-sha.yml\` will pin v${NEW_VERSION}'s commit SHA in the workbench marketplace."
+
+      # Releases created with GITHUB_TOKEN emit sterile events — they do NOT
+      # trigger the on-release marketplace pin (GitHub anti-recursion rule).
+      # Chain it explicitly; API-dispatched workflow_dispatch is exempt.
+      - name: Trigger marketplace SHA pin
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ inputs.version }}
+        run: |
+          gh workflow run update-marketplace-sha.yml \
+            -R "${GITHUB_REPOSITORY}" -f tag="v${NEW_VERSION}"

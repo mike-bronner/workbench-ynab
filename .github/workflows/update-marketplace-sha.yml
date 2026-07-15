@@ -1,0 +1,126 @@
+name: Update marketplace SHA
+
+# Pins this plugin's commit SHA in the claude-workbench marketplace's
+# .claude-plugin/marketplace.json, so every release becomes reproducibly
+# installable by SHA rather than floating on the default branch.
+#
+# CROSS-REPO WRITE: this workflow pushes to mike-bronner/claude-workbench.
+#
+# Runs automatically on every published release. Also supports manual
+# backfill via workflow_dispatch (pass a tag to pin that release's SHA;
+# omit to use the latest release).
+#
+# Prerequisites (documented in docs/ci.md):
+# - Secret `DEVELOPER_SETTINGS_TOKEN` set at the repo or org level.
+#   Fine-grained PAT with Contents: Read and write on
+#   mike-bronner/claude-workbench (sufficient to push the pin commit).
+#
+# Portability: this workflow reads the plugin's own name from
+# .claude-plugin/plugin.json, so it drops into any workbench plugin repo
+# unchanged.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to pin (defaults to latest release)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-marketplace-sha
+  cancel-in-progress: false
+
+jobs:
+  pin-sha:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout plugin repo
+        uses: actions/checkout@v4
+
+      - name: Resolve plugin name + tag SHA
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          PLUGIN_NAME=$(jq -r '.name' .claude-plugin/plugin.json)
+          echo "plugin_name=$PLUGIN_NAME" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          elif [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG=$(gh release view --repo "${{ github.repository }}" --json tagName --jq '.tagName')
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          # Resolve tag ref → commit SHA, dereferencing annotated tags.
+          REF=$(gh api "repos/${{ github.repository }}/git/refs/tags/$TAG")
+          OBJECT_TYPE=$(echo "$REF" | jq -r '.object.type')
+          OBJECT_SHA=$(echo "$REF" | jq -r '.object.sha')
+
+          if [ "$OBJECT_TYPE" = "tag" ]; then
+            SHA=$(gh api "repos/${{ github.repository }}/git/tags/$OBJECT_SHA" --jq '.object.sha')
+          else
+            SHA="$OBJECT_SHA"
+          fi
+
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Resolved $PLUGIN_NAME @ $TAG → $SHA"
+
+      - name: Update marketplace.json
+        env:
+          GH_TOKEN: ${{ secrets.DEVELOPER_SETTINGS_TOKEN }}
+          PLUGIN_NAME: ${{ steps.resolve.outputs.plugin_name }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          # Never silently skip the push: an unset/empty token is a hard error.
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::DEVELOPER_SETTINGS_TOKEN secret is not set."
+            echo "Create a fine-grained PAT with Contents: Read and write on mike-bronner/claude-workbench"
+            echo "and add it as DEVELOPER_SETTINGS_TOKEN in this repo's secrets. See docs/ci.md."
+            exit 1
+          fi
+
+          git clone --depth 1 \
+            "https://x-access-token:${GH_TOKEN}@github.com/mike-bronner/claude-workbench.git" \
+            marketplace
+          cd marketplace
+
+          FILE=".claude-plugin/marketplace.json"
+
+          # No matching marketplace entry is a silent no-op (exit 0): the pin
+          # only updates an existing row, it never creates one.
+          if ! jq -e --arg name "$PLUGIN_NAME" '.plugins | map(.name) | index($name)' "$FILE" >/dev/null; then
+            echo "No entry named $PLUGIN_NAME in $FILE — nothing to pin"
+            exit 0
+          fi
+
+          # Set source.sha for the matching plugin; leave others untouched.
+          jq --arg name "$PLUGIN_NAME" --arg sha "$SHA" \
+             '.plugins |= map(if .name == $name then .source.sha = $sha else . end)' \
+             "$FILE" > "$FILE.tmp"
+          mv "$FILE.tmp" "$FILE"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$FILE"
+
+          if git diff --cached --quiet; then
+            echo "No changes — $PLUGIN_NAME is already pinned to $SHA"
+            exit 0
+          fi
+
+          git commit -m "chore: pin $PLUGIN_NAME to $TAG ($SHA)"
+          git push
