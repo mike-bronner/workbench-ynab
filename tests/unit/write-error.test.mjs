@@ -24,6 +24,7 @@ const {
   extractStatus,
   classifyError,
   remediation,
+  throwOnErrorResult,
 } = require(join(ROOT, 'assets', 'write-error.js'));
 
 // --- extractStatus: pull an HTTP status off the many shapes a port error takes --
@@ -116,6 +117,52 @@ test('a 5xx → unknown class AND unknown applied_state (may have landed server-
 test('a statusless network/timeout error → unknown class, unknown applied_state, null status', () => {
   assert.deepEqual(classifyError(new Error('socket hang up')), {
     error_class: ERROR_CLASS.UNKNOWN, applied_state: APPLIED_STATE.UNKNOWN, status: null,
+  });
+});
+
+// --- the client-side rate-limit throttle: statusless, code-matched (#166) --------
+
+test('the vendored client-side throttle → rate_limited, but applied_state stays unknown', () => {
+  // The vendored MCP's client-side limiter rejects BEFORE any HTTP call: its envelope
+  // (createRateLimitErrorResponse) carries the RATE_LIMIT_EXCEEDED code but NO
+  // `(HTTP 429)` token. Mirror that exact shape and route it through
+  // throwOnErrorResult, as every write-path port wrapper does.
+  const envelope = {
+    isError: true,
+    content: [{
+      type: 'text',
+      text: JSON.stringify({
+        error: {
+          code: 'RATE_LIMIT_EXCEEDED',
+          message: 'Rate limit exceeded. Please wait before making additional requests.',
+          details: { resetTime: '2026-07-15T00:00:00.000Z', remaining: 0 },
+        },
+      }, null, 2),
+    }],
+  };
+  const err = (() => { try { throwOnErrorResult(envelope); } catch (e) { return e; } })();
+  // rate_limited (not unknown) — but applied_state stays unknown (never not_applied):
+  // the request never reached YNAB, and the conservative resume semantics (#48) hold.
+  assert.deepEqual(classifyError(err), {
+    error_class: ERROR_CLASS.RATE_LIMITED, applied_state: APPLIED_STATE.UNKNOWN, status: null,
+  });
+  // The user now gets the rate-limit remediation, not the generic resume guidance.
+  assert.match(remediation(classifyError(err).error_class), /wait for the rate-limit window to reset/);
+});
+
+test('a structured RATE_LIMIT_EXCEEDED code classifies rate_limited without an envelope', () => {
+  // Structured fields are authoritative: the code string on the error itself is
+  // enough, no mcpResult or message text required.
+  assert.deepEqual(classifyError({ code: 'RATE_LIMIT_EXCEEDED' }), {
+    error_class: ERROR_CLASS.RATE_LIMITED, applied_state: APPLIED_STATE.UNKNOWN, status: null,
+  });
+});
+
+test('a recovered HTTP status always wins over the code-string fallback', () => {
+  // The code match is consulted ONLY when the error is genuinely statusless; an
+  // error that also carries a real status classifies status-driven, as before.
+  assert.deepEqual(classifyError(new Error('gateway error HTTP/503 mentioning RATE_LIMIT_EXCEEDED')), {
+    error_class: ERROR_CLASS.UNKNOWN, applied_state: APPLIED_STATE.UNKNOWN, status: 503,
   });
 });
 
