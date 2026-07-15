@@ -228,7 +228,7 @@ assert_contains "smuggled token stays verbatim in the name slot (_render_templat
 # the outer loop (#126 review blocker). The current call sites only pass literal
 # `{{persona}}` / `{{generated_at}}`, so the CLI can't reach this — the helper is
 # exercised directly by SOURCING persona.sh, whose dispatch is guarded by
-# BASH_SOURCE==$0 (same pattern as tests/unit/test-audit-log.sh sourcing
+# BASH_SOURCE==$0 (same pattern as tests/unit/audit-log.test.sh sourcing
 # bin/audit-log.sh) so sourcing defines the functions without running the CLI.
 
 # render_tmpl_timed <secs> <template> <key> <val> [<key> <val>...]

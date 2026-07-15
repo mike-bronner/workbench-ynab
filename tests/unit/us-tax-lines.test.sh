@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unit tests for assets/tax/us-tax-lines.json — the default US tax ruleset
-# line catalog (issue #21). Run directly: tests/unit/test-us-tax-lines.sh
+# line catalog (issue #21). Run directly: tests/unit/us-tax-lines.test.sh
 #
 # Style mirrors tests/launcher.test.sh: raw bash, `set -u`, PASS/FAIL
 # counters, and a non-zero exit when anything fails. Slots into the repo-wide

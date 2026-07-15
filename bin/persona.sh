@@ -418,7 +418,7 @@ render_signoff() {
 
 # Dispatch the CLI only when executed directly. When another script sources this
 # file to unit-test the helpers (e.g. _render_template / html_escape), the guard
-# is false so the CLI never runs — the same pattern as tests/unit/test-audit-log.sh
+# is false so the CLI never runs — the same pattern as tests/unit/audit-log.test.sh
 # sourcing bin/audit-log.sh.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   case "${1:-name}" in

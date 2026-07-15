@@ -4,7 +4,7 @@
 # the quarterly due-date schedule with its uneven income-attribution boundaries,
 # and the estimated-tax payment-detection matchers.
 #
-# Style mirrors tests/unit/test-us-tax-lines.sh: raw bash, `set -u`, PASS/FAIL
+# Style mirrors tests/unit/us-tax-lines.test.sh: raw bash, `set -u`, PASS/FAIL
 # counters, jq for JSON. node/ajv are not assumed present.
 
 set -u

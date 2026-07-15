@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Unit tests for bin/audit-log.sh — the append-only write-back audit log.
-# Run directly: tests/unit/test-audit-log.sh
+# Run directly: tests/unit/audit-log.test.sh
 #
-# Style mirrors tests/unit/test-config.sh: raw bash, `set -u`, PASS/FAIL
+# Style mirrors tests/unit/config.test.sh: raw bash, `set -u`, PASS/FAIL
 # counters, a mktemp sandbox, and a non-zero exit when anything fails. The
 # writer is exercised in isolation (no YNAB) by sourcing the helper and calling
 # its functions, exactly as test-config.sh sources bin/config.sh.

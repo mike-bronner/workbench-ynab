@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unit tests for the repo's version model — issue #75.
-# Run directly: tests/unit/test-version.sh
+# Run directly: tests/unit/version.test.sh
 #
 # Style mirrors tests/launcher.test.sh: raw bash, `set -u`, PASS/FAIL
 # counters, and a non-zero exit when anything fails. Slots into the repo-wide
