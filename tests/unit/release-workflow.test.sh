@@ -44,7 +44,12 @@ first_line() { grep -nF -- "$1" "$2" | head -1 | cut -d: -f1; }
 # guard_block <pattern> <file> — the guard's if-block: from the first line
 # containing <pattern> (fixed string) through the closing `fi`. Asserting the
 # guard's `exit` INSIDE this block (not anywhere in the file) is what makes
-# the fail/no-op tests honest: delete the exit and the test goes red.
+# the fail/no-op tests honest: delete the exit and the test goes red. Keying
+# the block on the guard's CONDITION text (polarity included) extends that
+# honesty one level up: invert the `if` with a one-character `!` and the
+# pattern no longer matches, the block comes back empty, and the assertions
+# inside it go red — so condition, error, and exit are pinned as one unit.
+# (Patterns must stay backslash-free: awk -v escape-processes backslashes.)
 guard_block() { awk -v pat="$1" 'index($0, pat){f=1} f{print} f && /^ *fi$/{exit}' "$2"; }
 
 # step_block <step-name> <next-step-name> <file> — everything from one step's
@@ -69,18 +74,28 @@ test_release_dispatch_inputs() {
 # --- release.yml: guards run before any write --------------------------------
 
 test_release_semver_guard() {
-  assert_contains "$release" '^[0-9]+\.[0-9]+\.[0-9]+$' "must validate SemVer X.Y.Z"
-  assert_contains "$release" "::error::Version must be SemVer" "rejection must be an ::error:: annotation"
-  guard=$(guard_block "Version must be SemVer" "$RELEASE")
+  # Key the block on the condition itself, `!` included: inverting the guard
+  # (accept garbage, reject valid versions) empties the block and goes red.
+  # The needle is the literal workflow text — $NEW_VERSION expands on the runner.
+  # shellcheck disable=SC2016
+  guard=$(guard_block 'if ! [[ "$NEW_VERSION" =~' "$RELEASE")
+  # shellcheck disable=SC2016
+  [ -n "$guard" ] || fail 'the SemVer guard must reject on: if ! [[ "$NEW_VERSION" =~ ...'
+  assert_contains "$guard" '=~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]' "must validate SemVer X.Y.Z"
+  assert_contains "$guard" "::error::Version must be SemVer" "rejection must be an ::error:: annotation"
   assert_contains "$guard" "exit 1" "an invalid version must exit 1, not merely print the error"
 }
 
 test_release_tag_exists_guard() {
+  # Key the block on the condition, polarity and all: `if git rev-parse`
+  # succeeds when the tag EXISTS — an inverted `!` would re-tag existing
+  # versions and abort every legitimate release.
   # The needle is the literal workflow text — $NEW_VERSION expands on the runner.
   # shellcheck disable=SC2016
-  assert_contains "$release" 'git rev-parse "v$NEW_VERSION"' "must check the tag does not already exist"
-  assert_contains "$release" "::error::Tag v" "tag-exists rejection must be an ::error:: annotation"
-  guard=$(guard_block "::error::Tag v" "$RELEASE")
+  guard=$(guard_block 'if git rev-parse "v$NEW_VERSION"' "$RELEASE")
+  # shellcheck disable=SC2016
+  [ -n "$guard" ] || fail 'the tag-exists guard must abort on: if git rev-parse "v$NEW_VERSION"'
+  assert_contains "$guard" "::error::Tag v" "tag-exists rejection must be an ::error:: annotation"
   assert_contains "$guard" "exit 1" "an existing tag must exit 1, not merely print the error"
 }
 
@@ -118,10 +133,13 @@ test_release_verifies_bundle_before_tagging() {
   verify=$(first_line "bi_assert_integrity" "$RELEASE")
   commit=$(first_line "name: Commit, tag, push" "$RELEASE")
   [ "$verify" -lt "$commit" ] || fail "bundle integrity (line $verify) must gate before commit/tag (line $commit)"
-  assert_contains "$release" "::error::Vendored bundle integrity check failed" "a drift must fail with a descriptive error"
-  # The integrity step runs WITHOUT `set -e`, so this exit 1 is the SOLE thing
-  # that aborts a release on a drifted bundle — it must exist inside the guard.
-  guard=$(guard_block "Vendored bundle integrity check failed" "$RELEASE")
+  # The integrity step runs WITHOUT `set -e`, so this guard is the SOLE thing
+  # that aborts a release on a drifted bundle. Key the block on the condition,
+  # `!` included: inverted, a drifted bundle sails through while a good one
+  # is blocked — the block comes back empty and the test goes red.
+  guard=$(guard_block 'if ! bi_assert_integrity' "$RELEASE")
+  [ -n "$guard" ] || fail "the integrity guard must abort on: if ! bi_assert_integrity"
+  assert_contains "$guard" "::error::Vendored bundle integrity check failed" "a drift must fail with a descriptive error"
   assert_contains "$guard" "exit 1" "a drifted bundle must exit 1 — nothing else stops the release"
 }
 
@@ -158,8 +176,11 @@ test_release_annotated_tag_and_pushes() {
 
 test_release_fails_on_noop_bump() {
   # An empty stage means the bump silently did nothing — the release must
-  # abort, not commit an empty change and tag it.
-  guard=$(guard_block "No changes staged" "$RELEASE")
+  # abort, not commit an empty change and tag it. Key the block on the
+  # condition: `git diff --cached --quiet` succeeds when NOTHING is staged —
+  # an inverted `!` would abort every real release and tag the no-ops.
+  guard=$(guard_block 'if git diff --cached --quiet' "$RELEASE")
+  [ -n "$guard" ] || fail "the no-op guard must abort on: if git diff --cached --quiet"
   assert_contains "$guard" "::error::" "a no-op bump must be an ::error:: annotation"
   assert_contains "$guard" "exit 1" "a no-op bump must exit 1"
 }
@@ -176,9 +197,17 @@ test_release_creates_github_release() {
   # covered by test_release_chains_marketplace_pin_explicitly).
   notes=$(step_block "name: Create GitHub release" "name: Trigger marketplace SHA pin" "$RELEASE")
   assert_contains "$notes" "update-marketplace-sha.yml" "release notes must mention the auto-pin"
-  # AC #8: the diff must be a clickable compare URL, not inline code.
+  # AC #8: the diff must be a clickable compare URL, not inline code — and it
+  # must only be BUILT when a previous tag exists (first release has nothing
+  # to compare against; an ungated build emits a malformed Diff line). Keying
+  # the block on the gate pins both: drop the gate and the block is empty.
+  # Needles are literal workflow text — ${PREV_TAG}/${NEW_VERSION} expand on the runner.
   # shellcheck disable=SC2016
-  assert_contains "$notes" '/compare/${PREV_TAG}...v${NEW_VERSION}' "diff must be a compare URL GitHub renders as a link"
+  compare=$(guard_block 'if [ -n "$PREV_TAG" ]' "$RELEASE")
+  # shellcheck disable=SC2016
+  [ -n "$compare" ] || fail 'the compare URL must be gated on: if [ -n "$PREV_TAG" ]'
+  # shellcheck disable=SC2016
+  assert_contains "$compare" '/compare/${PREV_TAG}...v${NEW_VERSION}' "diff must be a compare URL GitHub renders as a link, built only when a previous tag exists"
   # PREV_TAG must exclude exactly the new tag: unanchored grep would also drop
   # e.g. v1.2.30 when releasing v1.2.3.
   # shellcheck disable=SC2016
@@ -210,7 +239,17 @@ test_pin_triggers() {
   assert_contains "$pin" "workflow_dispatch:" "must support manual backfill"
   assert_contains "$pin" "tag:" "backfill must accept an optional tag input"
   assert_contains "$pin" "required: false" "the tag input must be optional (defaults to latest release)"
-  assert_contains "$pin" "gh release view" "omitted tag must fall back to the latest release"
+  # The latest-release lookup must be the ELSE fallback of the tag resolution
+  # (dispatch with no tag). Rewired into the release-event branch, a real
+  # backfill would resolve an empty TAG from the empty $RELEASE_TAG and
+  # corrupt the pin — so scope the assertion to the else branch itself.
+  # The needle is the literal workflow text — $EVENT_NAME expands on the runner.
+  # shellcheck disable=SC2016
+  resolve=$(guard_block 'if [ "$EVENT_NAME" = "release" ]' "$PIN")
+  # shellcheck disable=SC2016
+  [ -n "$resolve" ] || fail 'tag resolution must branch on: if [ "$EVENT_NAME" = "release" ]'
+  fallback=$(printf '%s\n' "$resolve" | awk '/^ *else$/{f=1} f')
+  assert_contains "$fallback" "gh release view" "omitted tag must fall back to the latest release in the else branch"
 }
 
 test_pin_reads_plugin_name_from_manifest() {
@@ -223,9 +262,17 @@ test_pin_reads_plugin_name_from_manifest() {
 
 test_pin_dereferences_annotated_tags() {
   assert_contains "$pin" "git/refs/tags/" "must resolve the tag ref"
-  # The needle is the literal workflow text — $OBJECT_SHA expands on the runner.
+  # The deref must live INSIDE the annotated-tag branch — release.yml creates
+  # annotated tags (git tag -a), so this branch runs on EVERY release. An
+  # inverted polarity would pin the tag-object SHA, not the commit SHA, to
+  # the public marketplace. Keying the block on the condition pins both.
+  # Needles are literal workflow text — $OBJECT_TYPE/$OBJECT_SHA expand on the runner.
   # shellcheck disable=SC2016
-  assert_contains "$pin" 'git/tags/$OBJECT_SHA' "must dereference annotated tags to the commit SHA"
+  deref=$(guard_block 'if [ "$OBJECT_TYPE" = "tag" ]' "$PIN")
+  # shellcheck disable=SC2016
+  [ -n "$deref" ] || fail 'the deref must be gated on: if [ "$OBJECT_TYPE" = "tag" ]'
+  # shellcheck disable=SC2016
+  assert_contains "$deref" 'git/tags/$OBJECT_SHA' "must dereference annotated tags to the commit SHA inside the tag branch"
 }
 
 test_pin_targets_marketplace() {
