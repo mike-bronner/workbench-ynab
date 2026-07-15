@@ -96,7 +96,8 @@ lychee --offline --include-fragments --no-progress 'assets/*.md' 'docs/*.md'
 From the Actions tab, run **Release** with two inputs:
 
 - `version` — the new SemVer, **no `v` prefix** (e.g. `1.0.0`). Non-`X.Y.Z`
-  versions and already-tagged versions are rejected before anything is
+  versions, already-tagged versions, and versions not strictly greater than
+  the current `plugin.json` version are all rejected before anything is
   written; versions go forward only.
 - `description` — the one-line commit + release headline.
 
@@ -128,8 +129,9 @@ a commit SHA, dereferencing annotated tags.
 
 It is a **silent no-op (exit 0)** when the marketplace has no entry with this
 plugin's name, or when `source.sha` is already the resolved SHA. It **fails
-loudly** when the `DEVELOPER_SETTINGS_TOKEN` secret is missing — it never
-silently skips the push.
+loudly** when the `DEVELOPER_SETTINGS_TOKEN` secret is missing or when the
+marketplace manifest is malformed (`.plugins` missing or not an array) — it
+never silently skips the push.
 
 ## The `DEVELOPER_SETTINGS_TOKEN` secret
 

@@ -108,6 +108,15 @@ jobs:
 
           FILE=".claude-plugin/marketplace.json"
 
+          # Shape first, membership second: jq -e exits 1 on "name not found"
+          # but 5 on a runtime error (.plugins missing/null/not an array), and
+          # `if !` cannot tell them apart — without this guard a malformed
+          # upstream marketplace.json would read as a benign "nothing to pin".
+          if ! jq -e '.plugins | type == "array"' "$FILE" >/dev/null; then
+            echo "::error::$FILE is malformed — .plugins is missing or not an array. Refusing to treat a broken marketplace manifest as 'nothing to pin'."
+            exit 1
+          fi
+
           # No matching marketplace entry is a silent no-op (exit 0): the pin
           # only updates an existing row, it never creates one.
           if ! jq -e --arg name "$PLUGIN_NAME" '.plugins | map(.name) | index($name)' "$FILE" >/dev/null; then

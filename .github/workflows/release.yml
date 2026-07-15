@@ -24,7 +24,9 @@ name: Release
 # explicitly via `gh workflow run`.
 #
 # Idempotency: re-running with a version that already exists fails on the
-# tag-exists guard. Versions go forward only.
+# tag-exists guard, and the monotonicity guard rejects any version that is
+# not strictly greater than the current plugin.json version. Versions go
+# forward only.
 
 on:
   workflow_dispatch:
@@ -72,6 +74,16 @@ jobs:
             exit 1
           fi
           CURRENT=$(jq -r '.version' .claude-plugin/plugin.json)
+          # "Versions go forward only" (header + docs/ci.md), enforced: the
+          # tag-exists guard above only rejects already-TAGGED versions —
+          # without this compare, a lower never-tagged version (current
+          # 2.3.0, dispatch 1.0.0) would downgrade plugin.json, tag it, and
+          # pin the marketplace to the regression. sort -V picks the max;
+          # the new version must be it, and strictly newer than current.
+          if [ "$NEW_VERSION" = "$CURRENT" ] || [ "$(printf '%s\n%s\n' "$CURRENT" "$NEW_VERSION" | sort -V | tail -1)" != "$NEW_VERSION" ]; then
+            echo "::error::Versions go forward only — current version is $CURRENT, got: $NEW_VERSION"
+            exit 1
+          fi
           echo "Current: $CURRENT → New: $NEW_VERSION"
 
       # System node only — deliberately NO npm install, so no node_modules
