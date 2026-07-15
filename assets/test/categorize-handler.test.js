@@ -797,6 +797,22 @@ test('(#49) the shape gate is re-derived from the LIVE read — a snapshot omitt
   assert.equal(callTool.calls.length, 0, 'no update-transaction call may target a live transfer leg');
 });
 
+test('(#49) the live re-derivation catches a SPLIT PARENT too — a snapshot omitting subtransactions cannot land a category on a live split parent', async () => {
+  // Mirrors the live transfer-leg test above for the gate's OTHER disjunct
+  // (isSplitTransaction(live)): `before` carries NO shape fields, so the snapshot
+  // gate passes — but the LIVE transaction is a split parent. A regression that
+  // dropped only isSplitTransaction from the live gate must fail here.
+  const liar = op({ id: 'op-liar-split', transaction_id: 't-liar-split' });
+  const callTool = spy(() => ({ ok: true }));
+  const readLiveState = spy((o) => ({ ...clone(o.before), subtransactions: [{ id: 's1' }, { id: 's2' }] }));
+  const out = await applyCategorize(changeset([liar]), baseCtx({ dryRun: false, callTool, readLiveState }));
+
+  assert.equal(out.results[0].status, STATUS.ERROR); // terminal — never dispatched
+  assert.match(out.results[0].detail.message, /transaction_shape_live_mismatch/);
+  assert.match(out.results[0].detail.message, /split parent/);
+  assert.equal(callTool.calls.length, 0, 'no update-transaction call may target a live split parent');
+});
+
 test('(#49) a subtransaction-target op (before carries NO non-empty subtransactions) passes the gate — the specific leg is categorizable', async () => {
   // Targeting a split's LEG by its own id: the before describes the leg, so an
   // empty subtransactions array must not trip the split-parent gate.
