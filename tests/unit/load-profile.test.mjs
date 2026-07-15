@@ -19,7 +19,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -584,55 +584,108 @@ test('(follow-up) the freeze is deep — nested-beyond-two-levels values are fro
 // --- (#169) path containment: reads outside the allowlisted roots refused ---
 // The loader's allowlist is the resolved dataDir (here: the explicit TMP root)
 // plus the bundled assets/tax/ dir. Everything below targets a SECOND temp dir
-// outside both roots, holding a schema-VALID profile — proving each refusal
-// comes from containment, never from validation.
+// outside both roots, holding SCHEMA-VALID files — proving each refusal comes
+// from containment, never from validation or a missing file. `OUTSIDE/dir` is a
+// real directory a symlink can point at; `secret.json`, `evil-defaults.json`,
+// and `evil-schema.json` are all real, readable, would-succeed-if-read files, so
+// a guard that silently skipped containment would surface as a *successful* read
+// (or a parse/schema error), never as the `containment` failure asserted here.
 
 const OUTSIDE = mkdtempSync(join(tmpdir(), 'ynab-tax-outside-'));
+mkdirSync(join(OUTSIDE, 'dir'));
 writeFileSync(join(OUTSIDE, 'secret.json'), JSON.stringify(validBase()));
+// A real, valid default ruleset copied out to the escaping root, so the escaping
+// -defaultsPath test proves containment beats a genuinely readable file.
+writeFileSync(join(OUTSIDE, 'evil-defaults.json'), readFileSync(join(ROOT, 'assets', 'tax', 'us-tax-lines.json'), 'utf8'));
+writeFileSync(join(OUTSIDE, 'evil-schema.json'), JSON.stringify(SCHEMA));
 
-test('(#169) a `..`-traversal profilePath escaping the dataDir root is refused unread', () => {
-  const escaping = join(TMP, '..', basename(OUTSIDE), 'secret.json');
-  const r = loadProfile({ dataDir: TMP, profilePath: escaping });
+// Assert a full containment refusal: right kind/keyword, redacted message, and a
+// wiped result envelope (profile + provenance null) — so a regression that
+// returned `containment` alongside a non-null profile is caught, not just the
+// error.kind.
+function assertContained(r) {
   assert.equal(r.ok, false);
   assert.equal(r.error.kind, 'containment');
   assert.equal(r.error.errors[0].keyword, 'containment');
   assert.match(r.error.message, /outside the allowed roots/);
   assert.equal(r.profile, null);
   assert.equal(r.provenance, null);
+}
+
+test('(#169) a `..`-traversal profilePath escaping the dataDir root is refused unread', () => {
+  // Built by string concat, NOT path.join — join() would normalize the `..`
+  // away at construction time, so the `..` must survive to reach canonicalize.
+  const escaping = `${TMP}/../${basename(OUTSIDE)}/secret.json`;
+  assertContained(loadProfile({ dataDir: TMP, profilePath: escaping }));
 });
 
 test('(#169) a symlink inside the root pointing outside it is refused (realpath, not lexical)', () => {
   const link = join(TMP, 'sneaky-link.json');
   symlinkSync(join(OUTSIDE, 'secret.json'), link);
-  const r = loadProfile({ dataDir: TMP, profilePath: link });
-  assert.equal(r.ok, false);
-  assert.equal(r.error.kind, 'containment');
-  assert.equal(r.profile, null);
+  assertContained(loadProfile({ dataDir: TMP, profilePath: link }));
+});
+
+test('(#169) a symlink-then-`..` path (kernel-order realpath) is refused — the exact bypass', () => {
+  // `dir-link` → OUTSIDE/dir (outside every root). `dir-link/../secret.json`
+  // resolves, in KERNEL order (symlink first, then `..`), to OUTSIDE/secret.json.
+  // A lexical-first canonicalizer collapses `dir-link/..` to TMP and wrongly
+  // vouches for it as in-root — the #169 arbitrary-read bypass. Built by string
+  // concat so the `..` reaches the guard intact.
+  const dirLink = join(TMP, 'dir-link');
+  symlinkSync(join(OUTSIDE, 'dir'), dirLink);
+  assertContained(loadProfile({ dataDir: TMP, profilePath: `${dirLink}/../secret.json` }));
+});
+
+test('(#169) a symlink-then-`..` path to an ABSENT target is also refused (fallback stays kernel-order)', () => {
+  const dirLink = join(TMP, 'dir-link-absent');
+  symlinkSync(join(OUTSIDE, 'dir'), dirLink);
+  assertContained(loadProfile({ dataDir: TMP, profilePath: `${dirLink}/../does-not-exist.json` }));
 });
 
 test('(#169) an absolute profilePath outside every root is refused even though the file exists and is valid', () => {
-  const r = loadProfile({ dataDir: TMP, profilePath: join(OUTSIDE, 'secret.json') });
-  assert.equal(r.ok, false);
-  assert.equal(r.error.kind, 'containment');
+  assertContained(loadProfile({ dataDir: TMP, profilePath: join(OUTSIDE, 'secret.json') }));
 });
 
 test('(#169) an escaping profilePath is refused even when ABSENT (no existence oracle)', () => {
-  const r = loadProfile({ dataDir: TMP, profilePath: join(OUTSIDE, 'does-not-exist.json') });
-  assert.equal(r.ok, false);
-  assert.equal(r.error.kind, 'containment');
+  assertContained(loadProfile({ dataDir: TMP, profilePath: join(OUTSIDE, 'does-not-exist.json') }));
+});
+
+test('(#169) an unresolvable path (symlink loop, ELOOP) fails CLOSED, not open', () => {
+  // realpath throws a non-ENOENT error here. The guard must treat an
+  // unresolvable target as outside every root — never fabricate an in-root path.
+  const a = join(TMP, 'loop-a');
+  const b = join(TMP, 'loop-b');
+  symlinkSync(b, a);
+  symlinkSync(a, b);
+  assertContained(loadProfile({ dataDir: TMP, profilePath: a }));
 });
 
 test('(#169) an escaping defaultsPath is a structured containment failure, not a packaging throw', () => {
-  const r = loadProfile({ dataDir: TMP, profilePath: ABSENT, defaultsPath: join(OUTSIDE, 'evil-defaults.json') });
-  assert.equal(r.ok, false);
-  assert.equal(r.error.kind, 'containment');
+  assertContained(loadProfile({ dataDir: TMP, profilePath: ABSENT, defaultsPath: join(OUTSIDE, 'evil-defaults.json') }));
 });
 
 test('(#169) an escaping schemaPath is a structured containment failure', () => {
   const p = writeProfile(validBase());
-  const r = loadProfile({ dataDir: TMP, profilePath: p, schemaPath: join(OUTSIDE, 'evil-schema.json') });
-  assert.equal(r.ok, false);
-  assert.equal(r.error.kind, 'containment');
+  assertContained(loadProfile({ dataDir: TMP, profilePath: p, schemaPath: join(OUTSIDE, 'evil-schema.json') }));
+});
+
+test('(#169) the YNAB_DATA_DIR env seam defines a root — a contained profile under it loads', () => {
+  const p = writeProfile({ ...validBase(), filingStatus: 'mfj' });
+  const r = loadProfile({ env: { YNAB_DATA_DIR: TMP, YNAB_TAX_PROFILE_FILE: p } });
+  assert.equal(r.ok, true);
+  assert.equal(r.profile.filingStatus, 'mfj');
+});
+
+test('(#169) an escaping profile via the YNAB_TAX_PROFILE_FILE env seam is refused', () => {
+  const r = loadProfile({ env: { YNAB_DATA_DIR: TMP, YNAB_TAX_PROFILE_FILE: join(OUTSIDE, 'secret.json') } });
+  assertContained(r);
+});
+
+test('(#169) a bare profilePath with no dataDir does NOT widen the allowlist — escaping is refused', () => {
+  // No dataDir/env override: the roots stay pinned to the production default
+  // (canonical plugin-data dir + assets/tax/). A bare escaping profilePath must
+  // still be refused — it never joins the allowlist on its own.
+  assertContained(loadProfile({ profilePath: join(OUTSIDE, 'secret.json') }));
 });
 
 // --- cleanup ----------------------------------------------------------------

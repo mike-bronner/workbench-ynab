@@ -42,10 +42,16 @@ The loader forwards caller-supplied paths (`options.profilePath` / `dataDir` /
 `defaultsPath` / `schemaPath`, or their env seams) into `readFileSync` — left
 unchecked, a latent **arbitrary-file-read** primitive if any of those values ever
 arrive from a less-trusted source. So before **any** read, the requested path is
-**canonicalized** (`realpath` on the raw path — resolving `..` traversal and
-symlinks to the true target the kernel would open; a not-yet-existing target is
-canonicalized via its deepest existing ancestor) and must fall inside an explicit
-allowlist of roots:
+**canonicalized** — resolved to the exact target the kernel would `open(2)`,
+using the native `realpathSync.native` so symlinks are dereferenced in true
+kernel order (**symlink first, then `..`**). This matters: the non-native
+`realpathSync` collapses `..` *lexically* before walking any symlink, so a
+`link/../x` path (`link` → outside the roots) would canonicalize to the wrong,
+in-root location while `readFileSync` opens the real, outside target — the two
+would disagree and the read would win. A not-yet-existing target is canonicalized
+via its deepest existing ancestor (walking up on the raw path, never a lexical
+`resolve`, so the same kernel ordering holds). The canonicalized path must fall
+inside an explicit allowlist of roots:
 
 1. the **resolved data dir** — `options.dataDir` → `YNAB_DATA_DIR` → the
    canonical plugin-data dir;
@@ -58,6 +64,28 @@ the existence probe, so an escaping request fails deterministically whether or
 not its target exists (no existence oracle). An escaping `defaultsPath` /
 `schemaPath` is likewise a structured `containment` failure — only a
 missing-but-contained bundled file remains the packaging-invariant **throw**.
+
+The canonicalizer **fails closed**: only a not-yet-existing target (`ENOENT`) is
+resolved via its deepest existing ancestor — a read of a missing path `ENOENT`s
+regardless, so nothing leaks. Any *other* `realpath` error (`EACCES`, `ELOOP`, a
+symlink loop, `ENOTDIR`, …) means the true target is unknowable, so the path is
+treated as outside every root and refused, never vouched for with a fabricated
+in-root path.
+
+The containment error message is **redacted**: it echoes only the caller's own
+supplied path with the home directory masked to `~`, and drops the absolute
+resolved roots from the human-readable text (they survive, redacted, in the
+structured `params` for debugging). This keeps the OS username / absolute
+plugin-data path from leaking should the failure cross an MCP/JSON-RPC boundary.
+
+**Residual race (known limitation).** The guard canonicalizes the path, then the
+read reopens that same raw path (the check-then-open shape the AC prescribes). A
+filesystem mutation *between* check and read — swapping a component for a symlink
+in that window — could still redirect the read; closing it fully needs an
+open-then-`fstat` / `O_NOFOLLOW`-style read, out of scope here. It is not
+reachable through the only caller (paths come from env/defaults, not an attacker
+who also controls the filesystem mid-call). The guard defends against malicious
+*paths*, not concurrent filesystem *mutation*.
 
 **How the test seams stay usable without weakening production:** naming a root is
 an embedding-level trust decision. An explicitly-passed `options.dataDir` (or
@@ -209,10 +237,14 @@ annotation keys never leaking into the frozen profile, a too-deep override yield
 a structured `depth` failure instead of a crash, the `propertyNames` container-path
 convention, the `schemaVersion` `oneOf` arms, the `io`/missing-ruleset/missing-schema
 failure paths, and a beyond-two-levels deep-freeze assertion. The path-containment
-allowlist (#169) is covered too: `..`-traversal, symlink-escape, absolute-escape,
-and escaping `defaultsPath`/`schemaPath` requests all refused with a structured
-`containment` failure, with the tests' own `mkdtemp` dir admitted via the explicit
-`dataDir` root.
+allowlist (#169) is covered too: `..`-traversal, symlink-escape, the combined
+**symlink-then-`..`** kernel-order bypass (both existing- and absent-target),
+absolute-escape, and escaping `defaultsPath`/`schemaPath` requests all refused
+with a structured `containment` failure and a wiped result envelope; a symlink
+loop (`ELOOP`) proves the canonicalizer **fails closed** on a non-`ENOENT` error;
+and the `YNAB_DATA_DIR` env seam is exercised as an allowlist root, with a bare
+escaping `profilePath` (no `dataDir`) confirmed not to widen it. The tests' own
+`mkdtemp` dir is admitted via the explicit `dataDir` root.
 
 > **Not tax advice.** This tool organizes financial data and surfaces tax-relevant
 > signals. It is not a substitute for professional tax advice.
