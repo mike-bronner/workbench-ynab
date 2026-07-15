@@ -272,6 +272,33 @@ test('createReadCache caches the FULL paginated set, counting one call per page'
   assert.equal(cache.stats().calls, 3, 'a cached read adds no calls');
 });
 
+test('createReadCache shares one in-flight pull across concurrent same-key gets (no double-fetch)', async () => {
+  // Pre-#158, get() only cache.set() AFTER awaiting collectAllPages, memoizing
+  // the resolved entry — so two concurrent gets for the same key both missed
+  // the cache and double-fetched, and a divergent later outcome (e.g. a
+  // 429-degraded partial) could clobber the earlier entry. Memoizing the
+  // in-flight promise closes that hole in the fetch-once (AC #2) contract.
+  // Both get() calls below are issued before either pull resolves.
+  let calls = 0;
+  const call = async () => { calls += 1; return { transactions: [{ id: 'a' }], has_more: false }; };
+  const cache = createReadCache(call);
+
+  const [first, second] = await Promise.all([cache.get('transactions'), cache.get('transactions')]);
+  assert.equal(calls, 1, 'two concurrent gets share exactly one underlying call');
+  assert.equal(cache.stats().calls, 1);
+  assert.equal(second, first, 'both concurrent callers receive the same frozen entry');
+  assert.deepEqual(first.items, [{ id: 'a' }]);
+});
+
+test('ANNOTATION is pinned to the verbatim acceptance-criteria literal', () => {
+  // The degraded-partial tests assert annotationFor(...) === ANNOTATION, but
+  // both sides come from the module under test — a typo edited into the
+  // constant would pass the whole suite. Pinning the verbatim AC #3 wording
+  // here makes any wording edit fail loud instead (#158; same shape as #156's
+  // config-snippet pin).
+  assert.equal(ANNOTATION, '[YNAB rate limit hit — partial review]');
+});
+
 test('createReadCache degrades to a labelled partial review when 429 retries exhaust', async () => {
   const { sleep } = recordingSleep();
   let calls = 0;
@@ -320,6 +347,26 @@ test('createReadCache lets a non-rate-limit error surface (no false degrade)', a
   const cache = createReadCache(call);
   await assert.rejects(() => cache.get('accounts'), /revoked token/);
   assert.deepEqual(cache.partials(), [], 'a 401 is not a partial-review condition');
+});
+
+test('createReadCache does not memoize a non-rate-limit failure — a later get retries', async () => {
+  // Promise memoization (#158) must not change the sequential error semantics:
+  // pre-#158 a thrown (non-429) pull left the cache empty, so a later get()
+  // re-fetched. The rejected in-flight promise is therefore evicted, never
+  // served as a poisoned cache entry to every subsequent caller.
+  let calls = 0;
+  const call = async () => {
+    calls += 1;
+    if (calls === 1) throw new Error('revoked token (401)');
+    return { accounts: [{ id: 'a1' }], has_more: false };
+  };
+  const cache = createReadCache(call);
+
+  await assert.rejects(() => cache.get('accounts'), /revoked token/);
+  const r = await cache.get('accounts');
+  assert.deepEqual(r.items, [{ id: 'a1' }], 'the failed pull was not memoized — the retry fetched');
+  assert.equal(calls, 2);
+  assert.deepEqual(cache.partials(), [], 'a plain failure never marks the resource partial');
 });
 
 test('createReadCache rejects a non-scalar param (no silent cache-key collision)', async () => {
