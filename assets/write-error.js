@@ -19,7 +19,11 @@
  * and a thrown MCP/HTTP error can surface its status in several shapes, so the
  * extractor is deliberately defensive — a thrown value crossing back from an
  * external API is a trust boundary. Structured fields are authoritative; a status
- * token in the message is only a last resort.
+ * token in the message is only a last resort. One deliberate exception to the
+ * status-driven rule: the vendored MCP's CLIENT-SIDE rate-limit throttle rejects
+ * before any HTTP call, so its envelope is genuinely statusless — that single
+ * case is recognized by its `RATE_LIMIT_EXCEEDED` code string instead (#166; see
+ * `isClientRateLimit`).
  *
  * Dependency-free by design (no Ajv, no MCP coupling): it is pure and so gates in
  * CI as `tests/unit/write-error.test.mjs`, unlike the Ajv-backed executor whose
@@ -35,7 +39,7 @@
 const ERROR_CLASS = Object.freeze({
   AUTH_REVOKED: 'auth_revoked', // HTTP 401 — token revoked, expired, or invalid.
   INSUFFICIENT_SCOPE: 'insufficient_scope', // HTTP 403 — token lacks write scope.
-  RATE_LIMITED: 'rate_limited', // HTTP 429 — too many requests.
+  RATE_LIMITED: 'rate_limited', // HTTP 429 — or the vendored MCP's statusless client-side throttle (#166).
   UNKNOWN: 'unknown', // anything else: a 4xx data error, a 5xx, or a statusless network failure.
 });
 
@@ -123,7 +127,35 @@ function extractStatus(err) {
 }
 
 /**
- * Classify a thrown port error into the audit-trail shape.
+ * Whether a thrown error is the vendored YNAB MCP's CLIENT-SIDE rate-limit
+ * throttle. That limiter rejects BEFORE any HTTP call is made, so its envelope
+ * (`createRateLimitErrorResponse`) carries no `(HTTP 429)` token for
+ * `statusFromText` to recover — only the machine-readable code
+ * `RATE_LIMIT_EXCEEDED`. Matching that exact code token (the structured
+ * `err.code` first, then the retained `err.mcpResult` envelope or the message)
+ * is a deliberate, NARROW vendor coupling — an exact code string, never a fuzzy
+ * text search — accepted (#166) so a real rate-limit event is audited as
+ * `rate_limited` with its wait-for-reset remediation instead of falling to the
+ * `unknown` catch-all. Consulted only when no HTTP status was recovered: a
+ * status-carrying error always classifies status-driven, per the module's
+ * "structured fields are authoritative" rule.
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isClientRateLimit(err) {
+  if (err == null || typeof err !== 'object') return false;
+  if (err.code === 'RATE_LIMIT_EXCEEDED') return true;
+  const message = typeof err.message === 'string' ? err.message : '';
+  const envelope = err.mcpResult != null ? safeStringify(err.mcpResult) : '';
+  return /\bRATE_LIMIT_EXCEEDED\b/.test(message) || /\bRATE_LIMIT_EXCEEDED\b/.test(envelope);
+}
+
+/**
+ * Classify a thrown port error into the audit-trail shape. Status-driven first;
+ * the one statusless exception is the client-side rate-limit throttle (#166),
+ * whose `applied_state` stays `unknown` via the null status — deliberately NOT
+ * `not_applied`, so the conservative resume semantics (#48) are preserved even
+ * though the request never reached YNAB.
  * @param {unknown} err
  * @returns {{error_class:string, applied_state:string, status:number|null}}
  */
@@ -133,6 +165,7 @@ function classifyError(err) {
   if (status === 401) error_class = ERROR_CLASS.AUTH_REVOKED;
   else if (status === 403) error_class = ERROR_CLASS.INSUFFICIENT_SCOPE;
   else if (status === 429) error_class = ERROR_CLASS.RATE_LIMITED;
+  else if (status == null && isClientRateLimit(err)) error_class = ERROR_CLASS.RATE_LIMITED;
   else error_class = ERROR_CLASS.UNKNOWN;
 
   const applied_state = status != null && status >= 400 && status < 500
