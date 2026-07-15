@@ -48,5 +48,9 @@
       "cron": "0 8 * * *",
       "enabled": true
     }
+  },
+  "classification": {
+    "highThreshold": 0.85,
+    "mediumThreshold": 0.6
   }
 }

@@ -106,9 +106,11 @@ sections=(
   "Recommended Actions"
   "Tax Summary YTD"
 )
-[ "${#sections[@]}" -eq 12 ] \
-  && { printf 'ok   — section checklist enumerates exactly 12 sections\n'; pass=$((pass + 1)); } \
-  || { printf 'FAIL — section checklist is not 12 entries (%d)\n' "${#sections[@]}"; fail=$((fail + 1)); }
+if [ "${#sections[@]}" -eq 12 ]; then
+  printf 'ok   — section checklist enumerates exactly 12 sections\n'; pass=$((pass + 1))
+else
+  printf 'FAIL — section checklist is not 12 entries (%d)\n' "${#sections[@]}"; fail=$((fail + 1))
+fi
 for s in "${sections[@]}"; do
   assert_present "section present: $s" "$s"
 done
@@ -142,9 +144,11 @@ slots=(
   "SLOT:section-12-tax-summary"
   "SLOT:footer-persona"
 )
-[ "${#slots[@]}" -eq 14 ] \
-  && { printf 'ok   — slot checklist enumerates exactly 14 slots\n'; pass=$((pass + 1)); } \
-  || { printf 'FAIL — slot checklist is not 14 entries (%d)\n' "${#slots[@]}"; fail=$((fail + 1)); }
+if [ "${#slots[@]}" -eq 14 ]; then
+  printf 'ok   — slot checklist enumerates exactly 14 slots\n'; pass=$((pass + 1))
+else
+  printf 'FAIL — slot checklist is not 14 entries (%d)\n' "${#slots[@]}"; fail=$((fail + 1))
+fi
 for slot in "${slots[@]}"; do
   assert_present "slot referenced: $slot" "$slot"
 done

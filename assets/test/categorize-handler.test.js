@@ -705,3 +705,122 @@ test('a callTool failure becomes a per-op error and the rest of the batch still 
   assert.equal(byId['op-1'].detail.message, 'YNAB 500');
   assert.equal(byId['op-2'].status, STATUS.APPLIED);
 });
+
+// --- (GAP-19 / #49) transaction-shape gate: flag, never auto-modify ----------
+
+test('(#49) a split PARENT and a transfer LEG are routed to human_review_required in dry-run — no tool call, not even category resolution', async () => {
+  // Name-only `after`s (no pre-resolved category_id): a gutted gate would have to
+  // resolve them via listCategories, so the zero-calls assertion below discriminates.
+  const splitParent = op({
+    id: 'op-split', transaction_id: 't-split',
+    before: { category_id: null, category_name: null, subtransactions: [{ id: 's1' }, { id: 's2' }] },
+    after: { category_name: 'Groceries' },
+  });
+  const transferLeg = op({
+    id: 'op-leg', transaction_id: 't-leg',
+    before: { category_id: null, category_name: null, transfer_account_id: 'acct-savings' },
+    after: { category_name: 'Groceries' },
+  });
+  const callTool = spy(() => ({ ok: true }));
+  const listCategories = spy(() => [{ id: 'c1', name: 'Groceries' }]);
+  const out = await applyCategorize(changeset([splitParent, transferLeg]), baseCtx({ callTool, listCategories }));
+
+  assert.equal(out.ok, true); // per-op routing, not a batch abort
+  assert.equal(out.dry_run, true);
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId['op-split'].status, STATUS.HUMAN_REVIEW_REQUIRED);
+  assert.equal(byId['op-split'].detail.phase, 'shape');
+  assert.equal(byId['op-split'].detail.reason, 'split_parent_ambiguous_category');
+  assert.equal(byId['op-leg'].status, STATUS.HUMAN_REVIEW_REQUIRED);
+  assert.equal(byId['op-leg'].detail.reason, 'transfer_leg_category_reserved');
+  // The gate runs BEFORE resolution: both ops carry name-only `after`s, so a
+  // gutted gate would have needed listCategories — zero calls proves the gate
+  // fired first. (No callTool assertion: dry-run never dispatches, so it would
+  // be vacuously true regardless of the gate.)
+  assert.equal(listCategories.calls.length, 0);
+});
+
+test('(#49) in a REAL apply, a shape-flagged op never reaches the executor — the rest of the batch still applies', async () => {
+  const leg = op({
+    id: 'op-leg', transaction_id: 't-leg',
+    before: { category_id: null, category_name: null, transfer_transaction_id: 't-other-leg' },
+  });
+  const normal = op({ id: 'op-ok', transaction_id: 't-ok' });
+  const callTool = spy(() => ({ ok: true }));
+  const out = await applyCategorize(changeset([leg, normal]), baseCtx({ dryRun: false, callTool }));
+
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId['op-leg'].status, STATUS.HUMAN_REVIEW_REQUIRED);
+  assert.equal(byId['op-leg'].detail.reason, 'transfer_leg_category_reserved');
+  assert.equal(byId['op-ok'].status, STATUS.APPLIED);
+  // Every dispatched payload addresses ONLY the normal op's transaction.
+  assert.ok(callTool.calls.length > 0);
+  for (const [, payload] of callTool.calls) {
+    assert.ok(!JSON.stringify(payload).includes('t-leg'), 'flagged transaction must never be dispatched');
+  }
+});
+
+test('(#49 / AC3) in a REAL apply, a split PARENT never reaches dispatch — its id is absent from every dispatched payload', async () => {
+  // The handler's isSplitTransaction gate is the SOLE layer stopping a split
+  // parent (the guardrail has no split-parent rule), so it must be proven at the
+  // dispatch boundary, not just in dry-run.
+  const splitParent = op({
+    id: 'op-split', transaction_id: 't-split',
+    before: { category_id: null, category_name: null, subtransactions: [{ id: 's1' }, { id: 's2' }] },
+  });
+  const normal = op({ id: 'op-ok', transaction_id: 't-ok' });
+  const callTool = spy(() => ({ ok: true }));
+  const out = await applyCategorize(changeset([splitParent, normal]), baseCtx({ dryRun: false, callTool }));
+
+  const byId = Object.fromEntries(out.results.map((r) => [r.op_id, r]));
+  assert.equal(byId['op-split'].status, STATUS.HUMAN_REVIEW_REQUIRED);
+  assert.equal(byId['op-split'].detail.reason, 'split_parent_ambiguous_category');
+  assert.equal(byId['op-ok'].status, STATUS.APPLIED);
+  // Every dispatched payload addresses ONLY the normal op's transaction.
+  assert.ok(callTool.calls.length > 0);
+  for (const [, payload] of callTool.calls) {
+    assert.ok(!JSON.stringify(payload).includes('t-split'), 'split parent must never be dispatched');
+  }
+});
+
+test('(#49) the shape gate is re-derived from the LIVE read — a snapshot omitting its shape evidence cannot land a category on a live transfer leg', async () => {
+  // `before` carries NO shape fields (schema-optional), so the snapshot gate
+  // passes — but the LIVE transaction is a transfer leg. The shape-guarded
+  // readLiveState must stop it at the read, before any dispatch.
+  const liar = op({ id: 'op-liar', transaction_id: 't-liar' });
+  const callTool = spy(() => ({ ok: true }));
+  const readLiveState = spy((o) => ({ ...clone(o.before), transfer_account_id: 'acct-2' }));
+  const out = await applyCategorize(changeset([liar]), baseCtx({ dryRun: false, callTool, readLiveState }));
+
+  assert.equal(out.results[0].status, STATUS.ERROR); // terminal — never dispatched
+  assert.match(out.results[0].detail.message, /transaction_shape_live_mismatch/);
+  assert.equal(callTool.calls.length, 0, 'no update-transaction call may target a live transfer leg');
+});
+
+test('(#49) the live re-derivation catches a SPLIT PARENT too — a snapshot omitting subtransactions cannot land a category on a live split parent', async () => {
+  // Mirrors the live transfer-leg test above for the gate's OTHER disjunct
+  // (isSplitTransaction(live)): `before` carries NO shape fields, so the snapshot
+  // gate passes — but the LIVE transaction is a split parent. A regression that
+  // dropped only isSplitTransaction from the live gate must fail here.
+  const liar = op({ id: 'op-liar-split', transaction_id: 't-liar-split' });
+  const callTool = spy(() => ({ ok: true }));
+  const readLiveState = spy((o) => ({ ...clone(o.before), subtransactions: [{ id: 's1' }, { id: 's2' }] }));
+  const out = await applyCategorize(changeset([liar]), baseCtx({ dryRun: false, callTool, readLiveState }));
+
+  assert.equal(out.results[0].status, STATUS.ERROR); // terminal — never dispatched
+  assert.match(out.results[0].detail.message, /transaction_shape_live_mismatch/);
+  assert.match(out.results[0].detail.message, /split parent/);
+  assert.equal(callTool.calls.length, 0, 'no update-transaction call may target a live split parent');
+});
+
+test('(#49) a subtransaction-target op (before carries NO non-empty subtransactions) passes the gate — the specific leg is categorizable', async () => {
+  // Targeting a split's LEG by its own id: the before describes the leg, so an
+  // empty subtransactions array must not trip the split-parent gate.
+  const legTarget = op({
+    id: 'op-sub', transaction_id: 't-sub-leg',
+    before: { category_id: null, category_name: null, subtransactions: [], transfer_account_id: null, transfer_transaction_id: null },
+  });
+  const out = await applyCategorize(changeset([legTarget]), baseCtx());
+  assert.equal(out.results[0].status, STATUS.APPLIED);
+  assert.equal(out.results[0].dry_run, true);
+});

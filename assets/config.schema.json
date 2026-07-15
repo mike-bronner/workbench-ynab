@@ -206,6 +206,27 @@
           "description": "Override for the directory the approval command reads pending change-set proposals from. When omitted, defaults to the proposals/ subdir of the plugin data dir. The weekly review (M4-10) writes proposals here; coordinate the exact filename when M4-10 lands."
         }
       }
+    },
+    "classification": {
+      "type": "object",
+      "description": "Optional confidence-band thresholds for the classification → human-review routing policy (issue #19, docs/confidence-contract.md). Confidence governs proposal composition only — whether an op is pre-filled in the apply proposal; the human approval gate is mandatory and independent of confidence. Omit to accept the conservative shipped defaults (high 0.85, medium 0.60). Read by lib/tax/confidence.mjs loadThresholds(); invalid or contradictory values fall back to the defaults.",
+      "additionalProperties": false,
+      "properties": {
+        "highThreshold": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "default": 0.85,
+          "description": "confidence ≥ highThreshold → band 'high': the op is eligible to be pre-filled in the apply proposal (still subject to the human approval gate)."
+        },
+        "mediumThreshold": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "default": 0.6,
+          "description": "mediumThreshold ≤ confidence < highThreshold → band 'medium': rendered as a 'review suggested' item in the report, never pre-filled into a proposal. Must be strictly less than highThreshold — a contradictory pair falls back to the defaults."
+        }
+      }
     }
   }
 }

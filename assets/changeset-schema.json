@@ -110,7 +110,7 @@
         "before": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Snapshot of the transaction's category before the change.",
+          "description": "Snapshot of the transaction's category before the change. SHOULD also carry the transaction-shape evidence (subtransactions / transfer fields, GAP-19 / #49) so the M4-6 handler and the M4-2 guardrail can refuse a split parent or a transfer leg before any tool call.",
           "required": ["category_id"],
           "properties": {
             "category_id": {
@@ -120,6 +120,19 @@
             "category_name": {
               "type": ["string", "null"],
               "description": "Current category name, or null if uncategorized."
+            },
+            "subtransactions": {
+              "type": "array",
+              "items": { "type": "object" },
+              "description": "Shape evidence: the transaction's subtransactions. Non-empty marks the target as a SPLIT PARENT, which the categorize handler refuses (human review only, GAP-19 / #49)."
+            },
+            "transfer_account_id": {
+              "type": ["string", "null"],
+              "description": "Shape evidence: non-null marks the target as a TRANSFER LEG, which the categorize handler and the guardrail refuse (GAP-19 / #49)."
+            },
+            "transfer_transaction_id": {
+              "type": ["string", "null"],
+              "description": "Shape evidence: non-null marks the target as a TRANSFER LEG, which the categorize handler and the guardrail refuse (GAP-19 / #49)."
             }
           }
         },
@@ -272,6 +285,14 @@
               "type": "string",
               "format": "date",
               "description": "Surviving twin's date (YYYY-MM-DD)."
+            },
+            "transfer_account_id": {
+              "type": ["string", "null"],
+              "description": "Shape evidence: non-null marks the twin as a TRANSFER LEG — the pair is a legitimate inflow/outflow pair, never duplicates, and the M4-8 handler hard-blocks the delete (GAP-19 / #49)."
+            },
+            "transfer_transaction_id": {
+              "type": ["string", "null"],
+              "description": "Shape evidence: non-null marks the twin as a TRANSFER LEG — hard-blocked by the M4-8 handler (GAP-19 / #49)."
             }
           }
         },
@@ -314,6 +335,14 @@
             "import_id": {
               "type": ["string", "null"],
               "description": "YNAB import_id used to confirm the duplicate, if any."
+            },
+            "transfer_account_id": {
+              "type": ["string", "null"],
+              "description": "Shape evidence: non-null marks the victim as a TRANSFER LEG. Deleting one leg of a transfer pair corrupts the linked account's ledger, so the M4-8 handler hard-blocks it before any read or delete (GAP-19 / #49)."
+            },
+            "transfer_transaction_id": {
+              "type": ["string", "null"],
+              "description": "Shape evidence: non-null marks the victim as a TRANSFER LEG — hard-blocked by the M4-8 handler (GAP-19 / #49)."
             }
           }
         },

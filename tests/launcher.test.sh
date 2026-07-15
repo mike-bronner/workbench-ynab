@@ -144,6 +144,8 @@ seed_coreutils "$STUB3"
 make_stub "$STUB3" security 'echo "happy-token-12345"'
 # fake node: record argv + the exported token env to a capture file, emit NOTHING
 # to stdout (a stray stdout byte would corrupt the real MCP handshake), exit 0.
+# Stub bodies below are literal by design: they expand when the stub RUNS.
+# shellcheck disable=SC2016
 make_stub "$STUB3" node \
   'echo "ARGV: $*" > "$NODE_CAPTURE"' \
   'echo "TOKEN_ENV: ${YNAB_ACCESS_TOKEN:-<unset>}" >> "$NODE_CAPTURE"' \
@@ -162,13 +164,16 @@ assert_not_contains "token never appears on stderr (happy path)" "$err" "happy-t
 
 # ── Static guarantees on the script source ────────────────────────────────────
 echo "source guarantees — executable bit, strict mode, exec hand-off:"
-[ -x "$LAUNCHER" ]
-assert_eq "launcher.sh has its executable bit set" "0" "$?"
+x_rc=0; [ -x "$LAUNCHER" ] || x_rc=1
+assert_eq "launcher.sh has its executable bit set" "0" "$x_rc"
 src="$(cat "$LAUNCHER")"
 assert_contains "first non-comment line is 'set -euo pipefail'" \
   "$(grep -vE '^[[:space:]]*#' "$LAUNCHER" | grep -vE '^[[:space:]]*$' | head -1)" \
   "set -euo pipefail"
+# The single-quoted needles are literal launcher source text — never expanded here.
+# shellcheck disable=SC2016
 assert_contains "final statement is 'exec node \"\$BUNDLE\"'" "$src" 'exec node "$BUNDLE"'
+# shellcheck disable=SC2016
 assert_contains "exports YNAB_ACCESS_TOKEN"                   "$src" 'export YNAB_ACCESS_TOKEN="$TOKEN"'
 # Lock the portable SCRIPT_DIR derivation — an AC item, and a refactor to $0 or a
 # hardcoded path would otherwise leave the whole suite green.
@@ -195,6 +200,8 @@ for banned in 'persona' 'config\.sh' 'config\.json' 'YNAB_CONFIG_FILE'; do
   fi
 done
 exports="$(printf '%s' "$code" | grep -E '^[[:space:]]*export ' || true)"
+# The single-quoted needle is literal launcher source text — never expanded here.
+# shellcheck disable=SC2016
 assert_eq "the ONLY export is the package-native token env" \
   'export YNAB_ACCESS_TOKEN="$TOKEN"' "$exports"
 

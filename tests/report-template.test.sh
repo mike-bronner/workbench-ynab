@@ -77,9 +77,11 @@ slots=(
   "<!-- SLOT:section-12-tax-summary -->"
   "<!-- SLOT:footer-persona -->"
 )
-[ "${#slots[@]}" -eq 14 ] \
-  && { printf 'ok   — slot checklist enumerates exactly 14 slots\n'; pass=$((pass + 1)); } \
-  || { printf 'FAIL — slot checklist is not 14 entries (%d)\n' "${#slots[@]}"; fail=$((fail + 1)); }
+if [ "${#slots[@]}" -eq 14 ]; then
+  printf 'ok   — slot checklist enumerates exactly 14 slots\n'; pass=$((pass + 1))
+else
+  printf 'FAIL — slot checklist is not 14 entries (%d)\n' "${#slots[@]}"; fail=$((fail + 1))
+fi
 for slot in "${slots[@]}"; do
   assert_present "slot present: $slot" "$slot"
 done

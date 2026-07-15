@@ -71,8 +71,12 @@ if [ "$token_missing" -eq 1 ]; then
   printf -- '- ❌ YNAB access token not found in the macOS Keychain.\n'
 fi
 if [ "$config_missing" -eq 1 ]; then
+  # Backticks are literal markdown around the path — no expansion intended.
+  # shellcheck disable=SC2016
   printf -- '- ❌ Config not found at `%s`.\n' "$YNAB_CONFIG_FILE"
 fi
+# Backticks are literal markdown around the command — no expansion intended.
+# shellcheck disable=SC2016
 printf '\nSuggest the user run **`/workbench-ynab:setup`** to finish configuring '
 printf 'the plugin. Until then, YNAB budget review and write-back are unavailable.\n'
 

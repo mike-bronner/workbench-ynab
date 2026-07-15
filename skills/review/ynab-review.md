@@ -210,8 +210,13 @@ Which sections run, and over what window, is set by the [tier matrix](#7-tier-ma
    schedule and tax line. Mark guesses as guesses — never present a low-confidence
    classification as settled. → `SLOT:section-1-classification`.
 2. **Duplicate Detection.** Flag likely double-entries (same/near amount + payee
-   + date proximity). List candidates for a later dedup proposal; this skill only
-   surfaces, never fixes. → `SLOT:section-10-anomalies`.
+   + date proximity). **Transfer legs are excluded from the candidate set**
+   (GAP-19 / #49): any transaction with a non-null `transfer_account_id` or
+   `transfer_transaction_id` is one half of a linked inflow/outflow pair — a
+   legitimate pair, never duplicates, no matter how exactly amount/date/payee
+   match — and deleting one leg would corrupt the linked account's ledger (the
+   M4-8 handler hard-blocks it). List the remaining candidates for a later dedup
+   proposal; this skill only surfaces, never fixes. → `SLOT:section-10-anomalies`.
 3. **Cost-Cutting.** Surface recurring/subscription and high-frequency spend
    where a cut is plausible; quantify the monthly/annual saving. → feeds
    `SLOT:section-3-spending` and the action list in `SLOT:section-11-recommendations`.
