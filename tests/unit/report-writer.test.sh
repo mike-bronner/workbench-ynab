@@ -279,6 +279,52 @@ JSON
   assert_contains "$err" "output dir resolved to empty" "error explains the empty output dir"
 }
 
+# #28 cost invariant: .report.output_dir is config-sourced and unbounded, and
+# both the trailing-slash loop and html_escape's {{output_path}} substitution
+# are super-linear on match-dense input (32 KB of '&' ≈ 2 min on bash 3.2) —
+# so an over-1024-byte out_dir is refused loudly BEFORE either pass can run on
+# it. Watchdog-wrapped: a regression would otherwise peg the suite for minutes.
+test_overlong_output_dir_is_rejected_in_bounded_time() {
+  local cfg="$SANDBOX/overlong-dir.json" flood="" i=0 rc=0 pid waited=0
+  while [ "$i" -lt 4096 ]; do flood+='&&&&&&&&'; i=$((i + 1)); done   # ~32 KB of '&'
+  printf '{ "report": { "output_dir": "/tmp/%s" } }' "$flood" > "$cfg"
+  ( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 \
+      >"$SANDBOX/overlong-out" 2>"$SANDBOX/overlong-err" ) &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge 20 ]; then
+      kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+      fail "overlong output_dir overran the 20 s watchdog (unbounded scan regressed)"
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  wait "$pid" || rc=$?
+  assert_eq "2" "$rc" "over-1024-byte output dir → usage error (exit 2)"
+  assert_contains "$(cat "$SANDBOX/overlong-err")" "longer than 1024 bytes" "error names the bound"
+  assert_contains "$(cat "$SANDBOX/overlong-err")" ".report.output_dir" "error names the field"
+}
+
+# #28 round-6 blocker: the 1024-"byte" gate used a bare `${#out_dir}` — a
+# CHARACTER count under a UTF-8 locale — so a ~517-char / ~1.5 KB-byte multibyte
+# output_dir cleared a bound documented as PATH_MAX bytes and rolled on toward
+# mkdir. The ASCII fixture above never catches this (bytes == chars for ASCII);
+# this one FORCES a UTF-8 locale so the char/byte divergence is live regardless
+# of the harness's ambient locale (under LC_ALL=C even the buggy gate refuses it).
+test_multibyte_output_dir_gate_counts_bytes_not_chars() {
+  local cfg="$SANDBOX/multibyte-dir.json" loc unit path i=0 rc=0 err
+  loc="$(locale -a 2>/dev/null | grep -Eim1 '^(c|en_us)\.utf-?8$' || true)"
+  [ -n "$loc" ] || loc="en_US.UTF-8"
+  unit="$(printf '\xe6\x97\xa5')"                              # 日 — 1 char, 3 bytes
+  path="$unit"
+  while [ "$i" -lt 9 ]; do path+="$path"; i=$((i + 1)); done   # 512 chars, 1536 bytes
+  printf '{ "report": { "output_dir": "/tmp/%s" } }' "$path" > "$cfg"
+  err="$( LC_ALL="$loc" YNAB_CONFIG_FILE="$cfg" run_writer_fixture \
+            --tier Weekly --date 2026-06-22 2>&1 >/dev/null )" || rc=$?
+  assert_eq "2" "$rc" "517-char / 1541-byte output dir → usage error (the gate must count bytes)"
+  assert_contains "$err" "longer than 1024 bytes" "error names the byte bound"
+  assert_contains "$err" ".report.output_dir" "error names the field"
+}
+
 # Regression for the write-failure gate (prior round's blocker #1): when the
 # output dir cannot be created — its parent is a regular FILE, so `mkdir -p`
 # fails deterministically for any user — the writer must exit non-zero, write NO

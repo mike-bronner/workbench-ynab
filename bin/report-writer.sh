@@ -274,6 +274,18 @@ out_dir="$(expand_path "$out_dir")" || usage_err "output dir did not fully resol
 # variable) would otherwise make out_path "/YNAB-…html" and write to the
 # filesystem root — refuse it, the symmetric guard to the template's [ -f ] check.
 [ -n "$out_dir" ] || usage_err "output dir resolved to empty after expansion — check .report.output_dir"
+# Byte bound (#28 cost invariant): .report.output_dir is config-sourced and
+# unbounded, and two super-linear passes consume it downstream — the
+# trailing-slash loop just below (measured on bash 3.2: 32 KB of trailing '/'
+# ≈ 15 s, quadratic) and html_escape's `${//}` substitutions at the
+# {{output_path}} scalar slot (32 KB of '&' ≈ 2 min). _byte_len (from the
+# sourced html-escape.sh) is the O(1) C-locale BYTE count — a bare `${#out_dir}`
+# counts CHARACTERS under the ambient UTF-8 locale, letting a multibyte path up
+# to 4× the bound through a gate documented in bytes (issue #28 round-6
+# blocker). 1024 bytes is PATH_MAX on macOS — a longer path could never be
+# created anyway — so refuse loudly naming the field instead of pegging the CPU
+# on the way to a cryptic ENAMETOOLONG.
+[ "$(_byte_len "$out_dir")" -le 1024 ] || usage_err "output dir is longer than 1024 bytes after expansion — check .report.output_dir"
 # Drop ALL trailing slashes (keeping a bare root "/") so the filename join never
 # doubles them, even for a multi-slash input like "/path//".
 while [ "$out_dir" != "/" ] && [ "${out_dir%/}" != "$out_dir" ]; do

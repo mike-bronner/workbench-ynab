@@ -164,6 +164,20 @@ Notes for the walk:
   business prompts empty and **omit the whole `business` key** from the config.
 - `persona.name` defaults to `$PERSONA_DEFAULT` — the assistant's default voice.
   Leaving it at the default keeps it speaking as the user's own agent / `Hobbes`.
+- **Validate the collected persona name before it enters the config** (issue
+  #28): run
+
+  ```bash
+  bash "${CLAUDE_PLUGIN_ROOT}/bin/persona.sh" validate-name -- "$COLLECTED_NAME"
+  ```
+
+  A non-zero exit means the name violates the contract (longer than 64
+  characters, contains control characters, or contains invisible Unicode
+  format characters — bidi overrides, zero-width chars, Tag-block chars). **Fail loudly**: surface the
+  loader's stderr message (it names the field and the violation) and re-ask for
+  the name — never write a violating `persona.name` into `config.json`. An
+  empty answer is fine (the loader falls back silently), and `--` guards
+  against a name that itself looks like a flag.
 - Use `schema_version: 1`.
 
 When every field is gathered, **assemble the full JSON, show it to the user**,

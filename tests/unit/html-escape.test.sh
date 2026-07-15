@@ -169,6 +169,84 @@ test_strips_all_bidi_override_and_isolate_chars() {
   assert_eq "abc" "$out"
 }
 
+# ---- Unicode Tags block (U+E0000–U+E007F) is stripped (ASCII smuggling) -------
+test_strips_unicode_tag_block_chars() {
+  # Tag characters encode invisible ASCII — the canonical LLM smuggling channel
+  # (#28 round-3 blocker). U+E0041 (TAG LATIN CAPITAL LETTER A) must be removed
+  # by the shared strip list, leaving the visible text intact.
+  local tag_a out
+  tag_a="$(printf '\xf3\xa0\x81\x81')"
+  out="$(escape_ynab_string "friendly${tag_a}${tag_a}payee")"
+  assert_eq "friendlypayee" "$out"
+}
+
+# ---- Giant multibyte input still truncates correctly (#28 round 3) -----------
+test_giant_multibyte_value_is_bounded_and_truncated() {
+  # CORRECTNESS pin only: the O(1) byte gate slices a 6 000-CJK-char (~18 KB)
+  # value before the character-accurate passes, and the output must still be
+  # exactly HTML_ESCAPE_MAX_LEN characters + ellipsis — i.e. the gate's slice is
+  # invisible in the result. This fixture CANNOT detect removal of the gate at
+  # escape_ynab_string step 1 (plain CJK matches none of
+  # strip_invisible_format_chars's patterns and _truncate_utf8 self-gates), so
+  # the DoS guard is the watchdog test below, not this one (#28 round 5).
+  local cjk unit s="" expected="" i=0 out
+  cjk="$(printf '\xe6\x97\xa5')"
+  unit="$cjk$cjk$cjk$cjk$cjk$cjk$cjk$cjk$cjk$cjk"                # 10 chars
+  while [ "$i" -lt 600 ]; do s+="$unit"; i=$((i + 1)); done      # 6 000 chars
+  out="$(escape_ynab_string "$s")"
+  i=0; while [ "$i" -lt 20 ]; do expected+="$unit"; i=$((i + 1)); done  # 200 chars
+  assert_eq "${expected}…" "$out"
+}
+
+# escape_timed <secs> <value> — run escape_ynab_string under a portable
+# poll-and-kill watchdog (macOS ships no timeout(1); same idiom as
+# tests/persona-loader.test.sh's render_tmpl_timed / run_voice_timed), so a
+# regressed super-linear scan fails the test cleanly instead of stalling CI.
+# Prints the sanitized value on stdout; returns 124 if the call overran (hung),
+# else the call's own exit code.
+escape_timed() {
+  local secs="$1" value="$2" out_file pid waited=0 rc=0
+  out_file="$(mktemp)"
+  ( escape_ynab_string "$value" ) >"$out_file" 2>/dev/null &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      rm -f "$out_file"
+      return 124
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  wait "$pid" || rc=$?
+  cat "$out_file"
+  rm -f "$out_file"
+  return "$rc"
+}
+
+# ---- The DoS guard: match-dense invisible-char payload under a watchdog -------
+test_match_dense_invisible_payload_is_bounded() {
+  # The byte gate's REAL attack shape (#28 round-5 blocker: the CJK fixture
+  # above is blind to gate removal). Every character here is on
+  # strip_invisible_format_chars's strip list — ZWSP U+200B, RLO U+202E, and
+  # TAG LATIN CAPITAL LETTER A U+E0041 — so with the gate at escape_ynab_string
+  # step 1 deleted, the strip pass's `${//}` removals run match-dense over the
+  # full ~80 KB value: measured minutes of CPU, versus ~0.02 s gated. The
+  # watchdog turns that regression into a clean red instead of a hung CI job.
+  # Gated, the slice keeps ≤ (HTML_ESCAPE_MAX_LEN + 1) * 4 bytes of pure
+  # strip-list characters, so the sanitized output is exactly the empty string.
+  local unit payload i=0 out rc=0
+  unit="$(printf '\xe2\x80\x8b\xe2\x80\xae\xf3\xa0\x81\x81')"  # ZWSP+RLO+TAG: 3 chars, 10 bytes
+  payload="$unit"
+  while [ "$i" -lt 13 ]; do payload+="$payload"; i=$((i + 1)); done  # 10 B × 2^13 = 80 KB
+  out="$(escape_timed 20 "$payload")" || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    fail "escape_ynab_string overran the watchdog on a match-dense invisible-char payload — the O(1) byte gate regressed"
+  fi
+  assert_eq "0" "$rc" "escape_ynab_string must succeed on the hostile payload"
+  assert_eq "" "$out" "every input char is on the strip list — nothing may survive"
+}
+
 # ---- CLI surface: the review skill's per-value filter ------------------------
 test_cli_default_sanitizes() {
   assert_eq "&lt;script&gt;" "$(bash "$MODULE" '<script>')"
@@ -181,6 +259,46 @@ test_cli_raw_escapes_only_without_truncation() {
   # never strip or truncate. A 201-char all-'a' value comes back unchanged.
   assert_eq "$(a_string 201)" "$(bash "$MODULE" --raw "$(a_string 201)")"
   assert_eq "&lt;a&gt;"       "$(bash "$MODULE" --raw '<a>')"
+}
+test_cli_raw_refuses_an_unbounded_value() {
+  # #28 cost invariant: html_escape's ${//} substitutions are super-linear on
+  # match-dense input (32 KB of '&' ≈ 2 min on bash 3.2), and --raw skips the
+  # sanitize path's byte gate — so the CLI refuses a value over 4096 LOUDLY
+  # (exit 2, stderr names the contract) instead of truncating an owned value
+  # silently or pegging the CPU. 4097 'a's: over the gate, cheap to build.
+  local rc=0 err
+  err="$(bash "$MODULE" --raw -- "$(a_string 4097)" 2>&1 >/dev/null)" || rc=$?
+  assert_eq "2" "$rc" "over-4096 --raw value → exit 2"
+  assert_contains "$err" "exceeds 4096" "refusal names the bound"
+  assert_contains "$err" "sanitize" "refusal points at the sanitize path for untrusted input"
+}
+test_cli_raw_accepts_a_value_at_the_bound() {
+  # Exactly 4096 is inside the contract and comes back escaped, not refused.
+  assert_eq "$(a_string 4096)" "$(bash "$MODULE" --raw -- "$(a_string 4096)")"
+}
+test_cli_raw_gate_counts_bytes_not_chars() {
+  # #28 round-6 blocker: the gate compared `${#raw_value}` — a CHARACTER count
+  # under a UTF-8 locale — against the 4096-BYTE bound the header documents, so
+  # a 2048-char / 6144-byte CJK value sailed straight through. The invocation
+  # FORCES a UTF-8 locale: under LC_ALL=C bytes == chars and even the buggy
+  # char-counting gate would refuse this fixture, making the guard vacuous —
+  # the round-5 "test that passes with the protection deleted" class.
+  local loc unit small payload i=0 rc=0 err
+  loc="$(locale -a 2>/dev/null | grep -Eim1 '^(c|en_us)\.utf-?8$' || true)"
+  [ -n "$loc" ] || loc="en_US.UTF-8"
+  unit="$(printf '\xe6\x97\xa5')"                                    # 日 — 1 char, 3 bytes
+  payload="$unit"
+  while [ "$i" -lt 10 ]; do payload+="$payload"; i=$((i + 1)); done  # 1024 chars, 3072 bytes
+  small="$payload"
+  payload+="$payload"                                                # 2048 chars, 6144 bytes
+  err="$(LC_ALL="$loc" bash "$MODULE" --raw -- "$payload" 2>&1 >/dev/null)" || rc=$?
+  assert_eq "2" "$rc" "2048-char / 6144-byte --raw value → exit 2 (the gate must count bytes)"
+  assert_contains "$err" "byte length 6144 exceeds 4096" "refusal reports the BYTE length"
+  # Complement: multibyte INSIDE the byte bound (1024 chars / 3072 bytes) is
+  # accepted and comes back unchanged (CJK carries no HTML metacharacters) —
+  # the fix tightened the gate to bytes, not to something stricter.
+  assert_eq "$small" "$(LC_ALL="$loc" bash "$MODULE" --raw -- "$small")" \
+    "3072-byte multibyte value is inside the 4096-byte contract"
 }
 test_cli_flag_like_values_are_escaped_as_data_not_dispatched() {
   # issue #30 blocker: a payee/memo/category literally named like a flag must be

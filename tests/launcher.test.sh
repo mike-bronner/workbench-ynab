@@ -174,6 +174,30 @@ assert_contains "exports YNAB_ACCESS_TOKEN"                   "$src" 'export YNA
 # hardcoded path would otherwise leave the whole suite green.
 assert_contains "SCRIPT_DIR resolved via BASH_SOURCE"        "$src" 'BASH_SOURCE[0]'
 
+# ── MCP-boundary invariant: the launch path is persona/plugin-config-free ─────
+# Issue #28 AC 9 (docs/persona.md, "Boundary: SKILL-only, never the MCP"): the
+# vendored YNAB MCP never receives persona config. The launcher is the ONLY
+# code between Claude Code and that server, so the invariant holds iff its
+# EXECUTABLE code never touches the plugin config — no bin/config.sh source, no
+# YNAB_CONFIG_FILE / config.json read, no persona reference — and the only env
+# it exports to the MCP is the package-native access token. Mirrors the static
+# half of tests/unit/persona-write-gate-isolation.test.sh. Comments are
+# stripped first because the launcher's header deliberately DOCUMENTS the
+# config split (naming config.sh and persona) — the guarantee is about code,
+# not prose.
+echo "MCP-boundary invariant — launch path sources no persona/plugin config:"
+code="$(grep -vE '^[[:space:]]*#' "$LAUNCHER")"
+for banned in 'persona' 'config\.sh' 'config\.json' 'YNAB_CONFIG_FILE'; do
+  if printf '%s' "$code" | grep -qiE "$banned"; then
+    FAIL=$((FAIL + 1)); echo "  ❌ launcher code references '$banned' — the launch path must stay config-free"
+  else
+    PASS=$((PASS + 1)); echo "  ✅ launcher code has no '$banned' reference"
+  fi
+done
+exports="$(printf '%s' "$code" | grep -E '^[[:space:]]*export ' || true)"
+assert_eq "the ONLY export is the package-native token env" \
+  'export YNAB_ACCESS_TOKEN="$TOKEN"' "$exports"
+
 echo ""
 echo "launcher: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

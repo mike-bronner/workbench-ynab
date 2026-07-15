@@ -90,6 +90,17 @@ any mutating tool**. Real apply happens **only** when the caller passes an
 explicit `dryRun: false`, which the M4-5 approval command (#59) does **only after
 the human approves the batch**. Anything that is not an explicit `false` simulates.
 
+**Isolation from persona config (issue #28).** The write-authorization gate —
+this executor, the M4-2 guardrail, and the M4-5 human-approval flow — reads **no
+persona config**: not `persona.name`, not `persona.voice_overrides`, nothing
+from `config.json`'s persona object. Its behavior is a pure function of the
+change-set, the active budget, and the human's explicit approval. Persona/voice
+config affects tone and wording of **review output only** — it can never touch
+tool permissions, write approval, or a YNAB API call, and no instruction-like
+text smuggled into `voice_overrides` can change that
+([`../docs/persona.md`](../docs/persona.md), "Invariant";
+enforced by `tests/unit/persona-write-gate-isolation.test.sh`).
+
 ## The pipeline (and its fail-closed ordering)
 
 `applyChangeset` runs a fixed pipeline; **no stage is skipped**:
