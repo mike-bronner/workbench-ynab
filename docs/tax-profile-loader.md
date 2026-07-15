@@ -36,6 +36,37 @@ This mirrors how `bin/config.sh` honours `YNAB_CONFIG_FILE`.
 An **absent** user profile is a normal result, not an error: the loader returns a
 **defaults-only** profile with every provenance entry stamped `defaults`.
 
+## Path containment — reads are allowlisted (issue #169)
+
+The loader forwards caller-supplied paths (`options.profilePath` / `dataDir` /
+`defaultsPath` / `schemaPath`, or their env seams) into `readFileSync` — left
+unchecked, a latent **arbitrary-file-read** primitive if any of those values ever
+arrive from a less-trusted source. So before **any** read, the requested path is
+**canonicalized** (`realpath` on the raw path — resolving `..` traversal and
+symlinks to the true target the kernel would open; a not-yet-existing target is
+canonicalized via its deepest existing ancestor) and must fall inside an explicit
+allowlist of roots:
+
+1. the **resolved data dir** — `options.dataDir` → `YNAB_DATA_DIR` → the
+   canonical plugin-data dir;
+2. the **bundled `assets/tax/` directory** (the defaults and schema live there).
+
+A path that resolves outside every root is refused with a structured failure —
+`error.kind === 'containment'`, following the `io`/`parse`/`schema`/`depth`
+pattern — and the file is **never opened**. The profile path is checked before
+the existence probe, so an escaping request fails deterministically whether or
+not its target exists (no existence oracle). An escaping `defaultsPath` /
+`schemaPath` is likewise a structured `containment` failure — only a
+missing-but-contained bundled file remains the packaging-invariant **throw**.
+
+**How the test seams stay usable without weakening production:** naming a root is
+an embedding-level trust decision. An explicitly-passed `options.dataDir` (or
+`YNAB_DATA_DIR`) *joins the allowlist as a root* — that is how the test harness
+points the loader at a `mkdtemp` directory (`{ dataDir: TMP, profilePath: … }`)
+— while the default no-options surface stays pinned to the canonical plugin-data
+dir plus `assets/tax/`. A bare `options.profilePath` does **not** widen the
+allowlist: it must still canonicalize into one of the roots.
+
 ## Validation — before any merge
 
 The user profile is validated against the canonical JSON Schema (#20, draft
@@ -128,7 +159,7 @@ import { loadProfile } from '../../lib/tax/loadProfile.mjs';
 
 const r = loadProfile();
 if (!r.ok) {
-  // r.error = { kind: 'schema' | 'parse' | 'io' | 'depth', message, errors: [{ path, keyword, message, params }] }
+  // r.error = { kind: 'schema' | 'parse' | 'io' | 'depth' | 'containment', message, errors: [{ path, keyword, message, params }] }
   // r.profile === null  (no silent fallback)
 } else {
   // r.defaultsOnly  — true when no user profile was found
@@ -177,7 +208,11 @@ type-incompatible / id-less / empty-array overrides failing loud, `$`-prefixed
 annotation keys never leaking into the frozen profile, a too-deep override yielding
 a structured `depth` failure instead of a crash, the `propertyNames` container-path
 convention, the `schemaVersion` `oneOf` arms, the `io`/missing-ruleset/missing-schema
-failure paths, and a beyond-two-levels deep-freeze assertion.
+failure paths, and a beyond-two-levels deep-freeze assertion. The path-containment
+allowlist (#169) is covered too: `..`-traversal, symlink-escape, absolute-escape,
+and escaping `defaultsPath`/`schemaPath` requests all refused with a structured
+`containment` failure, with the tests' own `mkdtemp` dir admitted via the explicit
+`dataDir` root.
 
 > **Not tax advice.** This tool organizes financial data and surfaces tax-relevant
 > signals. It is not a substitute for professional tax advice.
