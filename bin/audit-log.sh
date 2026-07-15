@@ -6,9 +6,9 @@
 #   The evidence trail for approval-gated write-back (M4). For every operation
 #   the apply executor (M4-4) acts on — real or dry-run — this appends ONE
 #   structured JSONL record capturing what changed, when, the before/after
-#   snapshots (raw milliunits), the namespaced MCP tool invoked, and the call
-#   status. Mike can later review, reverse, or dispute any mutation, and a
-#   misbehaving write path leaves a paper trail for debugging.
+#   snapshots (raw milliunits), the namespaced MCP tool invoked, and the
+#   executor's per-op result status. Mike can later review, reverse, or dispute
+#   any mutation, and a misbehaving write path leaves a paper trail for debugging.
 #
 # WHO SOURCES THIS
 #   - The apply executor (M4-4) sources this file and calls `_audit_append`
@@ -59,11 +59,17 @@
 #                     before{…}, after{…}, … }. before/after are stored VERBATIM,
 #                     in raw milliunits — the read helper divides by 1000 only for
 #                     human display.
-#   result_json     The apply executor's call descriptor, carrying the MCP-call
-#                   outcome plus the change-set provenance it knows:
+#   result_json     The apply executor's per-op result descriptor, carrying the
+#                   op outcome plus the change-set provenance it knows:
 #                     { tool, status, schema_version, run_id, error_class?, applied_state? }
 #                   tool   = namespaced MCP tool invoked (e.g. mcp__ynab__ynab_update_transaction)
-#                   status = MCP call status (success | error | dry_run | …)
+#                   status = the executor's NORMALIZED per-op result status:
+#                            applied | skipped-stale | blocked | error — the frozen
+#                            STATUS enum in assets/apply-executor.js, the same four
+#                            values docs/audit-log.md asserts for result_status.
+#                            Never a raw MCP call status such as `success`; a
+#                            dry-run simulation arrives as `applied` with the
+#                            separate dry_run flag distinguishing it.
 #                   schema_version = change-set envelope schema_version (provenance)
 #                   run_id = change-set `source` (the review run id, or "manual")
 #                   error_class   = on an errored op, the failure class (GAP-8 / #50):
@@ -182,6 +188,16 @@ JQ
 #   record is emitted as a single atomic, newline-terminated write so a crash can
 #   never leave a partial/truncated line, and a new record is never fused onto a
 #   pre-existing dangling fragment.
+#
+#   TRUSTED PASS-THROUGH — no normalization, no validation. The writer stores
+#   $res.status verbatim into result_status (and every other field likewise); it
+#   does NOT map or reject values outside the four-value enum docs/audit-log.md
+#   promises (applied | skipped-stale | blocked | error). Its only production
+#   caller — assets/apply-executor.js recordAudit, wired to this helper by
+#   commands/ynab-apply.md — always passes a status from that frozen STATUS
+#   enum. A future second caller MUST do the same: handing this writer a raw
+#   MCP call status (e.g. `success`) would put an out-of-enum value on the
+#   permanent trail.
 _audit_append() {
   local op="${1:-}" res="${2:-}" dry_raw="${3:-false}" dry
   case "$dry_raw" in
