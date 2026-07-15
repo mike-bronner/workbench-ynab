@@ -65,8 +65,11 @@
 #                   tool   = namespaced MCP tool invoked (e.g. mcp__ynab__ynab_update_transaction)
 #                   status = the executor's NORMALIZED per-op result status:
 #                            applied | skipped-stale | blocked | error — the frozen
-#                            STATUS enum in assets/apply-executor.js, the same four
-#                            values docs/audit-log.md asserts for result_status.
+#                            STATUS enum in assets/apply-executor.js, the
+#                            authoritative definition of this vocabulary. The
+#                            value lands verbatim in each record's result_status
+#                            on the trail docs/audit-log.md describes (its
+#                            example record shows result_status: applied).
 #                            Never a raw MCP call status such as `success`; a
 #                            dry-run simulation arrives as `applied` with the
 #                            separate dry_run flag distinguishing it.
@@ -191,13 +194,13 @@ JQ
 #
 #   TRUSTED PASS-THROUGH — no normalization, no validation. The writer stores
 #   $res.status verbatim into result_status (and every other field likewise); it
-#   does NOT map or reject values outside the four-value enum docs/audit-log.md
-#   promises (applied | skipped-stale | blocked | error). Its only production
-#   caller — assets/apply-executor.js recordAudit, wired to this helper by
-#   commands/ynab-apply.md — always passes a status from that frozen STATUS
-#   enum. A future second caller MUST do the same: handing this writer a raw
-#   MCP call status (e.g. `success`) would put an out-of-enum value on the
-#   permanent trail.
+#   does NOT map or reject values outside the four-value enum frozen as STATUS
+#   in assets/apply-executor.js (applied | skipped-stale | blocked | error).
+#   Its only production caller — that executor's recordAudit, wired to this
+#   helper by commands/ynab-apply.md — always passes a status from that frozen
+#   STATUS enum. A future second caller MUST do the same: handing this writer
+#   a raw MCP call status (e.g. `success`) would put an out-of-enum value on
+#   the permanent trail.
 _audit_append() {
   local op="${1:-}" res="${2:-}" dry_raw="${3:-false}" dry
   case "$dry_raw" in
