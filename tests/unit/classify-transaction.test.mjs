@@ -20,9 +20,11 @@
 // through the public classify() call.
 //
 // Also covers the bounded ReDoS surface (issue #170): catastrophic-backtracking
-// regex keywords (nested quantifiers, overlapping alternation, backreferences)
+// regex keywords (nested quantifiers, overlapping alternation, backreferences,
+// and flat/grouped runs of sequential overlapping quantifiers — PR #201 review)
 // and over-long patterns/haystacks degrade to a prompt non-match, while normal
-// regex keywords keep matching.
+// regex keywords — including safe quantified and non-overlapping-run shapes —
+// keep matching.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -375,11 +377,36 @@ test('a catastrophic-backtracking regex keyword returns promptly as a non-match,
   assert.ok(elapsedMs < 1000, `expected a bounded match, took ${elapsedMs}ms`);
 });
 
+// The backreference pattern /(a+)\1/ WOULD match this haystack quickly if
+// compiled ('a'×16 + 'a'×16), so the unclassified assertion proves the
+// scanner's backreference rejection is load-bearing, not a coincidental
+// non-match. The timing bound makes a guard regression on the catastrophic
+// shapes fail loudly rather than hang the run (scripts/test.sh sets no
+// node:test timeout).
 test('other high-risk regex shapes (non-capture nesting, overlapping alternation, backreference) → no match', () => {
   const adversarial = tx({ payee_name: `${'a'.repeat(32)}b` });
-  for (const evil of ['/(?:a+)*$/', '/(a|aa)+$/', '/(a+)b\\1/']) {
+  const started = process.hrtime.bigint();
+  for (const evil of ['/(?:a+)*$/', '/(a|aa)+$/', '/(a+)\\1/']) {
     assert.equal(classify(adversarial, null, { rules: KW([evil]) }).taxLineId, 'unclassified', `expected ${evil} to be rejected`);
   }
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(elapsedMs < 1000, `expected bounded rejection, took ${elapsedMs}ms`);
+});
+
+// PR #201 review blocker: a FLAT run of sequential overlapping quantifiers —
+// no grouping at all, or sibling groups — is the same catastrophic family as
+// (a+)+ (each added atom multiplies the backtracking degree) and slipped past
+// the original nesting-only scanner. Unmitigated, each of these is a
+// many-second-to-minutes evaluation against this haystack, so the timing
+// assertion fails loudly if the sequential-run rejection regresses.
+test('a flat or grouped run of sequential overlapping quantifiers → prompt non-match', () => {
+  const adversarial = tx({ payee_name: `${'a'.repeat(40)}!` });
+  const started = process.hrtime.bigint();
+  for (const evil of ['/^a*a*a*a*a*a*a*a*a*a*b$/', '/.*.*.*.*.*.*.*.*zzz/', '/a+a+a+a+a+a+a+a+a+a+b/', '/(a+)(a+)/']) {
+    assert.equal(classify(adversarial, null, { rules: KW([evil]) }).taxLineId, 'unclassified', `expected ${evil} to be rejected`);
+  }
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+  assert.ok(elapsedMs < 1000, `expected bounded rejection, took ${elapsedMs}ms`);
 });
 
 // The caps are the reason these don't match: each pattern WOULD match its
@@ -397,4 +424,22 @@ test('a normal regex keyword still matches under the ReDoS bound', () => {
   const r = classify(tx({ payee_name: 'AWS Cloud Services' }), null, { rules: KW(['/aws|gcp/i']) });
   assert.equal(r.taxLineId, 'schedC.27a');
   assert.equal(r.matchedRuleId, 'kw');
+});
+
+// PR #201 review follow-up: every other positive case is alternation-only, so
+// pin the safe/unsafe discrimination from the QUANTIFIED side too — a single
+// flexible quantifier (bare, on a class-free group, on an escape class) is
+// exactly what the scanner must keep admitting.
+test('a safe QUANTIFIED regex keyword still matches under the ReDoS bound', () => {
+  assert.equal(classify(tx({ payee_name: 'ababab store' }), null, { rules: KW(['/(ab)+/']) }).taxLineId, 'schedC.27a');
+  assert.equal(classify(tx({ payee_name: 'AWS42 invoice' }), null, { rules: KW(['/aws\\d+/']) }).taxLineId, 'schedC.27a');
+  assert.equal(classify(tx({ payee_name: 'Amazon Prime video' }), null, { rules: KW(['/amazon( prime)?/']) }).taxLineId, 'schedC.27a');
+});
+
+// The sequential-run rejection is only for OVERLAPPING alphabets: adjacent
+// quantifiers over disjoint atoms (a+b+) have an unambiguous repetition
+// boundary, backtrack linearly, and must keep matching.
+test('adjacent quantifiers over non-overlapping atoms (a+b+) still match', () => {
+  assert.equal(classify(tx({ payee_name: 'xxaabbyy' }), null, { rules: KW(['/a+b+/']) }).taxLineId, 'schedC.27a');
+  assert.equal(classify(tx({ payee_name: 'nothing here' }), null, { rules: KW(['/a+b+/']) }).taxLineId, 'unclassified');
 });
