@@ -14,8 +14,10 @@
 #   next to the bundle it describes. It is derived from the bundle's dependency
 #   chain (the strongest declared constraint: @modelcontextprotocol/sdk's
 #   `engines.node >=18`) and confirmed by booting the vendored index.cjs on
-#   candidate majors; bin/revendor.sh re-derives it on every bundle bump, and
-#   CI's floor lane boots the bundle on exactly this major (see docs/ci.md).
+#   candidate majors; bin/revendor.sh re-derives it on every bundle bump from
+#   the incoming package's OWN engines.node only (transitive constraints are
+#   invisible in a tarball — CI's floor lane, which boots the bundle on exactly
+#   this major, is the backstop that catches those; see docs/ci.md).
 #   tests/unit/node-floor.test.sh keeps README + ci.yml in sync with it.
 #
 # CONTRACT (asserted by tests/unit/node-floor.test.sh + tests/launcher.test.sh)

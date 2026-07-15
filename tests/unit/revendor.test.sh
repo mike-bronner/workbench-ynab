@@ -621,4 +621,34 @@ test_floor_never_lowered_by_upstream_engines() {
     "the summary must report the floor as unchanged"
 }
 
+# An UPPER bound (`<X`) states no minimum at all — the derivation must not
+# grab its digits and mis-raise the floor (review round 2: the naive
+# first-digit-run parse turned `<20` into a floor of 20, hard-exiting users on
+# perfectly supported majors).
+test_floor_ignores_exclusive_upper_bound() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines "<$((cur + 2))" "$cur"
+  assert_contains "$LAST_FLOOR_OUT" "implies no minimum" \
+    "the summary must report that an upper-bound-only range implies no minimum"
+}
+
+# Same for the inclusive form (`<=X`).
+test_floor_ignores_inclusive_upper_bound() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines "<=$((cur + 2))" "$cur"
+  assert_contains "$LAST_FLOOR_OUT" "implies no minimum" \
+    "the summary must report that an upper-bound-only range implies no minimum"
+}
+
+# `||` alternatives OR together: the implied minimum is the MINIMUM across
+# them, regardless of order — an out-of-order list (`^22 || ^20.1`) must derive
+# the lower major, not whichever alternative appears first.
+test_floor_takes_minimum_across_or_alternatives() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines \
+    "^$((cur + 4)).0.0 || ^$((cur + 2)).1.0" "$((cur + 2))"
+  assert_contains "$LAST_FLOOR_OUT" "$cur → $((cur + 2))" \
+    "the raise must use the minimum alternative, not the first digit run"
+}
+
 run_tests

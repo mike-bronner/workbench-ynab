@@ -88,6 +88,51 @@ test_unparsable_version_fails_stderr_only() {
     "stderr must name the parse failure"
 }
 
+# run_with_floor_file <missing|corrupt> — copy the real check into a sandbox
+# tree whose vendor/ynab-mcp/NODE_VERSION is absent or not a bare major, and
+# run it there. Copying the script (rather than adding an env-override knob to
+# production code) exercises its own SCRIPT_DIR-relative marker resolution.
+# Captures RUN_OUT / RUN_ERR / RUN_RC like run_with_node_version.
+run_with_floor_file() {
+  local mode="$1" sb
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/bin" "$sb/vendor/ynab-mcp"
+  cp "$CHECK" "$sb/bin/node-floor.sh"
+  case "$mode" in
+    missing) ;;                                              # no marker at all
+    corrupt) printf '18.2\n' > "$sb/vendor/ynab-mcp/NODE_VERSION" ;;  # not a bare major
+  esac
+  local errfile="$sb/err"
+  set +e
+  RUN_OUT="$(bash "$sb/bin/node-floor.sh" 2>"$errfile")"
+  RUN_RC=$?
+  set -e
+  RUN_ERR="$(cat "$errfile")"
+  rm -rf "$sb"
+}
+
+# The defensive marker branches carry the same STDERR-only / non-zero / empty-
+# stdout contract as the version gate itself (they run in the launcher path
+# too, where stdout is the JSON-RPC channel).
+
+test_missing_marker_fails_stderr_only() {
+  run_with_floor_file missing
+  assert_eq 1 "$RUN_RC" "a missing floor marker must exit 1"
+  assert_eq "" "$RUN_OUT" "stdout must stay EMPTY on the missing-marker path"
+  assert_contains "$RUN_ERR" "Node floor marker missing" \
+    "stderr must name the missing marker"
+  assert_contains "$RUN_ERR" "reinstall workbench-ynab" \
+    "stderr must carry the actionable recovery step"
+}
+
+test_corrupt_marker_fails_stderr_only() {
+  run_with_floor_file corrupt
+  assert_eq 1 "$RUN_RC" "a non-bare-major floor marker must exit 1"
+  assert_eq "" "$RUN_OUT" "stdout must stay EMPTY on the corrupt-marker path"
+  assert_contains "$RUN_ERR" "not a bare Node major" \
+    "stderr must name the corrupt marker"
+}
+
 # --- sync: every copy of the floor agrees with the canonical file -----------
 
 test_floor_file_is_a_bare_integer() {

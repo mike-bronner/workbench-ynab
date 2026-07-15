@@ -253,24 +253,81 @@ fi
 # re-derive it here from the incoming package's engines.node declaration. The
 # floor is RAISED when upstream demands more, never lowered automatically —
 # lowering needs a human boot-proof on the older major, not a metadata read.
-# Upstream currently declares no engines field; in that case the floor is kept
-# and CI's floor lane (which boots the bundle on the floor major) stays the
-# enforcement. See docs/vendoring.md ("The Node floor").
+#
+# SCOPE: this reads the incoming package's OWN engines.node only — a pre-built
+# bundle's tarball carries no node_modules, so transitive dependencies'
+# constraints are invisible here. The current floor (18) in fact came from a
+# transitive dep (@modelcontextprotocol/sdk's `engines.node >=18`), which this
+# metadata read can never see; the CI floor lane (which boots the bundle on
+# exactly the floor major) is the enforcement that catches a transitive raise.
+# Upstream currently declares no engines field; in that case too the floor is
+# kept and the CI floor lane stays the proof. See docs/vendoring.md
+# ("The Node floor").
+
+# derive_node_floor <engines.node expression> — print the minimum Node major
+# the expression implies, or nothing when it implies no minimum. Operator-
+# aware: only a lower bound (`>=X`, `>X`, `=X`), a caret/tilde range (`^X`,
+# `~X`), or a bare / x-range version (`X`, `X.x`, `X.*`) establishes a floor;
+# upper bounds (`<X`, `<=X`) never do. `||` alternatives OR together, so the
+# result is the MINIMUM across them; comparators inside one alternative AND
+# together, so its floor is the MAXIMUM of its lower bounds. Any alternative
+# with no lower bound (e.g. `<20` alone, or `*`) is satisfiable by arbitrarily
+# old majors — the whole expression then implies no minimum.
+# Subshell body: `set -f` must not leak (engines can legally contain `*`,
+# which a plain word-split would glob against the CWD).
+derive_node_floor() (
+  expr="$1" floor=""
+  set -f
+  while IFS= read -r alt; do
+    [ -n "${alt//[[:space:]]/}" ] || continue
+    alt_floor="" skip_next=0
+    # shellcheck disable=SC2086  # word-splitting the comparators is the point
+    for comp in $alt; do
+      # A detached upper-bound operator (`< 20`) consumes the next word too,
+      # so its version is never misread as a bare-version floor.
+      if [ "$skip_next" = 1 ]; then skip_next=0; continue; fi
+      case "$comp" in
+        '<' | '<=') skip_next=1; continue ;;   # detached upper bound
+        \<*) continue ;;                        # <X / <=X: no floor implied
+        \>=*) major="${comp#>=}" ;;
+        \>*)  major="${comp#>}" ;;
+        '^'*) major="${comp#^}" ;;
+        \~*)  major="${comp#\~}" ;;   # \~: bare ~ in the pattern would tilde-expand
+        =*)   major="${comp#=}" ;;
+        *)    major="$comp" ;;                  # bare version or x-range
+      esac
+      major="${major#v}"
+      major="${major%%.*}"
+      case "$major" in '' | *[!0-9]*) continue ;; esac   # x, *, garbage
+      if [ -z "$alt_floor" ] || [ "$major" -gt "$alt_floor" ]; then
+        alt_floor="$major"
+      fi
+    done
+    if [ -z "$alt_floor" ]; then
+      return 0   # one unbounded-below alternative → no minimum at all
+    fi
+    if [ -z "$floor" ] || [ "$alt_floor" -lt "$floor" ]; then
+      floor="$alt_floor"
+    fi
+  done <<< "${expr//\|\|/$'\n'}"
+  printf '%s' "$floor"
+)
+
 FLOOR_FILE="$VENDOR_DIR/NODE_VERSION"
 CUR_FLOOR=""
 [ -f "$FLOOR_FILE" ] && CUR_FLOOR="$(tr -d '[:space:]' < "$FLOOR_FILE")"
 ENGINES_NODE="$(jq -r '.engines.node // ""' "$EXTRACT/package/package.json" 2>/dev/null || true)"
-# First integer in the range expression (">=18", "^18.17", "18.x", …) — the
-# implied minimum major. Empty when upstream declares nothing numeric.
-DERIVED_FLOOR="$(printf '%s' "$ENGINES_NODE" | sed -nE 's/^[^0-9]*([0-9]+).*$/\1/p')"
+DERIVED_FLOOR="$(derive_node_floor "$ENGINES_NODE")"
 if [ -n "$DERIVED_FLOOR" ] && { [ -z "$CUR_FLOOR" ] || [ "$DERIVED_FLOOR" -gt "$CUR_FLOOR" ]; }; then
   printf '%s\n' "$DERIVED_FLOOR" > "$FLOOR_FILE"
   FLOOR_NOTE="${CUR_FLOOR:-unset} → $DERIVED_FLOOR (upstream engines.node '$ENGINES_NODE')"
   log "  ⚠ Node floor raised to $DERIVED_FLOOR by upstream engines.node ('$ENGINES_NODE') — update the README bullet and the ci.yml matrix (tests/unit/node-floor.test.sh enforces the sync)"
 elif [ -n "$DERIVED_FLOOR" ]; then
   FLOOR_NOTE="$CUR_FLOOR (unchanged; upstream engines.node '$ENGINES_NODE' implies $DERIVED_FLOOR)"
+elif [ -n "$ENGINES_NODE" ]; then
+  FLOOR_NOTE="${CUR_FLOOR:-unset} (unchanged; upstream engines.node '$ENGINES_NODE' implies no minimum — the CI floor lane's boot proof carries the floor)"
 else
-  FLOOR_NOTE="${CUR_FLOOR:-unset} (unchanged; upstream declares no engines.node — the CI floor lane's boot proof carries the floor)"
+  FLOOR_NOTE="${CUR_FLOOR:-unset} (unchanged; upstream declares no engines.node — transitive constraints are invisible to this read, so the CI floor lane's boot proof carries the floor)"
 fi
 
 # --- Write the new bundle + rewrite the marker ------------------------------

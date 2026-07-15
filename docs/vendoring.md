@@ -207,11 +207,23 @@ declared constraint is `@modelcontextprotocol/sdk`'s `engines.node >=18`;
 upstream `@dizzlkheinz/ynab-mcpb` declares no `engines` field) and confirmed
 empirically by booting the vendored `index.cjs` on candidate majors.
 
-**Re-vendoring re-derives it**: `bin/revendor.sh` reads the incoming package's
-`engines.node` (when declared) and raises `NODE_VERSION` if the requirement
-moved up — never lowers it automatically. When upstream declares no engines
-field the floor is kept, and the CI floor lane remains the proof that the new
-bundle still boots on it. After any bump, update the README bullet and the CI
+**Re-vendoring re-derives it — from the package's OWN metadata only**:
+`bin/revendor.sh` reads the incoming package's `engines.node` (when declared),
+derives the implied minimum operator-aware (lower bounds, caret/tilde, and
+bare/x-range versions establish a floor; upper bounds like `<20` never do; a
+`||` list implies the minimum across its alternatives), and raises
+`NODE_VERSION` if the requirement moved up — never lowers it automatically.
+
+Know the limit of that read: an npm tarball carries no `node_modules`, so a
+**transitive** dependency's constraint is invisible to it. The current floor
+of 18 is exactly that case — it came from `@modelcontextprotocol/sdk`
+(`engines.node >=18`), not from upstream's own (absent) engines field, so the
+automated raise could never have derived it. The **CI floor lane** — which
+boots the vendored bundle on exactly the floor major — is the enforcement
+that catches a transitive raise: a bundle that no longer runs on the floor
+fails CI even though the metadata read saw nothing. When upstream declares no
+engines field (or one that implies no minimum) the floor is kept and that
+boot proof carries it. After any bump, update the README bullet and the CI
 matrix entry — `tests/unit/node-floor.test.sh` fails until they agree.
 
 ## Verifying the result

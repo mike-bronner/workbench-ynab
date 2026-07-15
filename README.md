@@ -74,7 +74,7 @@ The skills do all the tax and persona reasoning from config; the MCP does all th
 ## Prerequisites
 
 - **macOS (darwin)** — setup stores the YNAB token in the macOS Keychain via `security(1)`, and the launcher + vendored MCP run on macOS.
-- **System `node` — Node >= 18 (LTS)** — the vendored YNAB MCP is a self-contained Node bundle launched by `bin/launcher.sh`; a system Node runtime at or above the pinned floor must be on `PATH`. **The bundle runs on `node` directly — there is no `node_modules` install step and no `npx`-on-demand.** The floor is pinned in `vendor/ynab-mcp/NODE_VERSION` and enforced by both setup and the launcher; it is re-derived on every bundle bump by the re-vendor flow (see [docs/vendoring.md](docs/vendoring.md), which governs the pinned bundle version).
+- **System `node` — Node >= 18** (the pinned dependency-chain floor) — the vendored YNAB MCP is a self-contained Node bundle launched by `bin/launcher.sh`; a system Node runtime at or above the pinned floor must be on `PATH`. **The bundle runs on `node` directly — there is no `node_modules` install step and no `npx`-on-demand.** The floor is pinned in `vendor/ynab-mcp/NODE_VERSION` and enforced by both setup and the launcher; it is re-derived on every bundle bump by the re-vendor flow (see [docs/vendoring.md](docs/vendoring.md), which governs the pinned bundle version).
 - **`jq`** — used by the launcher and setup tooling to read and validate JSON config.
 - **`security(1)`** — the macOS Keychain CLI; stores and retrieves the YNAB Personal Access Token.
 - **`workbench-core@claude-workbench`** — shared memory vault, session lifecycle, and plugin infrastructure (also the source of the agent name the persona falls back to).
