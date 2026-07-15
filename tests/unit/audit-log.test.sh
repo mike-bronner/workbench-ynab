@@ -431,8 +431,11 @@ export YNAB_AUDIT_DIR="$SANDBOX/perms/nested"
 export YNAB_AUDIT_MONTH="2026-06"
 export YNAB_AUDIT_TIMESTAMP="2026-06-15T16:00:00Z"
 _audit_append "$CATEGORIZE_OP" "$CATEGORIZE_RES" false
-# Portable octal-perms read: BSD/macOS `stat -f '%Lp'`, GNU/Linux `stat -c '%a'`.
-mode_of() { stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"; }
+# Portable octal-perms read: GNU/Linux `stat -c '%a'`, BSD/macOS `stat -f '%Lp'`.
+# GNU must be probed FIRST: on GNU, `stat -f` is filesystem-status mode, which
+# SUCCEEDS with garbage output, so a BSD-first `||` chain never falls through.
+# BSD `stat -c` is a genuine error, so this order fails over cleanly.
+mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 assert_eq "audit dir is created mode 700"  "700" "$(mode_of "$YNAB_AUDIT_DIR")"
 assert_eq "record file is created mode 600" "600" "$(mode_of "$YNAB_AUDIT_DIR/audit-2026-06.jsonl")"
 
