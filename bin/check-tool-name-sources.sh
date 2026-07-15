@@ -84,6 +84,8 @@ violations="$(printf '%s' "$violations" | sed '/^[[:space:]]*$/d')"
 if [ -n "$violations" ]; then
   {
     echo "✖ Hard-coded YNAB tool name(s) found outside the permitted files:"
+    # sed prefixes every line of a multiline value; ${var//} can't anchor line starts.
+    # shellcheck disable=SC2001
     echo "$violations" | sed 's/^/    /'
     echo
     echo "  Concrete tool names may live ONLY in:"

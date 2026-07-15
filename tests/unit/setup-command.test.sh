@@ -118,6 +118,8 @@ test_step4_token_guard_is_aggregate_and_pre_publish() {
   local body; body="$(cat "$CMD")"
   assert_contains "$body" 'strings | test("^[0-9a-f]{64}$")] | any' \
     "Step 4 guard aggregates the per-string tests with | any (the ] proves the array wrap)"
+  # The needle is literal command source text — never expanded here.
+  # shellcheck disable=SC2016
   assert_contains "$body" 'rm -f "$CONFIG_FILE.tmp"' \
     "Step 4 guard drops the staged .tmp on a hit, before any mv into place"
 }
