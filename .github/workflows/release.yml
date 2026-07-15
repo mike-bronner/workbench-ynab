@@ -152,9 +152,11 @@ jobs:
           DESC: ${{ inputs.description }}
         run: |
           set -euo pipefail
-          PREV_TAG=$(git tag --sort=-version:refname | grep -v "v${NEW_VERSION}" | head -1 || true)
+          # -Fx: fixed-string, whole-line — an unanchored grep would also
+          # exclude e.g. v1.2.30 when releasing v1.2.3.
+          PREV_TAG=$(git tag --sort=-version:refname | grep -vFx "v${NEW_VERSION}" | head -1 || true)
           if [ -n "$PREV_TAG" ]; then
-            COMPARE="**Diff:** \`${PREV_TAG}...v${NEW_VERSION}\`"
+            COMPARE="**Diff:** https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...v${NEW_VERSION}"
           else
             COMPARE=""
           fi
