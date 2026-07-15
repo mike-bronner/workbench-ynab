@@ -15,7 +15,9 @@
 # persona sign-off, the report pointer, all four tier examples, tier-agnostic,
 # presentation-only) plus the issue #185 guard on §6's conditional
 # not-tax-advice tag (present exactly once in the tax-bearing examples, absent
-# from the non-tax ones, placed between the findings and the report pointer).
+# from the non-tax ones, placed between the findings and the report pointer,
+# never sharing a line with a severity emoji, and compact-tag-only — the full
+# disclaimer paragraph never rides a dispatch example).
 
 set -u
 
@@ -215,8 +217,10 @@ for t in "#### Quarterly-Tax tier" "#### Annual tier"; do
     printf 'FAIL — %s tag is not between the five findings and the report pointer\n' "$t"; fail=$((fail + 1))
   fi
 
-  # never a finding: no severity emoji ever shares a line with the tag text.
-  if printf '%s\n' "$blk" | grep -qE -- '(🔴|🟡|🟢).*not tax advice'; then
+  # never a finding: no severity emoji ever shares a line with the tag text —
+  # anywhere on the line, before or after it (order-independent: scope to the
+  # tag line first, then look for any severity emoji on it).
+  if printf '%s\n' "$blk" | grep -F -- 'not tax advice' | grep -qE -- '🔴|🟡|🟢'; then
     printf 'FAIL — %s tag carries a severity emoji — it must never be a finding\n' "$t"; fail=$((fail + 1))
   else
     printf 'ok   — %s tag carries no severity emoji (never one of the five findings)\n' "$t"; pass=$((pass + 1))
@@ -228,6 +232,22 @@ for t in "#### Weekly tier" "#### Monthly tier"; do
     printf 'FAIL — %s (non-tax) unexpectedly carries a ⚠️ / not-tax-advice tag\n' "$t"; fail=$((fail + 1))
   else
     printf 'ok   — %s (non-tax) omits the not-tax-advice tag (no ⚠️ at all)\n' "$t"; pass=$((pass + 1))
+  fi
+done
+
+# ---- compact tag only: the full disclaimer never rides the dispatch (§6) -------
+# skills/shared/disclaimer.md: the dispatch — a five-line TL;DR — "carries the
+# compact tag only"; the full multi-paragraph disclaimer belongs to the report,
+# README, and docs surfaces. Key on the paragraph's opening sentence (copied
+# verbatim everywhere, per disclaimer.md), so smuggling the paragraph into any
+# worked example — tax or not — trips the guard.
+FULL_DISCLAIMER='This tool produces estimates for organizational purposes only.'
+
+for t in "${expected_tiers[@]}"; do
+  if tier_block "$t" | grep -qF -- "$FULL_DISCLAIMER"; then
+    printf 'FAIL — %s carries the full disclaimer — the dispatch takes the compact tag only\n' "$t"; fail=$((fail + 1))
+  else
+    printf 'ok   — %s carries the compact tag only (no full disclaimer paragraph)\n' "$t"; pass=$((pass + 1))
   fi
 done
 
