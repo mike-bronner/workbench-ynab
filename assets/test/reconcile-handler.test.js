@@ -661,3 +661,63 @@ test('(#50) a reconcile preflight that RESOLVES a { isError: true } 403 envelope
   assert.equal(out.authFailure.error_class, 'insufficient_scope');
   assert.equal(apply.calls.length, 0); // zero mutations — the preflight aborted first
 });
+
+// --- (GAP-19 / #49) cleared-balance ledger math: splits and transfer legs ----
+
+const { markClearedBalanceImpact } = require('../reconcile-handler');
+
+/** Live transactions for the ledger-math tests — carrying account_id + amounts. */
+const splitTxn = () => ({
+  id: 't-split', account_id: 'acct-1', cleared: 'uncleared',
+  amount: -99999, // deliberately DIVERGES from the sub sum — the parent field must never be used
+  subtransactions: [{ amount: -30000 }, { amount: -12500 }],
+});
+
+test('(#49) a split contributes the SUM of its subtransactions to the cleared-balance impact, never the parent amount', () => {
+  const plain = { id: 't-plain', account_id: 'acct-1', cleared: 'uncleared', amount: -10000 };
+  const op = markClearedOp(['t-split', 't-plain']); // uncleared → cleared
+  const byId = new Map([['t-split', splitTxn()], ['t-plain', plain]]);
+  assert.equal(markClearedBalanceImpact(op, byId), -52500);
+});
+
+test('(#49) a transfer leg counts ONLY from the reconciled account\'s perspective — the counterpart leg contributes 0', () => {
+  const ownLeg = { id: 't-own', account_id: 'acct-1', cleared: 'uncleared', amount: -50000, transfer_account_id: 'acct-2', transfer_transaction_id: 't-other' };
+  const otherLeg = { id: 't-other', account_id: 'acct-2', cleared: 'uncleared', amount: 50000, transfer_account_id: 'acct-1', transfer_transaction_id: 't-own' };
+  const op = markClearedOp(['t-own', 't-other']);
+  const byId = new Map([['t-own', ownLeg], ['t-other', otherLeg]]);
+  assert.equal(markClearedBalanceImpact(op, byId), -50000); // no double-counting
+});
+
+test('(#49) only a cleared-MEMBERSHIP change moves the balance: leaving subtracts; cleared → reconciled changes nothing', () => {
+  const tx = { id: 't1', account_id: 'acct-1', cleared: 'cleared', amount: -10000 };
+  const byId = new Map([['t1', tx]]);
+  const leaving = markClearedOp(['t1']);
+  leaving.after = { cleared: 'uncleared' };
+  assert.equal(markClearedBalanceImpact(leaving, byId), 10000);
+  const promote = markClearedOp(['t1']);
+  promote.before = { cleared: 'cleared' };
+  promote.after = { cleared: 'reconciled' };
+  assert.equal(markClearedBalanceImpact(promote, byId), 0);
+});
+
+test('(#49) an unresolvable target or amount yields null — the impact is reported unknown, never guessed', () => {
+  const op = markClearedOp(['t-gone']);
+  assert.equal(markClearedBalanceImpact(op, new Map()), null); // target not in the live read
+  const noAmount = { id: 't-na', account_id: 'acct-1', cleared: 'uncleared' };
+  assert.equal(markClearedBalanceImpact(markClearedOp(['t-na']), new Map([['t-na', noAmount]])), null);
+});
+
+test('(#49) mark_cleared dry-run surfaces the split/transfer-correct cleared_balance_impact in its detail', async () => {
+  const op = markClearedOp(['t-split']);
+  const apply = spy();
+  const res = await processReconcileOp(op, {
+    activeBudgetId: BUDGET,
+    toolMap: TOOL_MAP,
+    readLiveState: spy(() => ({ transactions: [splitTxn()] })),
+    applyOp: apply,
+  });
+  assert.equal(res.status, STATUS.APPLIED);
+  assert.equal(res.dry_run, true);
+  assert.equal(res.detail.cleared_balance_impact, -42500); // sub sum, not the -99999 parent amount
+  assert.equal(apply.calls.length, 0); // dry-run: nothing mutated
+});

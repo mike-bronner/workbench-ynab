@@ -408,3 +408,66 @@ test('a delete op missing risk:destructive is blocked by the guardrail through t
   assert.equal(out.ok, false);
   assert.notEqual(out.reason, OUTCOME.APPLY_COMPLETE);
 });
+
+// --- (GAP-19 / #49) transfer-leg HARD BLOCK — never deletable by this path ---
+
+test('(#49) a non-null transfer_transaction_id on the VICTIM hard-blocks the batch before any read or delete', async () => {
+  const cs = loadFixture('delete-duplicate.example.json');
+  cs.operations[0].before.transfer_transaction_id = 't-linked-leg';
+  const read = noDrift();
+  const apply = spy();
+  const audit = auditSpy();
+
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: read,
+    applyOp: apply,
+    audit,
+  });
+
+  // A HARD BLOCK, deliberately NOT human_review_required: no confirmation can
+  // make a one-leg deletion safe (it corrupts the linked account's ledger).
+  assert.equal(out.ok, false);
+  assert.equal(out.aborted, true);
+  assert.equal(out.reason, 'transfer_leg_hard_block');
+  assert.deepEqual(out.results, []);
+  assert.equal(out.transferLegBlocks.length, 1);
+  assert.equal(out.transferLegBlocks[0].rule, 'transfer_leg_hard_block');
+  assert.deepEqual(out.transferLegBlocks[0].transfer_leg, ['victim']);
+  // No port was touched — not the read, not the delete, not the audit.
+  assert.equal(read.calls.length, 0);
+  assert.equal(apply.calls.length, 0);
+  assert.equal(audit.calls.length, 0);
+});
+
+test('(#49) a transfer signal on the surviving TWIN hard-blocks too — the pair is legitimate, never duplicates', async () => {
+  const cs = loadFixture('delete-duplicate.example.json');
+  cs.operations[0].twin.transfer_account_id = 'acct-savings';
+  const apply = spy();
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: noDrift(),
+    applyOp: apply,
+    audit: auditSpy(),
+  });
+  assert.equal(out.reason, 'transfer_leg_hard_block');
+  assert.deepEqual(out.transferLegBlocks[0].transfer_leg, ['twin']);
+  assert.equal(apply.calls.length, 0);
+});
+
+test('(#49) the transfer-leg hard block OUTRANKS twin-evidence validation (checked first, dry-run included)', async () => {
+  const cs = loadFixture('delete-duplicate.example.json');
+  cs.operations[0].before.transfer_account_id = 'acct-savings';
+  delete cs.operations[0].twin.amount; // also twin-invalid — the hard block must still win
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    // dryRun omitted → defaults to true; the hard block fires in dry-run too
+    readLiveState: noDrift(),
+    applyOp: spy(),
+    audit: auditSpy(),
+  });
+  assert.equal(out.reason, 'transfer_leg_hard_block');
+  assert.equal(out.dry_run, true);
+});
