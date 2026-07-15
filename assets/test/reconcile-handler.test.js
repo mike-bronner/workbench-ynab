@@ -83,6 +83,7 @@ const markClearedOp = (txnIds = ['txn-1', 'txn-2']) => ({
 // absent from the dispatched payload — present on the fixture, they make the
 // isolation assertions catch a real spread regression (not pass by construction).
 const EXTRA_TXN_FIELDS = Object.freeze({
+  account_id: 'acct-1', // required by the mark_cleared live-read contract (#49 impact math)
   amount: -42000,
   date: '2026-06-01',
   memo: 'bank feed import',
@@ -720,4 +721,36 @@ test('(#49) mark_cleared dry-run surfaces the split/transfer-correct cleared_bal
   assert.equal(res.dry_run, true);
   assert.equal(res.detail.cleared_balance_impact, -42500); // sub sum, not the -99999 parent amount
   assert.equal(apply.calls.length, 0); // dry-run: nothing mutated
+});
+
+test('(#49) REAL apply reports an honest cleared_balance_impact from the contract-shaped live read — never a fabricated 0', async () => {
+  // Uses the SHARED liveTxns fixture (the documented mark_cleared live-read shape:
+  // id + cleared + account_id + amount), so this fails if the fixture and the
+  // contract ever diverge again. Two txns entering cleared at -42000 each.
+  const op = markClearedOp(['txn-1', 'txn-2']);
+  const apply = spy(() => ({ ok: true }));
+  const res = await processReconcileOp(op, {
+    activeBudgetId: BUDGET,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: spy(() => liveTxns(['txn-1', 'txn-2'], 'uncleared')),
+    applyOp: apply,
+  });
+  assert.equal(res.status, STATUS.APPLIED);
+  assert.equal(res.dry_run, false);
+  assert.equal(res.detail.cleared_balance_impact, -84000);
+  assert.equal(apply.calls.length, 1); // the mutation actually dispatched
+});
+
+test('(#49) a live transaction missing account_id makes the impact incomputable — reported null, never 0', async () => {
+  const op = markClearedOp(['txn-1']);
+  const { account_id, ...noAccount } = EXTRA_TXN_FIELDS;
+  const res = await processReconcileOp(op, {
+    activeBudgetId: BUDGET,
+    toolMap: TOOL_MAP,
+    readLiveState: spy(() => ({ transactions: [{ id: 'txn-1', cleared: 'uncleared', ...noAccount }] })),
+    applyOp: spy(),
+  });
+  assert.equal(res.status, STATUS.APPLIED); // dry-run simulation still completes
+  assert.equal(res.detail.cleared_balance_impact, null); // honest unknown
 });

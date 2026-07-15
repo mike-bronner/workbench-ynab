@@ -395,6 +395,35 @@ async function applyDeleteDuplicates(changeset, options = {}) {
   // an install, faithful to the offline-boot constraint.
   const { applyChangeset } = require('./apply-executor');
 
+  // LIVE SHAPE RE-DERIVATION (GAP-19 / #49, fail-open fix). The snapshot check above
+  // trusts the caller-supplied `op.before` / `op.twin`; the schema leaves the transfer
+  // fields optional, so a schema-valid op that simply OMITS them (or lies with nulls)
+  // walks straight past it. The one thing a payload cannot talk around is the LIVE
+  // read the executor already performs — so the hard block is re-derived there: wrap
+  // the injected readLiveState port and re-check isTransferLeg on the LIVE victim.
+  // A live transfer leg throws, which the executor records as a terminal per-op
+  // `error` (never dispatched — the delete tool is unreachable for it) while the rest
+  // of the batch proceeds under normal per-op semantics. Structurally fail-closed:
+  // the ONLY route to `ynab_delete_transaction` runs through a successful live read,
+  // and every successful live read passes this gate first. Requires the port to
+  // project the full victim shape — shapeVictimSnapshot(liveTxn), transfer fields
+  // included — per skills/delete-duplicate.md.
+  const shapeGuardedRead = typeof readLiveState === 'function'
+    ? async (op) => {
+      const live = await readLiveState(op);
+      if (op && op.type === OP_TYPE && isTransferLeg(live)) {
+        const err = new Error(
+          `transfer_leg_hard_block: delete_duplicate op ${op && op.id != null ? op.id : '(no id)'} targets a LIVE transfer leg `
+          + '(the live read carries a non-null transfer_account_id / transfer_transaction_id); deleting one leg of a transfer '
+          + 'pair corrupts the linked account\'s ledger — hard-blocked from the live state, regardless of the op\'s snapshot evidence.',
+        );
+        err.rule = 'transfer_leg_hard_block';
+        throw err;
+      }
+      return live;
+    }
+    : readLiveState;
+
   const wrappedApplyOp = (!dryRun && typeof applyOp === 'function')
     ? makeAuditingDeleteApplyOp({ applyOp, audit, changeset, dryRun })
     : applyOp;
@@ -403,7 +432,7 @@ async function applyDeleteDuplicates(changeset, options = {}) {
     activeBudgetId,
     dryRun,
     toolMap: buildToolMap(),
-    readLiveState,
+    readLiveState: shapeGuardedRead,
     applyOp: wrappedApplyOp,
     authPreflight,
     audit,

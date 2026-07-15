@@ -107,6 +107,9 @@ test('returns null — never a fabricated number — when the amount cannot be c
   assert.equal(clearedBalanceContribution(null, 'a1'), null);
   assert.equal(clearedBalanceContribution({ id: 't1', account_id: 'a1' }, 'a1'), null); // no amount
   assert.equal(clearedBalanceContribution({ id: 't1', account_id: 'a1', amount: 54.99 }, 'a1'), null); // non-integer
+  // Perspective with an UNKNOWN own-account: null (fail honest), never a silent 0.
+  assert.equal(clearedBalanceContribution({ id: 't1', amount: -10000 }, 'a1'), null);
+  assert.equal(clearedBalanceContribution({ id: 't1', account_id: '', amount: -10000 }, 'a1'), null);
   const badSplit = { id: 't1', account_id: 'a1', subtransactions: [{ amount: -1000 }, { amount: null }] };
   assert.equal(clearedBalanceContribution(badSplit, 'a1'), null); // any bad sub poisons the sum
 });

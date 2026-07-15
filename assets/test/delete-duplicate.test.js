@@ -471,3 +471,30 @@ test('(#49) the transfer-leg hard block OUTRANKS twin-evidence validation (check
   assert.equal(out.reason, 'transfer_leg_hard_block');
   assert.equal(out.dry_run, true);
 });
+
+test('(#49) a LIVE transfer leg is hard-blocked from the live read even when the snapshot OMITS the transfer fields — the delete tool is never invoked', async () => {
+  // The fail-open payload: the fixture's `before` / `twin` carry NO transfer fields
+  // (they are schema-optional), so the snapshot-based pre-flight passes — but the
+  // LIVE transaction IS a real transfer leg. The shape-guarded readLiveState must
+  // re-derive that from the live read and stop the delete.
+  const cs = loadFixture('delete-duplicate.example.json');
+  assert.ok(!('transfer_account_id' in cs.operations[0].before)); // the omission is the point
+  assert.ok(!('transfer_transaction_id' in cs.operations[0].twin));
+  const apply = spy();
+  // Full victim projection per skills/delete-duplicate.md: live carries the
+  // transfer evidence the snapshot withheld.
+  const read = spy((op) => ({ ...clone(op.before), transfer_account_id: null, transfer_transaction_id: 't-linked-leg' }));
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: read,
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit: auditSpy(),
+  });
+
+  const res = out.results.find((r) => r.op_id === cs.operations[0].id);
+  assert.equal(res.status, STATUS.ERROR); // terminal per-op — never dispatched
+  assert.match(res.detail.message, /transfer_leg_hard_block/);
+  assert.equal(apply.calls.length, 0, 'the delete tool must NEVER be invoked for a live transfer leg');
+});

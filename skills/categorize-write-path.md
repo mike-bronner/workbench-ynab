@@ -142,6 +142,13 @@ Like the executor, the handler holds no MCP coupling — the caller wires:
 - **`readLiveState(op)`** — the read-only drift-detection read the **executor**
   requires (mandatory): resolves each op's live category state so a value that
   drifted since the change-set was generated is `skipped-stale`, never clobbered.
+  The live read **must also carry the transaction-shape evidence** —
+  `subtransactions`, `transfer_account_id`, `transfer_transaction_id` — alongside
+  the category state: the handler re-derives the shape from this **live** read
+  (GAP-19 / #49), so an op whose `before` snapshot omits (or misstates) its shape
+  evidence still cannot land a category on a live split parent or transfer leg.
+  A live shape hit surfaces as a terminal per-op `error` naming
+  `transaction_shape_live_mismatch`; no update-transaction call targets it.
 - **`audit(record)`** — the append-only M4-3 audit sink the **executor** requires
   (mandatory): one record per op, dry-run and real.
 - **`listCategories(budgetId)`** — read-only name→id resolution, used only when an

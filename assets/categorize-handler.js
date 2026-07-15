@@ -529,6 +529,31 @@ async function applyCategorize(changeset, ctx = {}) {
     };
   }
 
+  // LIVE SHAPE RE-DERIVATION (GAP-19 / #49, fail-open fix — same root cause as the
+  // delete path's guard). The shape gate above reads `op.before`, which the schema
+  // leaves free to OMIT the shape-evidence fields — a snapshot that omits (or lies
+  // about) them walks past the gate. The live read the executor already performs is
+  // the one thing the payload cannot talk around: wrap the readLiveState port and
+  // re-derive the shape from the LIVE transaction. A live transfer leg / split
+  // parent throws, which the executor records as a terminal per-op `error` — never
+  // dispatched, so no update-transaction call can target it — while the rest of the
+  // batch proceeds. Requires the port's live read to carry the shape-evidence fields
+  // alongside the category state (skills/categorize-write-path.md).
+  const shapeGuardedRead = typeof readLiveState === 'function'
+    ? async (op) => {
+      const live = await readLiveState(op);
+      if (op && op.type === CATEGORIZE_TYPE && (isTransferLeg(live) || isSplitTransaction(live))) {
+        const shape = isTransferLeg(live) ? 'transfer leg' : 'split parent';
+        throw new Error(
+          `transaction_shape_live_mismatch: categorize op ${op.id != null ? op.id : '(no id)'} targets a LIVE ${shape} `
+          + 'per the live read — its category may never be set by this path, regardless of the op\'s snapshot evidence; '
+          + 'routed to error (v1 conservative posture: flag, never auto-modify).',
+        );
+      }
+      return live;
+    }
+    : readLiveState;
+
   const outcome = await applyChangeset(
     { ...changeset, operations: toRun.map(({ op }) => op) },
     {
@@ -539,7 +564,7 @@ async function applyCategorize(changeset, ctx = {}) {
       bulkFits: categorizeBulkFits,
       applyOp: makeCategorizeApplyOp({ callTool, reloadSchemas, ...patience }),
       bulkApplyOp: makeCategorizeBulkApplyOp({ callTool, reloadSchemas, ...patience }),
-      readLiveState,
+      readLiveState: shapeGuardedRead,
       authPreflight,
       audit,
     },

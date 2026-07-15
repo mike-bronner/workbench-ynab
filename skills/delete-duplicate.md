@@ -89,8 +89,17 @@ compares it to the op's `before` snapshot. If `payee_name`, `amount`, `date`,
 `cleared` — or any other snapshotted field — has changed since the change-set was
 generated, the op is marked `skipped-stale` and **never forced through**. Drift
 fails closed: an unresolvable live read is treated as drift and skipped. Use
-`shapeVictimSnapshot(liveTxn, Object.keys(op.before))` to project the live read
-onto the snapshot shape for a like-for-like comparison.
+`shapeVictimSnapshot(liveTxn)` — the **full** victim field set, transfer fields
+included — to project the live read onto the snapshot shape. The drift check
+compares only the keys `op.before` actually snapshotted (extra live keys are
+ignored), so the full projection is drift-equivalent to projecting by
+`Object.keys(op.before)` — but it is **mandatory** for the transfer-leg hard
+block: the handler re-derives `is_transfer_leg` from this **live** read
+(GAP-19 / #49), so a projection that strips `transfer_account_id` /
+`transfer_transaction_id` would blind the one gate a snapshot that omits its
+shape evidence cannot talk around. A live transfer leg surfaces as a terminal
+per-op `error` naming `transfer_leg_hard_block`; the delete tool is never
+invoked for it.
 
 ### 5. Audit the full before-snapshot, before the delete
 

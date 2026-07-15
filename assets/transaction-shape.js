@@ -76,9 +76,14 @@ function isTransferLeg(tx) {
  * reconciled, in integer milliunits — the reconcile-path ledger math (M4-9):
  *
  *  - PERSPECTIVE (no double-counting): when `accountId` is supplied, a
- *    transaction belonging to any OTHER account contributes 0 — a transfer's
- *    counterpart leg lives in the linked account and must never be counted from
- *    this account's side. Each leg counts exactly once, in its own account.
+ *    transaction KNOWN to belong to any OTHER account contributes 0 — a
+ *    transfer's counterpart leg lives in the linked account and must never be
+ *    counted from this account's side. Each leg counts exactly once, in its own
+ *    account. A transaction whose OWN account is unknown (absent / empty
+ *    `account_id` on the live read) yields `null`, never 0: perspective cannot
+ *    be determined, so the amount cannot be computed honestly (the
+ *    `mark_cleared` live read must carry `account_id` — see
+ *    skills/reconcile-write-path.md).
  *  - SPLITS: a split parent's contribution is the SUM of its subtransaction
  *    amounts, never the parent `amount` field, so the ledger math stays correct
  *    even when the two diverge.
@@ -95,8 +100,12 @@ function isTransferLeg(tx) {
  */
 function clearedBalanceContribution(tx, accountId) {
   if (tx === null || typeof tx !== 'object' || Array.isArray(tx)) return null;
-  if (typeof accountId === 'string' && accountId.length > 0 && tx.account_id !== accountId) {
-    return 0;
+  if (typeof accountId === 'string' && accountId.length > 0) {
+    // Fail honest, never fabricate: with no known account on the transaction the
+    // perspective filter cannot run — `null` (incomputable), NOT a silent 0 that
+    // would zero out every impact when a live read omits `account_id`.
+    if (typeof tx.account_id !== 'string' || tx.account_id.length === 0) return null;
+    if (tx.account_id !== accountId) return 0;
   }
   if (isSplitTransaction(tx)) {
     let sum = 0;
