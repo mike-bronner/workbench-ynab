@@ -68,7 +68,7 @@ torn line for them to tolerate.
 
 A **pure function of its three inputs**: it reads no external state and never
 touches a YNAB API, so it is unit-testable in isolation
-(`tests/unit/test-audit-log.sh`). Its only side effect is appending one record;
+(`tests/unit/audit-log.test.sh`). Its only side effect is appending one record;
 the audit dir and monthly file are created on first write if absent. Each record
 is written as a single atomic, newline-terminated append, so a crash never leaves
 a partial line and a new record is never fused onto a pre-existing dangling

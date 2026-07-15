@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Unit tests for hooks/session-warmup.sh — the SessionStart/PostCompact warmup.
-# Run directly: tests/unit/test-session-warmup.sh
+# Run directly: tests/unit/session-warmup.test.sh
 #
 # Style mirrors tests/launcher.test.sh: raw bash, `set -u`, PASS/FAIL
 # counters, a mktemp sandbox, and a non-zero exit when anything fails. Slots into

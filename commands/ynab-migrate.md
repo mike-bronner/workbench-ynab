@@ -142,8 +142,10 @@ be held until the plugin is verified working). On **Yes — rotated**:
 Before offering to remove the legacy connector, prove the vendored plugin can
 actually reach YNAB. Call a plugin **read** tool:
 
-- Call `mcp__plugin_workbench-ynab_ynab__ynab_list_budgets` (or an equivalent
-  read-only plugin tool).
+- Call the `list_budgets` **read** tool, resolving its concrete namespaced name
+  from `${CLAUDE_PLUGIN_ROOT}/skills/protocol/ynab-tools.md` (the #87 tool-name
+  SSoT — never inline a concrete name here), or an equivalent read-only plugin
+  tool.
 - **Success** → record that the plugin is verified; Step 8 is now unlocked.
 - **Failure** → abort the connector-removal path with a clear message: "The
   vendored plugin could not read YNAB (check the Keychain token from Step 3). Not

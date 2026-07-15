@@ -130,11 +130,11 @@ Confirm the review and write-back exercise the vendored MCP under the plugin
 namespace, not some other server.
 
 - [ ] **Pass when:** every YNAB tool call is namespaced
-      `mcp__plugin_workbench-ynab_ynab__*` — e.g.
-      `mcp__plugin_workbench-ynab_ynab__ynab_list_transactions`,
-      `…__ynab_update_transactions`, `…__ynab_reconcile_account`. (The bundle's
-      own tool names already carry an `ynab_` stem, so namespaced they read
-      `mcp__plugin_workbench-ynab_ynab__ynab_*`.)
+      `mcp__plugin_workbench-ynab_ynab__*` — e.g. `…__ynab_list_transactions`,
+      `…__ynab_update_transactions`, `…__ynab_reconcile_account`; the complete
+      concrete list lives in `skills/protocol/ynab-tools.md` (the #87 SSoT).
+      (The bundle's own tool names already carry an `ynab_` stem, so namespaced
+      they read `mcp__plugin_workbench-ynab_ynab__ynab_*`.)
 
 ## 8. No token in any log, report, or error — at any step
 

@@ -14,7 +14,7 @@
 #   - The apply executor (M4-4) sources this file and calls `_audit_append`
 #     after each operation result. The writer is a pure function of its three
 #     inputs — it reads no external state and never touches a YNAB API — so it
-#     is unit-testable in isolation (see tests/unit/test-audit-log.sh).
+#     is unit-testable in isolation (see tests/unit/audit-log.test.sh).
 #   - The approval command / report path calls the read helpers (`_audit_read_last`,
 #     `_audit_read_run`) — or runs this file as a CLI (`last` / `run`) — to render
 #     the log for a human.

@@ -63,6 +63,13 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
 
+      # Swap-ready invariant (issue #87, CI-gated per issue #131): no concrete
+      # YNAB tool name outside the documented allowlist. The suite below also
+      # covers this via the guard's self-test real-tree case; this explicit step
+      # fails fast and names the violation in its own check line.
+      - name: Check the swap-ready tool-name invariant on the real tree
+        run: bash bin/check-tool-name-sources.sh
+
       - name: Set up Node
         uses: actions/setup-node@v5
         with:
