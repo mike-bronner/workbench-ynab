@@ -367,13 +367,18 @@ render_voice() {
   v="${v//"$lt"/}"
   v="${v//"$gt"/}"
   # Angle-bracket homoglyphs (step 4): fullwidth ＜ ＞ (U+FF1C/FF1E), small
-  # ﹤ ﹥ (U+FE64/FE65), CJK 〈 〉 (U+3008/3009), math ⟨ ⟩ (U+27E8/27E9), and
-  # the deprecated angle pair (U+2329/U+232A). Literal substring removal,
-  # encoding-agnostic, on the already-bounded value.
+  # ﹤ ﹥ (U+FE64/FE65), CJK 〈 〉 (U+3008/3009), math ⟨ ⟩ (U+27E8/27E9), the
+  # deprecated angle pair (U+2329/U+232A), single guillemets ‹ › (U+2039/203A),
+  # and the ornament brackets ❮ ❯ ❰ ❱ (U+276E–U+2771) — the round-8 blocker
+  # pairs plus their adjacent heavy siblings. Enumerated, not a proof over all
+  # of Unicode: the write-gate isolation is the real backstop for the long
+  # tail. Literal substring removal, encoding-agnostic, on the already-bounded
+  # value.
   local hg
   for hg in $'\xef\xbc\x9c' $'\xef\xbc\x9e' $'\xef\xb9\xa4' $'\xef\xb9\xa5' \
             $'\xe3\x80\x88' $'\xe3\x80\x89' $'\xe2\x9f\xa8' $'\xe2\x9f\xa9' \
-            $'\xe2\x8c\xa9' $'\xe2\x8c\xaa'; do
+            $'\xe2\x8c\xa9' $'\xe2\x8c\xaa' $'\xe2\x80\xb9' $'\xe2\x80\xba' \
+            $'\xe2\x9d\xae' $'\xe2\x9d\xaf' $'\xe2\x9d\xb0' $'\xe2\x9d\xb1'; do
     v="${v//"$hg"/}"
   done
   printf '<voice-overrides>\n[%s]\n%s\n</voice-overrides>\n' "$VOICE_OVERRIDES_FRAMING" "$v"
