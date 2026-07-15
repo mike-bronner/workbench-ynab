@@ -191,7 +191,7 @@ do_remove_task_dir() {
 # a malformed PATH/VALUE.
 do_migrate_config() {
   local config="${1:-}" path="${2:-}" value="${3:-}" dotted blank tmp
-  [ -n "$config" ] && [ "$#" -ge 3 ] || die "migrate-config requires CONFIG PATH VALUE"
+  if [ -z "$config" ] || [ "$#" -lt 3 ]; then die "migrate-config requires CONFIG PATH VALUE"; fi
   if [ ! -f "$config" ]; then
     printf '⚠️  No config to migrate into: %s\n' "$config" >&2
     return 2

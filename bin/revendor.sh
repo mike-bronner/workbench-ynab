@@ -74,7 +74,7 @@ require openssl "install openssl (ships with macOS/Linux) to compute the tarball
 
 # --- Resolve target version + provenance from the marker --------------------
 NAME="$(jq -r '.name' "$MARKER")"
-[ -n "$NAME" ] && [ "$NAME" != "null" ] || die "vendored.json has no .name"
+if [ -z "$NAME" ] || [ "$NAME" = "null" ]; then die "vendored.json has no .name"; fi
 
 PINNED_VERSION="$(jq -r '.version' "$MARKER")"
 OLD_BUNDLE_SHA="$(jq -r '.bundle_sha256 // ""' "$MARKER")"
