@@ -8,7 +8,8 @@
 # checks over the workflow text — the repo-idiomatic way (cf.
 # tests/unit/pre-approval-globs.test.sh) to guard the properties that are easy
 # to break in a "harmless" edit and expensive to get wrong on a release path:
-#   * the guards (SemVer + tag-exists) stay ahead of every write;
+#   * the guards (SemVer + tag-exists + version monotonicity) stay ahead of
+#     every write;
 #   * the bundle-integrity proof and the test suite gate BEFORE commit/tag —
 #     reordering steps below the tag would ship an unverified release;
 #   * the sole version-bump target stays .claude-plugin/plugin.json (issue
@@ -17,7 +18,8 @@
 #   * the sterile-event chain (gh workflow run) that makes the marketplace pin
 #     fire at all;
 #   * the pin workflow's portability (plugin name read from plugin.json),
-#     annotated-tag dereference, loud missing-token failure, and silent no-ops;
+#     annotated-tag dereference, loud missing-token and malformed-marketplace
+#     failures, and silent no-ops;
 #   * concurrency/permissions posture of both workflows;
 #   * the DEVELOPER_SETTINGS_TOKEN documentation contract in docs/ci.md.
 #
@@ -97,6 +99,23 @@ test_release_tag_exists_guard() {
   [ -n "$guard" ] || fail 'the tag-exists guard must abort on: if git rev-parse "v$NEW_VERSION"'
   assert_contains "$guard" "::error::Tag v" "tag-exists rejection must be an ::error:: annotation"
   assert_contains "$guard" "exit 1" "an existing tag must exit 1, not merely print the error"
+}
+
+test_release_version_monotonicity_guard() {
+  # "Versions go forward only" must be enforced, not just documented: a lower
+  # (or equal) never-tagged version passes SemVer + tag-exists and would
+  # downgrade plugin.json, tag it, and pin the marketplace to the regression.
+  # Key the block on the equality half of the condition, polarity included;
+  # the sort -V half is pinned inside the block, its != polarity included.
+  # Needles are literal workflow text — $NEW_VERSION/$CURRENT expand on the runner.
+  # shellcheck disable=SC2016
+  guard=$(guard_block 'if [ "$NEW_VERSION" = "$CURRENT" ] ||' "$RELEASE")
+  # shellcheck disable=SC2016
+  [ -n "$guard" ] || fail 'the monotonicity guard must reject on: if [ "$NEW_VERSION" = "$CURRENT" ] || ...'
+  # shellcheck disable=SC2016
+  assert_contains "$guard" 'sort -V | tail -1)" != "$NEW_VERSION"' "the new version must be the sort -V max of {current, new}"
+  assert_contains "$guard" "::error::Versions go forward only" "a downgrade must be an ::error:: annotation"
+  assert_contains "$guard" "exit 1" "a downgrade must exit 1, not merely print the error"
 }
 
 test_release_guards_precede_writes() {
@@ -294,13 +313,36 @@ test_pin_fails_loudly_without_token() {
   assert_contains "$guard" "exit 1" "missing token must exit 1"
 }
 
+test_pin_fails_loudly_on_malformed_marketplace() {
+  # jq -e exits 1 on "name not found" but 5 on a runtime error (.plugins
+  # missing/null/not an array), and `if !` cannot tell them apart — so shape
+  # is validated separately, BEFORE membership: a broken upstream manifest
+  # must be a hard ::error::, never a benign "nothing to pin".
+  shape=$(guard_block "if ! jq -e '.plugins | type == \"array\"'" "$PIN")
+  [ -n "$shape" ] || fail "marketplace shape must be validated on: if ! jq -e '.plugins | type == \"array\"'"
+  assert_contains "$shape" "::error::" "a malformed marketplace.json must be a hard ::error::"
+  assert_contains "$shape" "exit 1" "a malformed marketplace.json must exit 1, never no-op"
+  shape_line=$(first_line 'type == "array"' "$PIN")
+  # The needle is the literal workflow text — $name is a jq variable, never shell.
+  # shellcheck disable=SC2016
+  member_line=$(first_line 'index($name)' "$PIN")
+  [ "$shape_line" -lt "$member_line" ] || fail "shape validation (line $shape_line) must precede the membership check (line $member_line)"
+}
+
 test_pin_noop_paths_exit_zero() {
-  # Each no-op branch must actually exit 0 — asserting only the message
-  # strings would stay green if the exits flipped to 1.
-  noop=$(guard_block "nothing to pin" "$PIN")
+  # Key each no-op block on its CONDITION (polarity included), not its echo
+  # text — a message-keyed window starts AFTER the `if` line, so it stays
+  # green when the polarity flips (no-op firing on found / real pins skipped).
+  # The needle is the literal workflow text — $PLUGIN_NAME expands on the runner.
+  # shellcheck disable=SC2016
+  noop=$(guard_block 'if ! jq -e --arg name "$PLUGIN_NAME"' "$PIN")
+  # shellcheck disable=SC2016
+  [ -n "$noop" ] || fail 'the unmatched-name no-op must be gated on: if ! jq -e --arg name "$PLUGIN_NAME"'
+  assert_contains "$noop" "nothing to pin" "unmatched plugin name must say there is nothing to pin"
   assert_contains "$noop" "exit 0" "unmatched plugin name must exit 0 (silent no-op)"
-  assert_contains "$pin" "git diff --cached --quiet" "already-pinned SHA must be detected"
-  noop=$(guard_block "already pinned" "$PIN")
+  noop=$(guard_block 'if git diff --cached --quiet' "$PIN")
+  [ -n "$noop" ] || fail 'the already-pinned no-op must be gated on: if git diff --cached --quiet'
+  assert_contains "$noop" "already pinned" "an unchanged stage must report the SHA as already pinned"
   assert_contains "$noop" "exit 0" "already-pinned SHA must exit 0 (silent no-op)"
 }
 
