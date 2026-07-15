@@ -184,6 +184,36 @@ the marker is the single auditable record of the full provenance chain.
 > the registry signature verified against npm's published keys
 > (`signature_status: "verified"`). The outcome is recorded in the marker.
 
+## The Node floor
+
+`vendor/ynab-mcp/NODE_VERSION` pins the minimum Node **major** the vendored
+bundle supports (issue #3) — a single bare integer, the one canonical value
+every enforcement point reads:
+
+- **`bin/node-floor.sh`** compares `node --version` against it and fails with
+  one actionable STDERR line (`workbench-ynab requires Node >= X; you have Y —
+  upgrade via …`). Both `/workbench-ynab:setup` (Step 1a) and `bin/launcher.sh`
+  run it, so interactive setup *and* scheduled runs fail fast instead of
+  letting the bundle die cryptically mid-boot.
+- **CI** (`.github/workflows/ci.yml`) runs the `test` job on both the floor
+  major and current LTS; the floor lane boots the bundle (the offline-boot
+  proof) on exactly that major.
+- **`tests/unit/node-floor.test.sh`** keeps the copies honest: the CI matrix
+  entry and the README's documented floor must match the canonical file, or
+  the suite fails.
+
+The floor was derived from the bundle's dependency chain (the strongest
+declared constraint is `@modelcontextprotocol/sdk`'s `engines.node >=18`;
+upstream `@dizzlkheinz/ynab-mcpb` declares no `engines` field) and confirmed
+empirically by booting the vendored `index.cjs` on candidate majors.
+
+**Re-vendoring re-derives it**: `bin/revendor.sh` reads the incoming package's
+`engines.node` (when declared) and raises `NODE_VERSION` if the requirement
+moved up — never lowers it automatically. When upstream declares no engines
+field the floor is kept, and the CI floor lane remains the proof that the new
+bundle still boots on it. After any bump, update the README bullet and the CI
+matrix entry — `tests/unit/node-floor.test.sh` fails until they agree.
+
 ## Verifying the result
 
 After a re-vendor, **always** run the offline-boot proof before committing — it

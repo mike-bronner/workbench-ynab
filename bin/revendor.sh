@@ -247,6 +247,32 @@ else
   log "  ✓ registry signature verified against npm's published keys"
 fi
 
+# --- Node floor re-derivation (issue #3) -------------------------------------
+# vendor/ynab-mcp/NODE_VERSION pins the minimum Node major the bundle supports;
+# adopting new bundle bytes is exactly when that requirement can move, so
+# re-derive it here from the incoming package's engines.node declaration. The
+# floor is RAISED when upstream demands more, never lowered automatically —
+# lowering needs a human boot-proof on the older major, not a metadata read.
+# Upstream currently declares no engines field; in that case the floor is kept
+# and CI's floor lane (which boots the bundle on the floor major) stays the
+# enforcement. See docs/vendoring.md ("The Node floor").
+FLOOR_FILE="$VENDOR_DIR/NODE_VERSION"
+CUR_FLOOR=""
+[ -f "$FLOOR_FILE" ] && CUR_FLOOR="$(tr -d '[:space:]' < "$FLOOR_FILE")"
+ENGINES_NODE="$(jq -r '.engines.node // ""' "$EXTRACT/package/package.json" 2>/dev/null || true)"
+# First integer in the range expression (">=18", "^18.17", "18.x", …) — the
+# implied minimum major. Empty when upstream declares nothing numeric.
+DERIVED_FLOOR="$(printf '%s' "$ENGINES_NODE" | sed -nE 's/^[^0-9]*([0-9]+).*$/\1/p')"
+if [ -n "$DERIVED_FLOOR" ] && { [ -z "$CUR_FLOOR" ] || [ "$DERIVED_FLOOR" -gt "$CUR_FLOOR" ]; }; then
+  printf '%s\n' "$DERIVED_FLOOR" > "$FLOOR_FILE"
+  FLOOR_NOTE="${CUR_FLOOR:-unset} → $DERIVED_FLOOR (upstream engines.node '$ENGINES_NODE')"
+  log "  ⚠ Node floor raised to $DERIVED_FLOOR by upstream engines.node ('$ENGINES_NODE') — update the README bullet and the ci.yml matrix (tests/unit/node-floor.test.sh enforces the sync)"
+elif [ -n "$DERIVED_FLOOR" ]; then
+  FLOOR_NOTE="$CUR_FLOOR (unchanged; upstream engines.node '$ENGINES_NODE' implies $DERIVED_FLOOR)"
+else
+  FLOOR_NOTE="${CUR_FLOOR:-unset} (unchanged; upstream declares no engines.node — the CI floor lane's boot proof carries the floor)"
+fi
+
 # --- Write the new bundle + rewrite the marker ------------------------------
 log "Bundle changed — updating $VENDORED_PATH and the marker…"
 cp "$SRC_BUNDLE" "$BUNDLE"
@@ -297,9 +323,11 @@ printf '  version:   %s → %s\n' "$PINNED_VERSION" "$VERSION"
 printf '  bundle:    %s → %s\n' "$(short "${OLD_BUNDLE_SHA:-none}")" "$(short "$NEW_BUNDLE_SHA")"
 printf '  tarball:   %s\n' "$(short "$TARBALL_SHA")"
 printf '  provenance: integrity ✓ (SHA-512 SRI + SHA-1 match registry); signature %s\n' "$SIG_STATUS"
+printf '  node floor: %s\n' "$FLOOR_NOTE"
 printf '  marker:    %s\n' "$VENDORED_PATH (vendored.json updated)"
 printf '\n'
 printf 'Next steps (NOT done for you):\n'
 printf '  1. Run the offline-boot verification before committing:\n'
 printf '       scripts/test.sh tests/integration/offline-boot.test.sh\n'
+printf '     (CI also boots the bundle on the pinned Node floor — vendor/ynab-mcp/NODE_VERSION.)\n'
 printf '  2. Review the diff, then commit manually (no auto-commit).\n'

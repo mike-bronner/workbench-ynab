@@ -49,6 +49,19 @@ test_references_keychain_entry() {
   assert_contains "$body" 'add-generic-password -s "ynab-mcp" -a "access-token"' "store with -U"
 }
 
+# Step 1a enforces the pinned Node floor (issue #3): presence on PATH is not
+# enough — the prereq check must run the shared version gate (bin/node-floor.sh,
+# whose functional contract is covered by tests/unit/node-floor.test.sh) and
+# read the canonical floor marker. Deleting the version-check block from the
+# command makes both needles vanish and this test fail.
+test_step1_enforces_node_floor() {
+  local body; body="$(cat "$CMD")"
+  assert_contains "$body" "bin/node-floor.sh" \
+    "Step 1a runs the shared Node-floor version gate"
+  assert_contains "$body" "vendor/ynab-mcp/NODE_VERSION" \
+    "Step 1a reads the canonical floor marker"
+}
+
 # It sources tool names from the SSoT rather than inlining them.
 test_references_tool_ssot() {
   assert_contains "$(cat "$CMD")" "skills/protocol/ynab-tools.md" \

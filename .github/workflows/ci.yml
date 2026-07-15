@@ -8,7 +8,9 @@ name: ci
 #                       .sh + `jq empty` over every tracked .json
 #                       (scripts/lint.sh is the single entrypoint)
 #   * test            — the full bash + Node suite via scripts/test.sh on
-#                       ubuntu-latest, including the offline-boot proof (#14)
+#                       ubuntu-latest, on BOTH the pinned Node floor
+#                       (vendor/ynab-mcp/NODE_VERSION, issue #3) and current
+#                       LTS, including the offline-boot proof (#14)
 #   * bash-3-2        — the persona footer-escaping tests under macOS's
 #                       bash 3.2, mechanically enforcing the dual-bash
 #                       guarantee (issue #126 AC-3)
@@ -56,9 +58,19 @@ jobs:
   # YNAB_ACCESS_TOKEN env var — no Keychain anywhere in CI (the launcher's
   # `security(1)` read is fully stubbed by the test suite; see docs/ci.md).
   # scripts/test.sh discovers every tests/**/*.test.{sh,mjs,js} itself, so new
-  # test files gate here automatically. Single current-LTS node (v1 policy).
+  # test files gate here automatically. Runs on BOTH the pinned Node floor and
+  # current LTS (issue #3): the floor lane boots the vendored bundle on the
+  # oldest supported major, so a re-vendor that silently raises the requirement
+  # fails CI before it ships.
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # '18' is the pinned Node floor — the canonical value lives in
+        # vendor/ynab-mcp/NODE_VERSION, and tests/unit/node-floor.test.sh fails
+        # the suite if this matrix entry drifts from it. 'lts/*' keeps the
+        # current-LTS coverage.
+        node-version: ['18', 'lts/*']
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
@@ -70,10 +82,10 @@ jobs:
       - name: Check the swap-ready tool-name invariant on the real tree
         run: bash bin/check-tool-name-sources.sh
 
-      - name: Set up Node
+      - name: Set up Node ${{ matrix.node-version }}
         uses: actions/setup-node@v5
         with:
-          node-version: lts/*
+          node-version: ${{ matrix.node-version }}
 
       - name: Run the test suite
         run: bash scripts/test.sh

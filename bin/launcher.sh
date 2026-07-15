@@ -58,6 +58,14 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
+# Enforce the pinned minimum Node major (issue #3): scheduled runs bypass
+# interactive setup, so the launcher must fail fast — STDERR only, non-zero
+# exit, not a byte on the JSON-RPC stdout channel — instead of letting the
+# bundle die cryptically under an unsupported Node. bin/node-floor.sh owns the
+# floor read + comparison (canonical value: vendor/ynab-mcp/NODE_VERSION) and
+# writes its one actionable line to stderr itself.
+bash "${SCRIPT_DIR}/node-floor.sh" || exit 1
+
 # Inject only the package-native token env, then hand off. exec replaces this
 # shell with node so Claude Code's MCP stop signal reaches the server directly
 # and signals propagate cleanly.

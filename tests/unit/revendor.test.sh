@@ -45,6 +45,7 @@ source "$ROOT/tests/lib/assert.sh"
 REVENDOR_SRC="$ROOT/bin/revendor.sh"
 MARKER_SRC="$ROOT/vendor/ynab-mcp/vendored.json"
 BUNDLE_SRC="$ROOT/vendor/ynab-mcp/index.cjs"
+FLOOR_SRC="$ROOT/vendor/ynab-mcp/NODE_VERSION"
 BASH_BIN="$(command -v bash)"
 
 # A sandbox repo mirroring the layout revendor.sh resolves against (it derives
@@ -56,6 +57,7 @@ make_sandbox() {
   cp "$REVENDOR_SRC" "$sb/bin/revendor.sh"
   cp "$MARKER_SRC" "$sb/vendor/ynab-mcp/vendored.json"
   cp "$BUNDLE_SRC" "$sb/vendor/ynab-mcp/index.cjs"
+  cp "$FLOOR_SRC" "$sb/vendor/ynab-mcp/NODE_VERSION"
   printf '%s' "$sb"
 }
 
@@ -85,6 +87,13 @@ case "${1:-}" in
     work="$(mktemp -d)"
     mkdir -p "$work/package/dist/bundle"
     cp "$MOCK_BUNDLE_SRC" "$work/package/dist/bundle/index.cjs"
+    # Optional engines declaration (issue #3): when MOCK_PKG_ENGINES_NODE is
+    # set, ship a package.json so the script's Node-floor re-derivation has an
+    # engines.node to read; unset mirrors upstream today (no engines field).
+    if [ -n "${MOCK_PKG_ENGINES_NODE:-}" ]; then
+      printf '{"name":"mock","version":"0.0.0","engines":{"node":"%s"}}\n' \
+        "$MOCK_PKG_ENGINES_NODE" > "$work/package/package.json"
+    fi
     file="mock-ynab-mcpb.tgz"
     tar -czf "$PWD/$file" -C "$work" package
     rm -rf "$work"
@@ -556,5 +565,60 @@ test_signature_null_shape_aborts_before_write() { assert_sig_shape_aborts nullsh
 # through to "verified" — the unknown-key guard fails closed. (Regression test
 # for the fail-open fix.)
 test_signature_unknown_category_aborts_before_write() { assert_sig_shape_aborts newcategory; }
+
+# --- Node floor re-derivation (issue #3) -------------------------------------
+# Shared driver: re-vendor a changed bundle with an optional upstream
+# engines.node declaration, then assert the sandbox NODE_VERSION outcome.
+# $1 = MOCK_PKG_ENGINES_NODE value ("" = upstream declares no engines field)
+# $2 = expected NODE_VERSION content after the run
+_revendor_changed_bundle_with_engines() {
+  local engines="$1" expected_floor="$2" sb mockbin marker name newsrc out rc
+  sb="$(make_sandbox)"
+  mockbin="$(make_mockbin "$sb")"
+  marker="$sb/vendor/ynab-mcp/vendored.json"
+  name="$(jq -r '.name' "$marker")"
+  newsrc="$sb/new-index.cjs"
+  printf 'changed-bundle-bytes %s\n' "$(date +%s)-$RANDOM" > "$newsrc"
+
+  set +e
+  out="$(env PATH="$mockbin:$PATH" MOCK_BUNDLE_SRC="$newsrc" \
+    EXPECTED_SPEC="$name@9.9.9-test" MOCK_PKG_NAME="$name" \
+    MOCK_PKG_ENGINES_NODE="$engines" \
+    "$BASH_BIN" "$sb/bin/revendor.sh" "9.9.9-test" 2>/dev/null)"
+  rc=$?
+  set -e
+
+  assert_eq 0 "$rc" "changed-bundle re-vendor should exit 0"
+  assert_eq "$expected_floor" "$(tr -d '[:space:]' < "$sb/vendor/ynab-mcp/NODE_VERSION")" \
+    "NODE_VERSION must hold the expected floor after the run"
+  assert_contains "$out" "node floor:" "the summary must report the floor outcome"
+  LAST_FLOOR_OUT="$out"
+  rm -rf "$sb"
+}
+
+# An upstream engines.node demanding a HIGHER major must raise the pinned floor.
+test_floor_raised_by_upstream_engines() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines ">=$((cur + 2))" "$((cur + 2))"
+  assert_contains "$LAST_FLOOR_OUT" "$cur → $((cur + 2))" \
+    "the summary must show the old → new floor"
+}
+
+# No engines field (upstream today) → the floor is KEPT, never invented.
+test_floor_kept_when_upstream_declares_no_engines() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines "" "$cur"
+  assert_contains "$LAST_FLOOR_OUT" "no engines.node" \
+    "the summary must note that upstream declares no engines field"
+}
+
+# An engines.node BELOW the pinned floor must never lower it automatically —
+# lowering needs a human boot-proof on the older major, not a metadata read.
+test_floor_never_lowered_by_upstream_engines() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines ">=1" "$cur"
+  assert_contains "$LAST_FLOOR_OUT" "unchanged" \
+    "the summary must report the floor as unchanged"
+}
 
 run_tests
