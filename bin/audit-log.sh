@@ -59,17 +59,26 @@
 #                     before{…}, after{…}, … }. before/after are stored VERBATIM,
 #                     in raw milliunits — the read helper divides by 1000 only for
 #                     human display.
-#   result_json     The apply executor's per-op result descriptor, carrying the
+#   result_json     The write path's per-op result descriptor, carrying the
 #                   op outcome plus the change-set provenance it knows:
 #                     { tool, status, schema_version, run_id, error_class?, applied_state? }
 #                   tool   = namespaced MCP tool invoked (e.g. mcp__ynab__ynab_update_transaction)
-#                   status = the executor's NORMALIZED per-op result status:
-#                            applied | skipped-stale | blocked | error — the frozen
-#                            STATUS enum in assets/apply-executor.js, the
-#                            authoritative definition of this vocabulary. The
-#                            value lands verbatim in each record's result_status
-#                            on the trail docs/audit-log.md describes (its
-#                            example record shows result_status: applied).
+#                   status = the write path's NORMALIZED status. It lands verbatim
+#                            in each record's result_status, whose full on-trail
+#                            vocabulary is five values from three producers:
+#                              applied | skipped-stale | blocked | error
+#                                — the frozen STATUS enum in assets/apply-executor.js
+#                                  (the authoritative definition of these four),
+#                                  passed by the executor's recordAudit and
+#                                  mirrored by assets/reconcile-handler.js's
+#                                  recordAudit;
+#                              pending_delete
+#                                — the delete path's pre-delete INTENT sentinel
+#                                  (assets/delete-duplicate.js
+#                                  makeAuditingDeleteApplyOp), written before the
+#                                  irreversible delete runs so a destructive op
+#                                  leaves a two-phase trail (#50): intent before,
+#                                  outcome after.
 #                            Never a raw MCP call status such as `success`; a
 #                            dry-run simulation arrives as `applied` with the
 #                            separate dry_run flag distinguishing it.
@@ -194,13 +203,16 @@ JQ
 #
 #   TRUSTED PASS-THROUGH — no normalization, no validation. The writer stores
 #   $res.status verbatim into result_status (and every other field likewise); it
-#   does NOT map or reject values outside the four-value enum frozen as STATUS
-#   in assets/apply-executor.js (applied | skipped-stale | blocked | error).
-#   Its only production caller — that executor's recordAudit, wired to this
-#   helper by commands/ynab-apply.md — always passes a status from that frozen
-#   STATUS enum. A future second caller MUST do the same: handing this writer
-#   a raw MCP call status (e.g. `success`) would put an out-of-enum value on
-#   the permanent trail.
+#   does NOT map or reject values outside the trail's five-value vocabulary
+#   (see THE WRITER CONTRACT above). Its three production callers — wired to
+#   this helper by commands/ynab-apply.md — all honor it:
+#   assets/apply-executor.js's recordAudit and assets/reconcile-handler.js's
+#   recordAudit pass only the frozen four-value STATUS enum (applied |
+#   skipped-stale | blocked | error), and assets/delete-duplicate.js's
+#   makeAuditingDeleteApplyOp adds the pending_delete intent sentinel
+#   (two-phase trail #50). Any future caller MUST stay within that vocabulary:
+#   handing this writer a raw MCP call status (e.g. `success`) would put an
+#   undocumented value on the permanent trail.
 _audit_append() {
   local op="${1:-}" res="${2:-}" dry_raw="${3:-false}" dry
   case "$dry_raw" in

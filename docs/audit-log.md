@@ -77,8 +77,20 @@ fragment (see [Why JSONL](#why-jsonl-one-object-per-line-not-a-single-json-array
 | Argument | Shape | Notes |
 |---|---|---|
 | `operation_json` | a change-set operation (see [`assets/changeset-schema.json`](../assets/changeset-schema.json)) | `before`/`after` are stored **verbatim, in raw milliunits** |
-| `result_json` | `{ tool, status, schema_version, run_id, error_class?, applied_state? }` | the executor's call descriptor + the change-set provenance it carries; the last two are present only on an errored op |
+| `result_json` | `{ tool, status, schema_version, run_id, error_class?, applied_state? }` | the write path's call descriptor + the change-set provenance it carries; the last two are present only on an errored op |
 | `dry_run` | `true`\|`1`\|`yes` → `true`; else `false` | dry runs are logged too, flagged, so they leave a full paper trail |
+
+`status` is stored verbatim as each record's `result_status`. Its full on-trail
+vocabulary is five values from three producers:
+
+| `result_status` | Written by |
+|---|---|
+| `applied` / `skipped-stale` / `blocked` / `error` | the frozen `STATUS` enum in [`assets/apply-executor.js`](../assets/apply-executor.js) — the authoritative definition of these four — passed by the executor's `recordAudit` and mirrored by [`assets/reconcile-handler.js`](../assets/reconcile-handler.js)'s `recordAudit` |
+| `pending_delete` | the delete path's pre-delete **intent** record ([`assets/delete-duplicate.js`](../assets/delete-duplicate.js) `makeAuditingDeleteApplyOp`), appended before the irreversible delete runs so a destructive op leaves a two-phase trail ([#50](https://github.com/mike-bronner/workbench-ynab/issues/50)): intent before, outcome after |
+
+The writer itself performs no validation or normalization of `status` — it is a
+trusted pass-through (see `_audit_append`); a raw MCP call status such as
+`success` is never a valid input.
 
 On an **errored** op the executor also stamps two auth-failure fields (GAP-8 / #50),
 which the writer persists verbatim (both default to `null` on a non-error op):
