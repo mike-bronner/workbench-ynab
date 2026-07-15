@@ -5,7 +5,7 @@
 # Style mirrors tests/unit/config.test.sh: raw bash, `set -u`, PASS/FAIL
 # counters, a mktemp sandbox, and a non-zero exit when anything fails. The
 # writer is exercised in isolation (no YNAB) by sourcing the helper and calling
-# its functions, exactly as test-config.sh sources bin/config.sh.
+# its functions, exactly as config.test.sh sources bin/config.sh.
 #
 # Requires jq (the helper itself requires jq); skips with a clear message if absent.
 
@@ -462,9 +462,11 @@ export YNAB_AUDIT_MONTH="2026-06"
 export YNAB_AUDIT_TIMESTAMP="2026-06-15T16:00:00Z"
 _audit_append "$CATEGORIZE_OP" "$CATEGORIZE_RES" false
 # Portable octal-perms read: GNU/Linux `stat -c '%a'`, BSD/macOS `stat -f '%Lp'`.
-# GNU must be probed FIRST: on GNU, `stat -f` is filesystem-status mode, which
-# SUCCEEDS with garbage output, so a BSD-first `||` chain never falls through.
-# BSD `stat -c` is a genuine error, so this order fails over cleanly.
+# GNU must be probed FIRST. On GNU, `stat -f '%Lp' "$1"` treats `%Lp` as a bad
+# file operand: it exits non-zero (so a BSD-first `||` *does* fall through) but
+# first prints $1's filesystem-status block to stdout — polluting the capture
+# with "<fs block>\n<mode>". Probing GNU `stat -c '%a'` first avoids that; BSD
+# `stat -c` is a genuine error, so this order fails over cleanly on macOS.
 mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 assert_eq "audit dir is created mode 700"  "700" "$(mode_of "$YNAB_AUDIT_DIR")"
 assert_eq "record file is created mode 600" "600" "$(mode_of "$YNAB_AUDIT_DIR/audit-2026-06.jsonl")"
