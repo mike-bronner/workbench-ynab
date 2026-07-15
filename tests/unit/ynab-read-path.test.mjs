@@ -290,6 +290,15 @@ test('createReadCache shares one in-flight pull across concurrent same-key gets 
   assert.deepEqual(first.items, [{ id: 'a' }]);
 });
 
+test('ANNOTATION is pinned to the verbatim acceptance-criteria literal', () => {
+  // The degraded-partial tests assert annotationFor(...) === ANNOTATION, but
+  // both sides come from the module under test — a typo edited into the
+  // constant would pass the whole suite. Pinning the verbatim AC #3 wording
+  // here makes any wording edit fail loud instead (#158; same shape as #156's
+  // config-snippet pin).
+  assert.equal(ANNOTATION, '[YNAB rate limit hit — partial review]');
+});
+
 test('createReadCache degrades to a labelled partial review when 429 retries exhaust', async () => {
   const { sleep } = recordingSleep();
   let calls = 0;
