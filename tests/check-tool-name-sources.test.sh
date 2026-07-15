@@ -11,10 +11,13 @@
 # central invariant (no concrete YNAB tool name outside the allowlist). This
 # file is the test for the test: it proves the guard catches a planted name on
 # every scanned surface, honours the allowlist, ignores the bare prefix / family
-# glob, and passes on a clean tree.
+# glob, passes on a clean tree — and (issue #131) that the REAL tree is clean,
+# so a hard-coded name anywhere in the repo fails the suite, not just the
+# sandbox drills.
 #
-# It runs the guard against a throwaway sandbox repo, so it never mutates the
-# real tree. The forbidden token is assembled at runtime from two harmless
+# The mechanics cases run the guard against a throwaway sandbox repo, so they
+# never mutate the real tree; the final case runs it read-only from the repo
+# root. The forbidden token is assembled at runtime from two harmless
 # fragments — the bare prefix (never matched by the guard) and an operation
 # suffix — so THIS file contains no literal concrete name and stays clean when
 # the guard scans tests/.
@@ -94,6 +97,24 @@ run_case "concrete name inside vendor/ is ignored"       0 "vendor/index.cjs"   
 run_case "concrete name inside .git/ is ignored"         0 ".git/probe.md"                "$CONCRETE"
 run_case "concrete name inside node_modules/ is ignored" 0 "node_modules/pkg/index.js"    "$CONCRETE"
 run_case "clean tree passes"                             0 ""                              ""
+
+# The sandbox cases prove the guard's MECHANICS; this case proves the INVARIANT
+# itself — the real repository tree is clean (issue #131: the guard failed on
+# main and no CI job noticed, because this self-test only ever exercised a
+# sandbox). Because this file is a tests/**/*.test.sh, scripts/test.sh discovers
+# it and CI runs it — so a new hard-coded name now fails the build here too.
+echo "Self-test: the real repository tree is clean"
+real_out=""
+real_rc=0
+real_out="$( (cd "$SELF_DIR/.." && bash bin/check-tool-name-sources.sh) 2>&1 )" || real_rc=$?
+if [ "$real_rc" -eq 0 ]; then
+  echo "  ✓ real tree passes the guard (exit 0)"
+  pass=$((pass + 1))
+else
+  echo "  ✖ real tree FAILS the guard (exit $real_rc):"
+  printf '%s\n' "$real_out" | sed 's/^/    /'
+  fail=$((fail + 1))
+fi
 
 echo
 echo "Passed: $pass   Failed: $fail"
