@@ -13,7 +13,9 @@
 # for the issue #43 acceptance criteria (exactly five findings, the three
 # severity emoji aligned with the M2-5 badges, the per-finding structure, the
 # persona sign-off, the report pointer, all four tier examples, tier-agnostic,
-# presentation-only).
+# presentation-only) plus the issue #185 guard on §6's conditional
+# not-tax-advice tag (present exactly once in the tax-bearing examples, absent
+# from the non-tax ones, placed between the findings and the report pointer).
 
 set -u
 
@@ -175,6 +177,57 @@ for t in "${expected_tiers[@]}"; do
     printf 'ok   — %s report pointer matches YNAB-%s-Review-<date>.html\n' "$t" "$ftier"; pass=$((pass + 1))
   else
     printf 'FAIL — %s report pointer missing or wrong filename shape\n' "$t"; fail=$((fail + 1))
+  fi
+done
+
+# ---- conditional not-tax-advice tag (§6, issue #185) ---------------------------
+# The canonical compact tag (skills/shared/disclaimer.md) is *conditional*: the
+# tax-bearing worked examples (Quarterly-Tax, Annual) must carry it exactly once,
+# on its own line between the five findings and the report pointer; the non-tax
+# examples (Weekly, Monthly) must not carry it — nor any ⚠️ — at all. The tag is
+# never a finding: no severity emoji may share its line, so it cannot skew the
+# 5-finding count above.
+TAG='⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.'
+
+for t in "#### Quarterly-Tax tier" "#### Annual tier"; do
+  blk="$(tier_block "$t")"
+
+  # exactly one line that is exactly the canonical tag; and no second variant
+  # smuggled in elsewhere in the example (own line ⇒ no severity emoji prefix,
+  # no finding structure — it can't count toward the fixed five).
+  if [ "$(printf '%s\n' "$blk" | grep -cxF -- "$TAG")" -eq 1 ] \
+     && [ "$(printf '%s\n' "$blk" | grep -cF -- 'not tax advice')" -eq 1 ]; then
+    printf 'ok   — %s carries the canonical not-tax-advice tag exactly once, on its own line\n' "$t"; pass=$((pass + 1))
+  else
+    printf 'FAIL — %s must carry the canonical not-tax-advice tag exactly once, on its own line\n' "$t"; fail=$((fail + 1))
+  fi
+
+  # placement (§6): after the last emoji-prefixed finding line and before the
+  # report-pointer line.
+  if printf '%s\n' "$blk" | awk -v tag="$TAG" '
+       /^🔴 \*\*/ || /^🟡 \*\*/ || /^🟢 \*\*/ { last = NR }
+       $0 == tag                              { tagln = NR }
+       /^📄 Full report:/                     { ptr = NR }
+       END { exit !(last && tagln && ptr && tagln > last && tagln < ptr) }
+     '; then
+    printf 'ok   — %s tag sits between the five findings and the report pointer\n' "$t"; pass=$((pass + 1))
+  else
+    printf 'FAIL — %s tag is not between the five findings and the report pointer\n' "$t"; fail=$((fail + 1))
+  fi
+
+  # never a finding: no severity emoji ever shares a line with the tag text.
+  if printf '%s\n' "$blk" | grep -qE -- '(🔴|🟡|🟢).*not tax advice'; then
+    printf 'FAIL — %s tag carries a severity emoji — it must never be a finding\n' "$t"; fail=$((fail + 1))
+  else
+    printf 'ok   — %s tag carries no severity emoji (never one of the five findings)\n' "$t"; pass=$((pass + 1))
+  fi
+done
+
+for t in "#### Weekly tier" "#### Monthly tier"; do
+  if tier_block "$t" | grep -qF -- '⚠️'; then
+    printf 'FAIL — %s (non-tax) unexpectedly carries a ⚠️ / not-tax-advice tag\n' "$t"; fail=$((fail + 1))
+  else
+    printf 'ok   — %s (non-tax) omits the not-tax-advice tag (no ⚠️ at all)\n' "$t"; pass=$((pass + 1))
   fi
 done
 
