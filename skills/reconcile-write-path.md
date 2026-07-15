@@ -121,8 +121,13 @@ const { results } = await applyReconcile(reconcileOps, {
 - **`readLiveState(op)`** returns, by sub-action:
   - `reconcile_account` — `{ cleared_balance, reconciled_balance?, cleared? }`
     (account-level, resolved from `ynab_get_account`).
-  - `mark_cleared` — `{ transactions: [{ id, cleared }, …] }` for the target ids
-    (resolved from `ynab_get_transaction` / `ynab_list_transactions`).
+  - `mark_cleared` — `{ transactions: [{ id, cleared, account_id, amount,
+    subtransactions? }, …] }` for the target ids (resolved from
+    `ynab_get_transaction` / `ynab_list_transactions`). `account_id` and `amount`
+    (plus `subtransactions` for a split) feed the split/transfer-correct
+    `cleared_balance_impact` math (GAP-19 / #49) — a live transaction missing
+    `account_id` makes the impact incomputable and it is reported as `null`
+    (honest unknown), **never a fabricated 0**.
 - **`applyOp(toolName, payload, op)`** invokes the one namespaced mutating tool
   with the minimal `payload` the handler built (real apply only).
 - **`authPreflight()`** is a read-only YNAB call (e.g. `ynab_list_budgets`) that

@@ -24,6 +24,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const {
   formatDollars,
   validateTwinEvidence,
+  validateNotTransferLeg,
   shapeVictimSnapshot,
   renderDeletePreview,
   requiresStrongConfirmation,
@@ -299,4 +300,46 @@ test('the pre-delete audit record carries the actual dryRun flag', async () => {
   const wrappedDefault = makeAuditingDeleteApplyOp({ applyOp, audit, changeset: { schema_version: 1 } });
   await wrappedDefault(DELETE_TOOL, validOp());
   assert.equal(records[0].dryRun, false);
+});
+
+// --- validateNotTransferLeg (GAP-19 / #49: transfer-leg HARD BLOCK) ----------
+
+test('validateNotTransferLeg passes a plain duplicate pair (no transfer signal on either candidate)', () => {
+  assert.deepEqual(validateNotTransferLeg(validOp()), { valid: true });
+});
+
+test('a non-null transfer_transaction_id on the VICTIM hard-blocks with rule transfer_leg_hard_block', () => {
+  const op = validOp();
+  op.before.transfer_transaction_id = 't-linked-leg';
+  const verdict = validateNotTransferLeg(op);
+  assert.equal(verdict.valid, false);
+  assert.equal(verdict.error.rule, 'transfer_leg_hard_block');
+  assert.equal(verdict.error.op_id, op.id);
+  assert.deepEqual(verdict.error.transfer_leg, ['victim']);
+  assert.match(verdict.error.reason, /never a duplicate/);
+});
+
+test('a non-null transfer_account_id on the TWIN hard-blocks too — checked on BOTH candidates', () => {
+  const op = validOp();
+  op.twin.transfer_account_id = 'acct-savings';
+  const verdict = validateNotTransferLeg(op);
+  assert.equal(verdict.valid, false);
+  assert.deepEqual(verdict.error.transfer_leg, ['twin']);
+});
+
+test('both candidates transfer legs → both named, victim first (a full pair mis-flagged as duplicates)', () => {
+  const op = validOp();
+  op.before.transfer_account_id = 'acct-b';
+  op.twin.transfer_transaction_id = op.transaction_id;
+  const verdict = validateNotTransferLeg(op);
+  assert.equal(verdict.valid, false);
+  assert.deepEqual(verdict.error.transfer_leg, ['victim', 'twin']);
+});
+
+test('null / empty-string transfer fields are "no value" — no false-positive block', () => {
+  const op = validOp();
+  op.before.transfer_account_id = null;
+  op.before.transfer_transaction_id = '';
+  op.twin.transfer_account_id = null;
+  assert.deepEqual(validateNotTransferLeg(op), { valid: true });
 });

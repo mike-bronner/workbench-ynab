@@ -43,6 +43,7 @@
  */
 
 const fs = require('fs');
+const { isTransferLeg } = require('./transaction-shape');
 
 /**
  * The ledger-only operation-type allow-list. EXACTLY these four operation types
@@ -95,6 +96,7 @@ const RULES = Object.freeze({
   TOOL_DENIED: 'denied_tool_money_movement',
   TOOL_NOT_ALLOWED: 'tool_not_in_allow_list',
   MONEY_MOVEMENT_IN_CATEGORIZE: 'money_movement_detected_in_categorize',
+  TRANSFER_LEG_TARGET: 'transfer_leg_transaction_shape',
   MONEY_MOVEMENT_DETECTED: 'money_movement_detected',
   MONEY_MOVEMENT_FLAG: 'money_movement_flag_not_false',
   BUDGET_ID_MISMATCH: 'budget_id_mismatch',
@@ -299,6 +301,24 @@ function evaluateOperation(op, context = {}) {
       rule,
       'Operation carries a transfer / money-movement signal (transfer account, transfer payee, ' +
         'or a proposed payee_id repoint) in its proposed state; ledger-only writes may never move money.',
+    );
+  }
+
+  // 3.5. Transaction-shape check (GAP-19 / #49): a categorize op must never target
+  //      a transfer LEG. The step-3 scan deliberately excludes `before` (it may
+  //      legitimately describe a pre-existing transfer), but for CATEGORIZE the
+  //      `before` snapshot is exactly where the target's shape evidence lives — a
+  //      non-null transfer_account_id / transfer_transaction_id there means the
+  //      transaction IS one half of a transfer pair, whose category is reserved by
+  //      transfer semantics. Complements the transfer-payee check above at the
+  //      transaction-shape level.
+  if (opType === 'categorize' && isTransferLeg(op.before)) {
+    return block(
+      opId,
+      opType,
+      RULES.TRANSFER_LEG_TARGET,
+      'Categorize operation targets a transfer leg (before carries a non-null transfer_account_id / ' +
+        'transfer_transaction_id); a transfer leg\'s category is reserved and may never be set by a write path.',
     );
   }
 

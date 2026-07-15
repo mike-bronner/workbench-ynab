@@ -486,3 +486,45 @@ test('CLI: no file argument is a usage error (exit 2)', () => {
   assert.equal(r.status, 2);
   assert.match(r.stderr, /usage:/);
 });
+
+// --- (GAP-19 / #49) transaction-shape check: categorize on a transfer LEG ----
+
+test('(#49) categorize targeting a transfer LEG (transfer_account_id in before) is blocked at guardrail time', () => {
+  const op = {
+    id: 'op-leg',
+    type: 'categorize',
+    budget_id: BUDGET,
+    transaction_id: 't-leg',
+    before: { category_id: null, category_name: null, transfer_account_id: 'acct-savings' },
+    after: { category_id: 'c1', category_name: 'Groceries' },
+    rationale: 'mis-targeted transfer leg',
+    risk: 'low',
+  };
+  const v = evaluateOperation(op, { activeBudgetId: BUDGET });
+  assert.equal(v.verdict, 'block');
+  assert.equal(v.rule, RULES.TRANSFER_LEG_TARGET);
+  assert.equal(v.op_id, 'op-leg');
+  assert.equal(v.op_type, 'categorize');
+});
+
+test('(#49) transfer_transaction_id in before trips the same shape rule; null/empty transfer fields do not', () => {
+  const base = () => ({
+    id: 'op-x',
+    type: 'categorize',
+    budget_id: BUDGET,
+    transaction_id: 't1',
+    before: { category_id: null, category_name: null },
+    after: { category_id: 'c1', category_name: 'Groceries' },
+    rationale: 'x',
+    risk: 'low',
+  });
+  const linked = base();
+  linked.before.transfer_transaction_id = 't-other-leg';
+  assert.equal(evaluateOperation(linked, { activeBudgetId: BUDGET }).rule, RULES.TRANSFER_LEG_TARGET);
+
+  // Nulls and empty strings are "no value" — a plain transaction is not blocked.
+  const plain = base();
+  plain.before.transfer_account_id = null;
+  plain.before.transfer_transaction_id = '';
+  assert.deepEqual(evaluateOperation(plain, { activeBudgetId: BUDGET }), { verdict: 'pass' });
+});

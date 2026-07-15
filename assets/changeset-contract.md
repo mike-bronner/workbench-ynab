@@ -47,6 +47,19 @@ human approval gates the transition from proposal to any write:
 The `id` on every operation is stable, so apply can be **idempotent on resume**:
 a re-run skips operations already recorded as applied in the audit log.
 
+**Split/transfer ambiguity is routed to the human-review-only bucket at Produce
+time (GAP-19 / #49).** Every case the write path cannot auto-resolve — a split
+parent's category (its subtransactions carry the real category legs), a transfer
+leg's category (reserved by transfer semantics) — gets **no auto-proposed
+operation**: the producer lists it for the human under review findings instead of
+emitting a change-set op for it. This is the v1 conservative posture
+(flag-not-auto-modify, [`transaction-shape.js`](./transaction-shape.js)), and the
+handlers enforce it as defense in depth: a split parent or transfer leg that
+reaches the categorize handler anyway comes back `human_review_required`
+(never applied), and a transfer leg in a `delete_duplicate` op is a **hard
+block** — one-leg deletion corrupts the linked account's ledger, so no
+confirmation can approve it.
+
 The stages above are the lifecycle of a *single* change-set. The lifecycle of the
 proposal **files** around it — which proposal apply selects when several exist,
 when a proposal is too stale to apply, how applied/superseded proposals are
