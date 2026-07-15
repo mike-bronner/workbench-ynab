@@ -32,7 +32,9 @@ const { applyDeleteDuplicates } = require('./assets/delete-duplicate');
 const outcome = await applyDeleteDuplicates(changeset, {
   activeBudgetId,        // mandatory — the guardrail fails closed without it
   dryRun: false,         // omit / true = simulate; explicit false = real delete
-  readLiveState,         // async (op) => live victim state (wire to the get-transaction read)
+  readLiveState,         // async (op) => live state of the transaction op.transaction_id names
+                         // (wire to the get-transaction read; the handler re-invokes it with the
+                         // twin's id swapped in for the twin-side live hard block)
   applyOp,               // async (toolName, op) => mcp result   (real delete only)
   audit,                 // async ({ operation, result, dryRun }) => void  (M4-3 sink)
 });
@@ -97,9 +99,15 @@ ignored), so the full projection is drift-equivalent to projecting by
 block: the handler re-derives `is_transfer_leg` from this **live** read
 (GAP-19 / #49), so a projection that strips `transfer_account_id` /
 `transfer_transaction_id` would blind the one gate a snapshot that omits its
-shape evidence cannot talk around. A live transfer leg surfaces as a terminal
-per-op `error` naming `transfer_leg_hard_block`; the delete tool is never
-invoked for it.
+shape evidence cannot talk around. The live re-derivation covers **both**
+candidates, matching the "never target — or pair with — a transfer leg"
+guarantee: the **victim** via the executor's own live read, and the **twin**
+via a second read through the same port with the twin's `id` swapped into
+`op.transaction_id` (the port simply resolves whatever id that field names —
+no separate twin port). A live transfer leg on either side surfaces as a
+terminal per-op `error` naming `transfer_leg_hard_block`; the delete tool is
+never invoked for it, and a twin read that fails is a per-op read error, never
+a skipped check.
 
 ### 5. Audit the full before-snapshot, before the delete
 

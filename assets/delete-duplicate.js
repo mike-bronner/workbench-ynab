@@ -400,25 +400,47 @@ async function applyDeleteDuplicates(changeset, options = {}) {
   // fields optional, so a schema-valid op that simply OMITS them (or lies with nulls)
   // walks straight past it. The one thing a payload cannot talk around is the LIVE
   // read the executor already performs — so the hard block is re-derived there: wrap
-  // the injected readLiveState port and re-check isTransferLeg on the LIVE victim.
-  // A live transfer leg throws, which the executor records as a terminal per-op
-  // `error` (never dispatched — the delete tool is unreachable for it) while the rest
-  // of the batch proceeds under normal per-op semantics. Structurally fail-closed:
-  // the ONLY route to `ynab_delete_transaction` runs through a successful live read,
-  // and every successful live read passes this gate first. Requires the port to
-  // project the full victim shape — shapeVictimSnapshot(liveTxn), transfer fields
-  // included — per skills/delete-duplicate.md.
+  // the injected readLiveState port and re-check isTransferLeg on BOTH live candidates,
+  // matching validateNotTransferLeg's "never target OR PAIR WITH a transfer leg"
+  // guarantee:
+  //   - the VICTIM — the executor's own live read of op.transaction_id;
+  //   - the TWIN — a second read through the same port with the twin's id swapped in
+  //     (the port resolves whatever `op.transaction_id` names, so no new port is
+  //     needed; see skills/delete-duplicate.md). A live transfer-leg twin proves the
+  //     "duplicate pair" is really a legitimate transfer pair, so deleting the victim
+  //     would be a wrong, irreversible delete even though the victim itself is clean.
+  // Either live leg throws, which the executor records as a terminal per-op `error`
+  // (never dispatched — the delete tool is unreachable for it) while the rest of the
+  // batch proceeds under normal per-op semantics. Structurally fail-closed: the ONLY
+  // route to `ynab_delete_transaction` runs through a successful live read, and every
+  // successful live read passes this gate first — a twin read that fails is a per-op
+  // read error, never a skipped check. Requires the port to project the full victim
+  // shape — shapeVictimSnapshot(liveTxn), transfer fields included — per
+  // skills/delete-duplicate.md.
   const shapeGuardedRead = typeof readLiveState === 'function'
     ? async (op) => {
       const live = await readLiveState(op);
-      if (op && op.type === OP_TYPE && isTransferLeg(live)) {
-        const err = new Error(
-          `transfer_leg_hard_block: delete_duplicate op ${op && op.id != null ? op.id : '(no id)'} targets a LIVE transfer leg `
-          + '(the live read carries a non-null transfer_account_id / transfer_transaction_id); deleting one leg of a transfer '
-          + 'pair corrupts the linked account\'s ledger — hard-blocked from the live state, regardless of the op\'s snapshot evidence.',
-        );
-        err.rule = 'transfer_leg_hard_block';
-        throw err;
+      if (op && op.type === OP_TYPE) {
+        if (isTransferLeg(live)) {
+          const err = new Error(
+            `transfer_leg_hard_block: delete_duplicate op ${op.id != null ? op.id : '(no id)'} targets a LIVE transfer leg `
+            + '(the live read carries a non-null transfer_account_id / transfer_transaction_id); deleting one leg of a transfer '
+            + 'pair corrupts the linked account\'s ledger — hard-blocked from the live state, regardless of the op\'s snapshot evidence.',
+          );
+          err.rule = 'transfer_leg_hard_block';
+          throw err;
+        }
+        const twinId = op.twin && typeof op.twin.id === 'string' && op.twin.id.length > 0 ? op.twin.id : null;
+        if (twinId !== null && isTransferLeg(await readLiveState({ ...op, transaction_id: twinId }))) {
+          const err = new Error(
+            `transfer_leg_hard_block: delete_duplicate op ${op.id != null ? op.id : '(no id)'} pairs with a LIVE transfer-leg `
+            + 'TWIN (the live read of the surviving twin carries a non-null transfer_account_id / transfer_transaction_id); '
+            + 'the pair is a legitimate transfer, never duplicates — the victim delete is hard-blocked from the live state, '
+            + 'regardless of the op\'s snapshot evidence.',
+          );
+          err.rule = 'transfer_leg_hard_block';
+          throw err;
+        }
       }
       return live;
     }

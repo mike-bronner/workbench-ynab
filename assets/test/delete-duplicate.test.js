@@ -196,8 +196,9 @@ test('a delete_duplicate op whose victim has drifted is marked stale and skipped
   assert.equal(out.reason, OUTCOME.APPLY_COMPLETE);
   assert.equal(out.results[0].status, STATUS.SKIPPED_STALE);
   assert.equal(out.results[0].detail.reason, 'stale');
-  // The victim was re-read, but never deleted — drift never forces a delete.
-  assert.equal(read.calls.length, 1);
+  // Both candidates were re-read (the victim for drift + shape, the twin for the
+  // twin-side live hard block), but nothing was deleted — drift never forces a delete.
+  assert.equal(read.calls.length, 2);
   assert.equal(apply.calls.length, 0);
   // Skipping is not silent: the stale op still leaves a paper trail. Exactly one
   // audit record was written, stamping the skipped-stale status (and no pending_delete
@@ -497,4 +498,39 @@ test('(#49) a LIVE transfer leg is hard-blocked from the live read even when the
   assert.equal(res.status, STATUS.ERROR); // terminal per-op — never dispatched
   assert.match(res.detail.message, /transfer_leg_hard_block/);
   assert.equal(apply.calls.length, 0, 'the delete tool must NEVER be invoked for a live transfer leg');
+});
+
+test('(#49) a LIVE transfer-leg TWIN is hard-blocked from the live read even when the snapshot OMITS the transfer fields — the delete tool is never invoked', async () => {
+  // The twin-side fail-open payload: `twin` carries NO transfer fields (they are
+  // schema-optional), so the snapshot-based validateNotTransferLeg passes — but the
+  // LIVE surviving twin IS a real transfer leg, proving the "duplicate pair" is a
+  // legitimate transfer pair. The shape-guarded readLiveState must re-derive that
+  // from a live read of the twin's own id and stop the victim delete.
+  const cs = loadFixture('delete-duplicate.example.json');
+  assert.ok(!('transfer_account_id' in cs.operations[0].twin)); // the omission is the point
+  assert.ok(!('transfer_transaction_id' in cs.operations[0].twin));
+  const twinId = cs.operations[0].twin.id;
+  const apply = spy();
+  // The port resolves whatever `op.transaction_id` names (skills/delete-duplicate.md):
+  // the victim reads back clean (no drift, no transfer signal); the twin reads back
+  // as the live transfer leg the snapshot withheld.
+  const read = spy((op) => (op.transaction_id === twinId
+    ? { ...clone(cs.operations[0].twin), transfer_account_id: 'acct-savings', transfer_transaction_id: 't-linked-leg' }
+    : clone(op.before)));
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: read,
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit: auditSpy(),
+  });
+
+  const res = out.results.find((r) => r.op_id === cs.operations[0].id);
+  assert.equal(res.status, STATUS.ERROR); // terminal per-op — never dispatched
+  assert.match(res.detail.message, /transfer_leg_hard_block/);
+  assert.match(res.detail.message, /TWIN/);
+  assert.equal(read.calls.length, 2, 'BOTH candidates are live-read: the victim, then the twin by its own id');
+  assert.equal(read.calls[1][0].transaction_id, twinId);
+  assert.equal(apply.calls.length, 0, 'the delete tool must NEVER be invoked when the live twin is a transfer leg');
 });
