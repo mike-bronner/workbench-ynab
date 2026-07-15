@@ -41,6 +41,16 @@ pin=$(cat "$PIN")
 # first_line <pattern> <file> — line number of the first fixed-string match.
 first_line() { grep -nF -- "$1" "$2" | head -1 | cut -d: -f1; }
 
+# guard_block <pattern> <file> — the guard's if-block: from the first line
+# containing <pattern> (fixed string) through the closing `fi`. Asserting the
+# guard's `exit` INSIDE this block (not anywhere in the file) is what makes
+# the fail/no-op tests honest: delete the exit and the test goes red.
+guard_block() { awk -v pat="$1" 'index($0, pat){f=1} f{print} f && /^ *fi$/{exit}' "$2"; }
+
+# step_block <step-name> <next-step-name> <file> — everything from one step's
+# `name:` line up to (excluding) the next step's.
+step_block() { awk -v from="$1" -v to="$2" 'index($0, to){exit} index($0, from){f=1} f' "$3"; }
+
 # --- release.yml: trigger + inputs ------------------------------------------
 
 test_release_workflow_exists() {
@@ -61,11 +71,17 @@ test_release_dispatch_inputs() {
 test_release_semver_guard() {
   assert_contains "$release" '^[0-9]+\.[0-9]+\.[0-9]+$' "must validate SemVer X.Y.Z"
   assert_contains "$release" "::error::Version must be SemVer" "rejection must be an ::error:: annotation"
+  guard=$(guard_block "Version must be SemVer" "$RELEASE")
+  assert_contains "$guard" "exit 1" "an invalid version must exit 1, not merely print the error"
 }
 
 test_release_tag_exists_guard() {
+  # The needle is the literal workflow text — $NEW_VERSION expands on the runner.
+  # shellcheck disable=SC2016
   assert_contains "$release" 'git rev-parse "v$NEW_VERSION"' "must check the tag does not already exist"
   assert_contains "$release" "::error::Tag v" "tag-exists rejection must be an ::error:: annotation"
+  guard=$(guard_block "::error::Tag v" "$RELEASE")
+  assert_contains "$guard" "exit 1" "an existing tag must exit 1, not merely print the error"
 }
 
 test_release_guards_precede_writes() {
@@ -103,6 +119,10 @@ test_release_verifies_bundle_before_tagging() {
   commit=$(first_line "name: Commit, tag, push" "$RELEASE")
   [ "$verify" -lt "$commit" ] || fail "bundle integrity (line $verify) must gate before commit/tag (line $commit)"
   assert_contains "$release" "::error::Vendored bundle integrity check failed" "a drift must fail with a descriptive error"
+  # The integrity step runs WITHOUT `set -e`, so this exit 1 is the SOLE thing
+  # that aborts a release on a drifted bundle — it must exist inside the guard.
+  guard=$(guard_block "Vendored bundle integrity check failed" "$RELEASE")
+  assert_contains "$guard" "exit 1" "a drifted bundle must exit 1 — nothing else stops the release"
 }
 
 # --- release.yml: tests gate the release -------------------------------------
@@ -128,15 +148,41 @@ test_release_commits_as_actions_bot() {
 }
 
 test_release_annotated_tag_and_pushes() {
+  # Needles are literal workflow text — ${NEW_VERSION} expands on the runner.
+  # shellcheck disable=SC2016
   assert_contains "$release" 'git tag -a "v${NEW_VERSION}"' "tag must be annotated"
   assert_contains "$release" "git push origin main" "must push main"
+  # shellcheck disable=SC2016
   assert_contains "$release" 'git push origin "v${NEW_VERSION}"' "must push the tag"
 }
 
+test_release_fails_on_noop_bump() {
+  # An empty stage means the bump silently did nothing — the release must
+  # abort, not commit an empty change and tag it.
+  guard=$(guard_block "No changes staged" "$RELEASE")
+  assert_contains "$guard" "::error::" "a no-op bump must be an ::error:: annotation"
+  assert_contains "$guard" "exit 1" "a no-op bump must exit 1"
+}
+
 test_release_creates_github_release() {
+  # Needles are literal workflow text — ${NEW_VERSION}/${DESC}/${PREV_TAG}
+  # expand on the runner, never here.
+  # shellcheck disable=SC2016
   assert_contains "$release" 'gh release create "v${NEW_VERSION}"' "must create the GitHub release"
+  # shellcheck disable=SC2016
   assert_contains "$release" '--title "v${NEW_VERSION} — ${DESC}"' "release title must be 'vX.Y.Z — description'"
-  assert_contains "$release" "update-marketplace-sha.yml" "notes/chain must reference the SHA pin"
+  # Scope the pin reference to the release-notes step itself — anywhere-in-file
+  # would be satisfied by the header comment alone (the explicit trigger is
+  # covered by test_release_chains_marketplace_pin_explicitly).
+  notes=$(step_block "name: Create GitHub release" "name: Trigger marketplace SHA pin" "$RELEASE")
+  assert_contains "$notes" "update-marketplace-sha.yml" "release notes must mention the auto-pin"
+  # AC #8: the diff must be a clickable compare URL, not inline code.
+  # shellcheck disable=SC2016
+  assert_contains "$notes" '/compare/${PREV_TAG}...v${NEW_VERSION}' "diff must be a compare URL GitHub renders as a link"
+  # PREV_TAG must exclude exactly the new tag: unanchored grep would also drop
+  # e.g. v1.2.30 when releasing v1.2.3.
+  # shellcheck disable=SC2016
+  assert_contains "$notes" 'grep -vFx "v${NEW_VERSION}"' "previous-tag lookup must be fixed-string, whole-line anchored"
 }
 
 test_release_chains_marketplace_pin_explicitly() {
@@ -177,6 +223,8 @@ test_pin_reads_plugin_name_from_manifest() {
 
 test_pin_dereferences_annotated_tags() {
   assert_contains "$pin" "git/refs/tags/" "must resolve the tag ref"
+  # The needle is the literal workflow text — $OBJECT_SHA expands on the runner.
+  # shellcheck disable=SC2016
   assert_contains "$pin" 'git/tags/$OBJECT_SHA' "must dereference annotated tags to the commit SHA"
 }
 
@@ -189,15 +237,41 @@ test_pin_targets_marketplace() {
 test_pin_fails_loudly_without_token() {
   assert_contains "$pin" "DEVELOPER_SETTINGS_TOKEN" "must use the cross-repo PAT secret"
   assert_contains "$pin" "::error::DEVELOPER_SETTINGS_TOKEN secret is not set" "missing token must be a hard ::error::"
+  # Polarity matters: the guard must fire when the token is EMPTY (-z) — an
+  # inverted -n would error on every healthy run and pass on the broken one.
+  # The needle is the literal workflow text — ${GH_TOKEN:-} expands on the runner.
+  # shellcheck disable=SC2016
+  assert_contains "$pin" 'if [ -z "${GH_TOKEN:-}" ]' "the token guard must test emptiness (-z)"
   # The error branch must exit non-zero — never silently skip the push.
-  guard=$(awk '/DEVELOPER_SETTINGS_TOKEN secret is not set/{f=1} f{print} f && /exit 1/{exit}' "$PIN")
+  guard=$(guard_block "DEVELOPER_SETTINGS_TOKEN secret is not set" "$PIN")
   assert_contains "$guard" "exit 1" "missing token must exit 1"
 }
 
 test_pin_noop_paths_exit_zero() {
-  assert_contains "$pin" "nothing to pin" "unmatched plugin name must be a silent no-op"
+  # Each no-op branch must actually exit 0 — asserting only the message
+  # strings would stay green if the exits flipped to 1.
+  noop=$(guard_block "nothing to pin" "$PIN")
+  assert_contains "$noop" "exit 0" "unmatched plugin name must exit 0 (silent no-op)"
   assert_contains "$pin" "git diff --cached --quiet" "already-pinned SHA must be detected"
-  assert_contains "$pin" "already pinned" "already-pinned SHA must be a silent no-op"
+  noop=$(guard_block "already pinned" "$PIN")
+  assert_contains "$noop" "exit 0" "already-pinned SHA must exit 0 (silent no-op)"
+}
+
+test_no_expression_splices_in_run_scripts() {
+  # ${{ }} is substituted into the script text BEFORE bash parses it, so a
+  # crafted tag name or dispatch input would execute as shell on a runner
+  # that later holds the cross-repo PAT. Every dynamic value must thread
+  # through env: and be read as a quoted shell variable.
+  for wf in "$RELEASE" "$PIN"; do
+    scripts=$(awk '/^ *run: \|/{f=1; next} f && $0 != "" && $0 !~ /^          /{f=0} f' "$wf")
+    inline=$(grep -E '^[[:space:]]*run: [^|]' "$wf" || true)
+    # The ${{ pattern is intentionally literal — it is GitHub expression
+    # syntax being hunted, never a shell expansion.
+    # shellcheck disable=SC2016
+    case "$scripts$inline" in
+      *'${{'*) fail "$(basename "$wf"): run: scripts must not splice \${{ }} expressions — thread values through env:" ;;
+    esac
+  done
 }
 
 test_pin_concurrency_and_permissions() {
