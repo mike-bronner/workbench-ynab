@@ -57,7 +57,10 @@ in-memory cache; all 12 sections derive from that cache rather than re-querying
 the MCP per section. This is [`createReadCache`](../lib/ynab/readPath.mjs):
 `get(resource, params)` pulls once (paginated in full, rate-limit-retried), then
 memoizes by `resource + params`; every later read is served from memory with no
-further MCP traffic. The cacheable resources are
+further MCP traffic. What is memoized is the **in-flight promise** (set before
+the pull resolves), so even concurrent `get` calls for the same key share one
+underlying pull — the fetch-once guarantee holds under concurrency, not just in
+the sequential fetch-then-derive flow (#158). The cacheable resources are
 `transactions, categories, accounts, payees` (scheduled transactions are deferred
 — they have no list tool; see §1).
 
