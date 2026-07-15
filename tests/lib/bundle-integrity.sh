@@ -252,7 +252,7 @@ system node (see README Prerequisites). Cannot prove boot without it."
   # RETURN trap above cleans it up too. Feed the requests file as stdin (EOF tells
   # the stdio transport to shut down → the process exits on its own).
   mkdir -p "$sandbox/home"
-  NODE_PATH= HOME="$sandbox/home" YNAB_ACCESS_TOKEN="$BI_FAKE_TOKEN" "$run_entry" \
+  NODE_PATH='' HOME="$sandbox/home" YNAB_ACCESS_TOKEN="$BI_FAKE_TOKEN" "$run_entry" \
     < "$req_file" > "$out_file" 2> "$err_file" &
   local pid=$!
 

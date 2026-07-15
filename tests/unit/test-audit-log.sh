@@ -258,7 +258,7 @@ export YNAB_AUDIT_MONTH="2026-06"; export YNAB_AUDIT_TIMESTAMP="2026-06-10T10:00
 _audit_append "$ALLOCATE_OP" "$ALLOCATE_RES" false
 export YNAB_AUDIT_TIMESTAMP="2026-06-11T10:00:00Z"
 _audit_append "$RECONCILE_OP" "$RECONCILE_RES" false
-assert_eq "two separate monthly files exist" "2" "$(ls "$SANDBOX/p5"/audit-*.jsonl | wc -l | tr -d ' ')"
+assert_eq "two separate monthly files exist" "2" "$(find "$SANDBOX/p5" -name 'audit-*.jsonl' | wc -l | tr -d ' ')"
 RUNA_OUT="$(_audit_read_run run-A)"
 assert_eq "run-A matches two records across both months" "2" "$(printf '%s' "$RUNA_OUT" | jq -s 'length')"
 # Slurp the whole multi-record stream and quantify: a foreign run_id leaking
@@ -380,6 +380,8 @@ assert_contains "read_run body-corruption diagnostic names audit-log on STDERR" 
 # would silently drop it (exit 0) — an audit log inventing or losing a change is
 # the exact trust failure this feature exists to prevent. With the guard BOTH
 # readers must fail loudly (exit 1, audit-log: on STDERR).
+# Backticks are literal formatting around `null` — no expansion intended.
+# shellcheck disable=SC2016
 echo 'crash recovery: a `null` body line fails the read for BOTH helpers:'
 export YNAB_AUDIT_DIR="$SANDBOX/corrupt-null"
 export YNAB_AUDIT_MONTH="2026-06"

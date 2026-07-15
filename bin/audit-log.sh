@@ -227,7 +227,9 @@ _audit_append() {
   # the audit dir must be 0700 and each record file 0600 (owner-only). `umask 077`
   # is scoped to a subshell so sourcing this helper never mutates the caller's umask
   # (the same no-side-effects-at-load contract the rest of this file keeps), and it
-  # makes a freshly-CREATED dir/file land owner-only. But `mkdir -m` and `umask`
+  # makes a freshly-CREATED dir/file land owner-only — every dir `mkdir -p` creates
+  # inherits it, so no `-m` is needed (that would cover only the deepest dir,
+  # SC2174). But umask and creation modes
   # only bite at CREATION — a PRE-EXISTING dir/file left at a looser mode (a 0755
   # dir from an earlier run, external tampering) would never be tightened by an
   # append. So we also `chmod` explicitly afterward to ENFORCE the mode every time,
@@ -237,7 +239,7 @@ _audit_append() {
   local dir; dir="$(_audit_dir)"
   local file; file="$(_audit_file)"
 
-  if ! ( umask 077; mkdir -p -m 700 "$dir" ) 2>/dev/null; then
+  if ! ( umask 077; mkdir -p "$dir" ) 2>/dev/null; then
     echo "audit-log: cannot create audit dir: $dir" 1>&2
     return 1
   fi

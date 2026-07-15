@@ -70,6 +70,8 @@ check_common() {
   assert_present "[$tier] frontmatter declares name" "name: ${tier}-ynab-review"
 
   # Defers to the universal protocol via the plugin-root variable — no hardcoded path.
+  # The needle is the literal ${CLAUDE_PLUGIN_ROOT} text the wrapper must contain.
+  # shellcheck disable=SC2016
   assert_present "[$tier] references the universal protocol via \${CLAUDE_PLUGIN_ROOT}" \
     '${CLAUDE_PLUGIN_ROOT}/skills/review/ynab-review.md'
   assert_absent_re "[$tier] no hardcoded absolute/relative protocol path" \
