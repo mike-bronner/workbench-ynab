@@ -16,7 +16,7 @@ name: ci
 #                       guarantee (issue #126 AC-3)
 #   * assets-tests    — the assets/ Node integration suites (needs npm ci)
 #   * docs-links      — offline relative-link + fragment check over
-#                       assets/*.md and docs/*.md
+#                       assets/**/*.md and docs/**/*.md (recursive)
 #
 # secret-scan.yml stays a separate workflow: secret hygiene is a distinct
 # concern with its own cadence and blast radius.
@@ -145,17 +145,24 @@ jobs:
           npm --prefix assets test
 
   # Relative links and internal cross-references across the docs set: a broken
-  # local link or dangling #fragment in assets/*.md or docs/*.md fails the PR.
-  # --offline keeps the check hermetic — remote URLs are out of scope (no
-  # network flakiness in the gate), local file + anchor resolution is the point.
+  # local link or dangling #fragment in any assets/**/*.md or docs/**/*.md
+  # (recursive — nested docs like assets/tax/README.md and docs/decisions/*.md
+  # included; `**` also matches zero components, so top-level files stay
+  # covered) fails the PR. --offline keeps the check hermetic — remote URLs are
+  # out of scope (no network flakiness in the gate), local file + anchor
+  # resolution is the point.
   docs-links:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
 
+      # Third-party (non-actions/*) actions are pinned to a full commit SHA,
+      # not a mutable tag: a repointed tag can't ship new code into this gate
+      # (issue #191). The trailing comment records the human-readable version;
+      # bump by updating BOTH the SHA and the comment.
       - name: Check docs links (offline, fragments included)
-        uses: lycheeverse/lychee-action@v2
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
-          args: --offline --include-fragments --no-progress 'assets/*.md' 'docs/*.md'
+          args: --offline --include-fragments --no-progress 'assets/**/*.md' 'docs/**/*.md'
           fail: true
