@@ -4,29 +4,67 @@
   "title": "workbench-ynab config.json",
   "description": "User configuration for the workbench-ynab plugin. Lives OUTSIDE the repo at $HOME/.claude/plugins/data/workbench-ynab-claude-workbench/config.json so it survives plugin updates. Read by plugin SKILLS and commands via bin/config.sh — never by the vendored MCP launcher. All tax logic is data-driven: any user's situation is one config instance, never a schema constant.",
   "type": "object",
-  "required": ["schema_version", "budget", "tax_profile", "persona", "report"],
+  "required": ["schema_version", "budgets", "tax_profile", "persona", "report"],
   "additionalProperties": false,
   "properties": {
     "schema_version": {
       "type": "integer",
-      "minimum": 1,
-      "description": "Config schema version, for forward migration. Increment when a breaking change to this shape ships; the loader/setup can then migrate older files."
+      "const": 2,
+      "description": "Config schema version, for forward migration. This schema describes version 2 (the multi-budget shape, issue #84). Version-1 files (singular `budget`) keep working: bin/config.sh synthesizes a single-entry `budgets` array at read time and leaves the file untouched — re-run /workbench-ynab:setup to upgrade the file itself."
     },
-    "budget": {
-      "type": "object",
-      "description": "The target YNAB budget to review. Replaces the prototype's hardcoded budget name.",
-      "additionalProperties": false,
-      "required": ["name"],
-      "properties": {
-        "name": {
-          "type": "string",
-          "description": "Human-readable budget name as shown in YNAB. Required."
-        },
-        "id": {
-          "type": ["string", "null"],
-          "description": "Optional YNAB budget id (UUID). When null, the budget is resolved by name. Optional."
+    "budgets": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The YNAB budgets this plugin operates on. Replaces the schema-v1 singular `budget` object: every skill resolves its target budget set from this array instead of assuming one budget. Per-budget overrides are resolved BY SKILLS as each skill is built — this config layer only carries the data.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "role"],
+        "anyOf": [
+          { "required": ["budget_id"] },
+          { "required": ["budget_name"] }
+        ],
+        "properties": {
+          "budget_id": {
+            "type": "string",
+            "description": "YNAB budget id (UUID). Preferred over budget_name when known — ids are rename-proof. At least one of budget_id / budget_name is required."
+          },
+          "budget_name": {
+            "type": "string",
+            "description": "Human-readable budget name as shown in YNAB, used to resolve the id at runtime. At least one of budget_id / budget_name is required."
+          },
+          "label": {
+            "type": "string",
+            "description": "Human display string for this entry, unique across the array. Used in report headings and as the lookup key for per-budget config reads (bin/config.sh `_cfg_budget_field`) and for `default_budget`."
+          },
+          "role": {
+            "type": "string",
+            "description": "Role/tag for this budget, e.g. `personal`, `business`, `archive`. Free-form; skills may group or filter by it."
+          },
+          "business_category_group": {
+            "type": "string",
+            "description": "Optional per-budget override: name of the YNAB category group holding this budget's business expense categories."
+          },
+          "tax_profile_path": {
+            "type": "string",
+            "description": "Optional per-budget override: path to a tax-profile file linked to this budget, so the tax tracker can attribute Schedule C activity to the correct budget. Supports ~ and environment-variable expansion at use time."
+          },
+          "monitoring_enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Optional per-budget override: whether the monitoring poll covers this budget. Defaults to true when absent."
+          },
+          "write_back_enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "Optional per-budget override: whether the write-back path may target this budget. Defaults to true when absent; the mandatory human approval gate applies regardless."
+          }
         }
       }
+    },
+    "default_budget": {
+      "type": "string",
+      "description": "Optional. The `label` of the budgets entry to use when a caller needs a single budget and does not specify one — the fallback for single-budget users. When absent, the first budgets entry is the default (bin/config.sh `_cfg_default_budget`)."
     },
     "business": {
       "type": "object",
