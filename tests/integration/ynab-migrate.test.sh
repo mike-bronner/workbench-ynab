@@ -21,6 +21,13 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 source "$ROOT/tests/lib/assert.sh"
 
 MIGRATE="$ROOT/bin/ynab-migrate.sh"
+SCHEMA="$ROOT/assets/config.schema.json"
+
+# The loader helpers (_cfg_default_budget) prove the migrated config resolves to
+# the user's REAL budget. Sourcing only DEFINES functions (no side effects);
+# each call injects YNAB_CONFIG_FILE per the loader's documented test seam.
+# shellcheck disable=SC1091
+source "$ROOT/bin/config.sh"
 
 # Build a fresh sandbox and echo its root. The Desktop config carries the legacy
 # `ynab` connector AND an unrelated `other` server that must survive removal; the
@@ -346,6 +353,109 @@ test_migrate_config_fails_closed_when_rewrite_fails() {
   assert_eq 2 "$rc" "migrate-config must exit 2 when it cannot rewrite the config"
   assert_contains "$out" "Failed to write config"
   assert_eq "$before" "$after" "a failed rewrite must leave the config byte-for-byte untouched"
+}
+
+# ── seed-config: first-run seeding that keeps the v2 budgets contract intact ──
+# The example ships a PLACEHOLDER two-budget array to document the shape (issue
+# #84). The seed must strip it (and default_budget) so Step 5's migrate-config
+# calls can land the user's real budget: an array of placeholder OBJECTS is not
+# "blank", so seeding it verbatim would lock the factory placeholders in.
+
+test_seed_config_strips_placeholder_budgets() {
+  local sb cfg rc=0
+  sb="$(mktemp -d)"; cfg="$sb/config.json"
+  bash "$MIGRATE" seed-config "$cfg" >/dev/null || rc=$?
+  assert_eq 0 "$rc" "seed-config should exit 0 on a first run"
+  assert_json_valid "$cfg"
+  assert_eq false "$(jq 'has("budgets")' "$cfg")" "the placeholder budgets array must be stripped"
+  assert_eq false "$(jq 'has("default_budget")' "$cfg")" "default_budget must be stripped with it"
+  assert_eq true  "$(jq 'has("business")' "$cfg")" "the rest of the example must be seeded intact"
+  assert_eq "$cfg" "$(find "$cfg" -maxdepth 0 -perm 600)" "the seeded config must be owner-only (0600)"
+  rm -rf "$sb"
+}
+
+test_seed_config_is_idempotent() {
+  local sb cfg before after out rc=0
+  sb="$(mktemp -d)"; cfg="$sb/config.json"
+  printf '{"budgets":[{"label":"Mine","role":"personal","budget_name":"My Real Budget"}]}\n' > "$cfg"
+  before="$(_snapshot "$sb")"
+  out="$(bash "$MIGRATE" seed-config "$cfg")" || rc=$?
+  after="$(_snapshot "$sb")"
+  rm -rf "$sb"
+  assert_eq 0 "$rc" "seed-config must exit 0 when the config already exists"
+  assert_contains "$out" "already"
+  assert_eq "$before" "$after" "an existing config must never be touched by the seed"
+}
+
+test_seed_config_fails_closed_on_unparseable_example() {
+  local sb cfg ex out rc=0
+  sb="$(mktemp -d)"; cfg="$sb/config.json"; ex="$sb/example.json"
+  printf '{"budgets": [\n' > "$ex"   # truncated, unparseable
+  out="$(YNAB_CONFIG_EXAMPLE="$ex" bash "$MIGRATE" seed-config "$cfg" 2>&1)" || rc=$?
+  assert_eq 2 "$rc" "seed-config must fail closed (exit 2) on an example jq cannot parse"
+  assert_contains "$out" "Unparseable example"
+  [ ! -e "$cfg" ] || fail "a failed seed must not leave a config file behind"
+  rm -rf "$sb"
+}
+
+# ── The #84 review-blocker regression: the migrate command's FIRST RUN must
+# yield a config whose default budget is the USER'S migrated budget — never a
+# factory placeholder — and the emitted file must satisfy the v2 schema.
+# Reproduces Step 5 of commands/ynab-migrate.md end-to-end with the real
+# helpers: seed-config, then the migrate-config budget sequence.
+
+test_first_run_migration_yields_real_default_budget_and_schema_valid_config() {
+  local sb cfg entry
+  sb="$(mktemp -d)"; cfg="$sb/config.json"
+  bash "$MIGRATE" seed-config "$cfg" >/dev/null
+  bash "$MIGRATE" migrate-config "$cfg" '["budgets"]'        "$(jq -n --arg v "Prototype Budget 2024" '[{label: $v, role: "personal", budget_name: $v}]')" >/dev/null
+  bash "$MIGRATE" migrate-config "$cfg" '["default_budget"]' "$(jq -n --arg v "Prototype Budget 2024" '$v')" >/dev/null
+  bash "$MIGRATE" migrate-config "$cfg" '["business","name"]' '"Prototype Business"' >/dev/null
+
+  # the loader resolves the REAL migrated budget, not a factory placeholder.
+  entry="$(YNAB_CONFIG_FILE="$cfg" _cfg_default_budget)"
+  assert_eq "Prototype Budget 2024" "$(jq -r '.budget_name' <<<"$entry")" "_cfg_default_budget returns the real migrated budget"
+  assert_eq "Prototype Budget 2024" "$(jq -r '.label' <<<"$entry")" "label mirrors the loader's legacy synthesis"
+  assert_eq "0" "$(jq '[.budgets[] | .. | strings | select(test("^<.*>$"))] | length' "$cfg")" "no factory placeholder survives in budgets"
+
+  # Schema validity, zero-dep: assert the shipped schema's top-level contract
+  # with jq — required keys present, no key outside `properties`
+  # (additionalProperties: false; the stray legacy `budget` key was the review
+  # break), the v2 version constant, and every entry carrying label/role plus
+  # an identifier.
+  assert_eq "true" "$(jq --slurpfile s "$SCHEMA" '($s[0].required - keys) == []' "$cfg")" "all schema-required top-level keys are present"
+  assert_eq "true" "$(jq --slurpfile s "$SCHEMA" '(keys - ($s[0].properties | keys)) == []' "$cfg")" "no key outside the schema's properties (additionalProperties: false)"
+  assert_eq false "$(jq 'has("budget")' "$cfg")" "the legacy singular budget key must not exist"
+  assert_eq 2 "$(jq '.schema_version' "$cfg")" "schema_version is the v2 constant"
+  assert_eq "true" "$(jq '[.budgets[] | has("label") and has("role") and (has("budget_id") or has("budget_name"))] | all' "$cfg")" "every budgets entry satisfies the entry contract"
+
+  # Belt: full JSON Schema validation when python3+jsonschema happens to be
+  # installed — never a dependency of the suite; skipped silently otherwise.
+  if python3 -c 'import jsonschema' >/dev/null 2>&1; then
+    python3 -c 'import json,sys,jsonschema; jsonschema.validate(json.load(open(sys.argv[1])), json.load(open(sys.argv[2])))' "$cfg" "$SCHEMA" \
+      || fail "emitted config failed full JSON Schema validation"
+  fi
+  rm -rf "$sb"
+}
+
+# A second pass over the migrated config must change nothing — and must never
+# let a different budget value win over the one already migrated.
+test_first_run_migration_rerun_is_noop() {
+  local sb cfg before after out1 out2 out3
+  sb="$(mktemp -d)"; cfg="$sb/config.json"
+  bash "$MIGRATE" seed-config "$cfg" >/dev/null
+  bash "$MIGRATE" migrate-config "$cfg" '["budgets"]'        "$(jq -n --arg v "Prototype Budget 2024" '[{label: $v, role: "personal", budget_name: $v}]')" >/dev/null
+  bash "$MIGRATE" migrate-config "$cfg" '["default_budget"]' '"Prototype Budget 2024"' >/dev/null
+  before="$(_snapshot "$sb")"
+  out1="$(bash "$MIGRATE" seed-config "$cfg")"
+  out2="$(bash "$MIGRATE" migrate-config "$cfg" '["budgets"]' '[{"label":"Should Not Win","role":"personal","budget_name":"Should Not Win"}]')"
+  out3="$(bash "$MIGRATE" migrate-config "$cfg" '["default_budget"]' '"Should Not Win"')"
+  after="$(_snapshot "$sb")"
+  rm -rf "$sb"
+  assert_contains "$out1" "already"
+  assert_contains "$out2" "already"
+  assert_contains "$out3" "already"
+  assert_eq "$before" "$after" "a second migration pass must not mutate the config"
 }
 
 run_tests
