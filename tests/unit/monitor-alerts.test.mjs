@@ -10,9 +10,11 @@
 //
 // Covers the AC test matrix: severity-descending ordering, the rendered
 // emoji-prefix format, and the best-effort notification path — plus zero-config
-// defaults, per-field fallback on invalid config, the dollars→milliunits
-// boundary conversion, the dedupe_key format, the top-N cap, the always-on
-// alert log, the channel switch, and the stdout discipline.
+// defaults, per-field fallback on invalid config (including boundary values),
+// the dollars→milliunits boundary conversion, the dedupe_key format, the top-N
+// cap, malformed-finding tolerance (the NEVER-throws contract), the always-on
+// alert log and its enforced owner-only modes, the config-file fallback seam,
+// the channel switch, and the stdout discipline.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -91,6 +93,17 @@ test('sanitizeAlertsConfig: valid overrides are honoured, invalid fields fall ba
   assert.equal(cfg.billDueLookaheadDays, 3);
   assert.equal(cfg.overdrawn, false);
   assert.equal(cfg.channel, CHANNEL_MACOS);
+});
+
+test('sanitizeAlertsConfig boundaries: 0 lookahead days is valid, negative rates fall back', () => {
+  const cfg = sanitizeAlertsConfig({
+    bill_due_lookahead_days: 0, // the valid >= 0 edge — "due today only"
+    unusual_multiplier: -3, // negative → default 3
+    budget_overrun_pct: -100, // negative → default 100
+  });
+  assert.equal(cfg.billDueLookaheadDays, 0);
+  assert.equal(cfg.unusualMultiplier, 3);
+  assert.equal(cfg.budgetOverrunPct, 100);
 });
 
 test('dollar thresholds are converted to milliunits at the config boundary (× 1000)', () => {
@@ -338,6 +351,32 @@ test('appendAlertLog enforces owner-only modes on every append, not just at crea
   appendAlertLog({ probe: true }, { logPath });
   assert.equal(statSync(logPath).mode & 0o777, 0o600);
   assert.equal(statSync(dir).mode & 0o777, 0o700);
+});
+
+test('dispatchAlerts loads config through the configFile seam when none is pre-supplied', () => {
+  // The production path: the monitor pass calls dispatchAlerts with no
+  // pre-loaded config, so the options.config ?? loadAlertsConfig fallback is
+  // what actually runs — drive it end-to-end and let the file govern dispatch.
+  const configFile = freshPath('dispatch-config.json');
+  writeFileSync(configFile, JSON.stringify({ alerts: { channel: 'log-only' } }));
+  const logPath = freshPath('config-seam.jsonl');
+  let spawned = 0;
+  const result = dispatchAlerts([finding(ACTION, 1)], {
+    configFile, logPath, env: {}, platform: 'darwin',
+    spawnImpl: () => { spawned += 1; return { status: 0 }; },
+  });
+  assert.equal(result.dispatched, true);
+  assert.equal(result.notified, false, 'the file-loaded log-only channel governs delivery');
+  assert.equal(spawned, 0);
+  assert.equal(JSON.parse(readFileSync(logPath, 'utf8').trim()).channel, CHANNEL_LOG_ONLY);
+
+  // enabled: false from the file short-circuits the same way a passed config does.
+  const offFile = freshPath('dispatch-config-off.json');
+  writeFileSync(offFile, JSON.stringify({ alerts: { enabled: false } }));
+  const offLog = freshPath('config-seam-off.jsonl');
+  const off = dispatchAlerts([finding(ACTION, 1)], { configFile: offFile, logPath: offLog, env: {} });
+  assert.equal(off.dispatched, false);
+  assert.equal(existsSync(offLog), false);
 });
 
 // --- Path seam ------------------------------------------------------------------
