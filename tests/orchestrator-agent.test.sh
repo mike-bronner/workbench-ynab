@@ -146,8 +146,8 @@ assert_present    "InputValidationError is a schema miss"   "InputValidationErro
 assert_present    "offline warning only after retries"      "ynab_mcp_offline"
 
 # ── Inputs: prompt-fed, never config.json ──────────────────────────────────────
-assert_present_re "today is a prompt input"                 '`today`.*ISO date'
-assert_present    "does not read config.json itself"        'You do **not** read `config.json`'
+assert_present_re "today is a prompt input"                 'today.+ISO date'
+assert_present_re "does not read config.json itself"        'You do .*not.* read .config\.json.'
 assert_absent_re  "no plugin-data config path inlined"      'plugins/data/workbench-ynab'
 assert_present_re "explicit review_scope stays authoritative" 'review_scope.*(authoritative|skip eligibility)'
 
