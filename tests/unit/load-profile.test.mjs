@@ -5,7 +5,11 @@
 // node: built-ins and repo-local files are imported), per docs/testing.md. The
 // loader resolves its bundled defaults + schema from assets/tax/ relative to its
 // own location, so these tests only supply the USER profile path (a temp file)
-// via the loader's documented path seam.
+// via the loader's documented path seam — plus `dataDir: TMP`, which declares
+// the temp dir as an explicit containment root (issue #169): the loader refuses
+// to read any path that does not canonicalize into the resolved dataDir or the
+// bundled assets/tax/ directory, and an explicitly-passed dataDir is exactly
+// how a test root joins that allowlist without weakening the production default.
 //
 // Covers the AC #9 matrix: (a) defaults-only when the user profile is absent,
 // (b) user values override defaults, (c) overrides win over user, (d) a
@@ -15,9 +19,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, chmodSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -48,7 +52,7 @@ const validBase = () => ({ schemaVersion: '1', filingStatus: 'single', taxYear: 
 // --- (a) defaults-only when the user profile is absent ----------------------
 
 test('(a) absent user profile → defaults-only, no error, all provenance = defaults', () => {
-  const r = loadProfile({ profilePath: ABSENT });
+  const r = loadProfile({ dataDir: TMP, profilePath: ABSENT });
   assert.equal(r.ok, true);
   assert.equal(r.defaultsOnly, true);
   assert.equal(r.sources.profile, null);
@@ -64,7 +68,7 @@ test('(a) absent user profile → defaults-only, no error, all provenance = defa
 });
 
 test('(a) the resolved profile and provenance map are frozen', () => {
-  const r = loadProfile({ profilePath: ABSENT });
+  const r = loadProfile({ dataDir: TMP, profilePath: ABSENT });
   assert.ok(Object.isFrozen(r.profile));
   assert.ok(Object.isFrozen(r.provenance));
   assert.throws(() => {
@@ -80,7 +84,7 @@ test('(b) user values override defaults; untouched defaults remain', () => {
     thresholds: { seTaxRate: 0.2 },
     standardDeductionByYear: { single: { 2025: 16000 } },
   });
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, true);
   assert.equal(r.defaultsOnly, false);
 
@@ -105,7 +109,7 @@ test('(c) explicit overrides win over user values', () => {
     thresholds: { saltCap: 12000 },
     overrides: { thresholds: { saltCap: 5000 } },
   });
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, true);
   assert.equal(r.getThreshold('saltCap'), 5000);
   assert.equal(r.provenance['thresholds.saltCap'], SOURCES.OVERRIDES);
@@ -117,7 +121,7 @@ test('(c) explicit overrides win over user values', () => {
 
 test('(d) bad enum value → schema failure naming the offending path', () => {
   const p = writeProfile({ ...validBase(), filingStatus: 'bogus' });
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, false);
   assert.equal(r.error.kind, 'schema');
   assert.equal(r.profile, null, 'must NOT fall back to a defaults profile');
@@ -131,7 +135,7 @@ test('(d) missing required property → schema failure naming the path', () => {
   const { taxYear, ...noYear } = { ...validBase() }; // drop taxYear
   void taxYear;
   const p = writeProfile(noYear);
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, false);
   assert.equal(r.error.kind, 'schema');
   const e = r.error.errors.find((x) => x.path === '/taxYear');
@@ -142,7 +146,7 @@ test('(d) missing required property → schema failure naming the path', () => {
 test('(d) invalid JSON → structured parse error, not a throw', () => {
   const p = join(TMP, 'broken.json');
   writeFileSync(p, '{ this is not json ');
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, false);
   assert.equal(r.error.kind, 'parse');
   assert.equal(r.profile, null);
@@ -163,7 +167,7 @@ test('(e) provenance distinguishes defaults / user / overrides per leaf', () => 
       businessEntities: [{ id: 'biz-a', scheduleLineMap: { office: 'G2' } }], // deep-merge by id
     },
   });
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, true);
 
   assert.equal(r.provenance['thresholds.seTaxRate'], SOURCES.USER);
@@ -221,7 +225,7 @@ test('accessors: business entities, schedule line maps, thresholds, quarterly da
       { quarter: 4, month: 1, day: 15 },
     ],
   });
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, true);
 
   assert.equal(r.getBusinessEntities().length, 1);
@@ -240,7 +244,7 @@ test('accessors: business entities, schedule line maps, thresholds, quarterly da
 test('accessors (issue #82): income-tax brackets, estimated-payment matchers, period passthrough', () => {
   // Defaults-only: the bundled US ruleset supplies brackets, due-date period
   // boundaries, and the generic estimated-payment payee keywords.
-  const r = loadProfile({ profilePath: ABSENT });
+  const r = loadProfile({ dataDir: TMP, profilePath: ABSENT });
   const brackets = r.getIncomeTaxBrackets(2025, 'mfj');
   assert.ok(Array.isArray(brackets) && brackets.length > 0);
   assert.equal(brackets[0].rate, 0.10);
@@ -250,7 +254,7 @@ test('accessors (issue #82): income-tax brackets, estimated-payment matchers, pe
   // No-arg fallback to the profile's own year + filing status — needs a USER
   // profile (the bundled defaults carry no taxYear / filingStatus, those are
   // per-user required fields), so write one.
-  const up = loadProfile({ profilePath: writeProfile({ ...validBase(), filingStatus: 'mfj', taxYear: 2025 }) });
+  const up = loadProfile({ dataDir: TMP, profilePath: writeProfile({ ...validBase(), filingStatus: 'mfj', taxYear: 2025 }) });
   assert.deepEqual(up.getIncomeTaxBrackets(), up.getIncomeTaxBrackets(2025, 'mfj'));
 
   const matchers = r.getEstimatedTaxPaymentMatchers();
@@ -295,7 +299,7 @@ test('(M3-5) the example $readme is stripped from the resolved profile', () => {
   const example = readFileSync(join(ROOT, 'assets', 'tax', 'tax-profile.example.json'), 'utf8');
   const p = join(TMP, 'example-instance.json');
   writeFileSync(p, example);
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, true, `example must load cleanly; got: ${JSON.stringify(r.error)}`);
   assert.equal(Object.prototype.hasOwnProperty.call(r.profile, '$readme'), false, '$readme leaked into the resolved profile');
   assert.ok(Object.keys(r.provenance).every((k) => !k.includes('$')), 'no $-annotation provenance leaf');
@@ -314,8 +318,8 @@ test('the loader writes nothing to stdout (safe on an MCP/JSON-RPC path)', () =>
   const url = pathToFileURL(MODULE_PATH).href;
   const script = `
     import(${JSON.stringify(url)}).then((m) => {
-      m.loadProfile({ profilePath: ${JSON.stringify(ABSENT)} });       // success path
-      m.loadProfile({ profilePath: ${JSON.stringify(invalid)} });      // schema-failure path
+      m.loadProfile({ dataDir: ${JSON.stringify(TMP)}, profilePath: ${JSON.stringify(ABSENT)} });       // success path
+      m.loadProfile({ dataDir: ${JSON.stringify(TMP)}, profilePath: ${JSON.stringify(invalid)} });      // schema-failure path
       process.stderr.write('ok');                                      // proof it ran
     });
   `;
@@ -339,7 +343,7 @@ test('(blocker) a __proto__ key in overrides does not pollute Object.prototype',
     '{"schemaVersion":"1","filingStatus":"single","taxYear":2025,' +
       '"overrides":{"__proto__":{"pwned":true}}}',
   );
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, true); // top-level overrides keys are open; __proto__ is simply skipped
   // The smoking gun: nothing leaked onto every object in the process.
   assert.equal(({}).pwned, undefined, 'Object.prototype must not be polluted');
@@ -375,7 +379,7 @@ test('(blocker) a type-incompatible override fails loud, never corrupts the prof
     ...validBase(),
     overrides: { thresholds: { seTaxRate: 'not-a-number' } },
   });
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, false, 'a string where a rate belongs must not silently pass through');
   assert.equal(r.error.kind, 'schema');
   assert.equal(r.profile, null, 'must NOT produce a corrupted profile');
@@ -393,7 +397,7 @@ test('(blocker) an id-less entity override fails loud instead of dropping entiti
     // No `id` → a wholesale replace would silently drop biz-a. Must be rejected.
     overrides: { businessEntities: [{ displayName: 'Business B', schedule: 'C', scheduleLineMap: {} }] },
   });
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, false);
   assert.equal(r.error.kind, 'schema');
   assert.equal(r.profile, null);
@@ -409,7 +413,7 @@ test('(blocker) a well-formed id-only entity override still deep-merges (regress
     ],
     overrides: { businessEntities: [{ id: 'biz-a', scheduleLineMap: { office: 'G2' } }] },
   });
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, true);
   assert.deepEqual(r.getScheduleLineMap('biz-a'), { advertising: 'G1', office: 'G2' });
 });
@@ -434,7 +438,7 @@ test('(blocker) an empty businessEntities override fails loud instead of wiping 
     // wholesale replace would silently drop biz-a. minItems:1 must reject it.
     overrides: { businessEntities: [] },
   });
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, false, 'an empty entity-array override must not silently wipe entities');
   assert.equal(r.error.kind, 'schema');
   assert.equal(r.profile, null);
@@ -455,7 +459,7 @@ test('(blocker) $-prefixed keys in overrides never leak into the frozen profile'
     '{"schemaVersion":"1","filingStatus":"single","taxYear":2025,' +
       '"overrides":{"$pwn":"leak","customBucket":{"$note":"x","$readme":["y"],"real":1}}}',
   );
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, true);
   // A top-level $ key (caught in the merge key loop) does not land.
   assert.equal(Object.prototype.hasOwnProperty.call(r.profile, '$pwn'), false, 'top-level $ key leaked');
@@ -479,7 +483,7 @@ test('(blocker) a too-deep override returns a structured failure, never crashes'
     p,
     `{"schemaVersion":"1","filingStatus":"single","taxYear":2025,"overrides":{"deep":${nested}}}`,
   );
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, false, 'a too-deep override must fail loud, not crash the loader');
   assert.equal(r.error.kind, 'depth');
   assert.equal(r.profile, null);
@@ -514,7 +518,7 @@ test('(follow-up) propertyNames failure is reported at the container path', () =
 test('(follow-up) getStandardDeduction with no args falls back to the profile year + status', () => {
   // validBase → filingStatus single, taxYear 2025; default single/2025 = 15000.
   const p = writeProfile({ ...validBase() });
-  const r = loadProfile({ profilePath: p });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
   assert.equal(r.ok, true);
   assert.equal(r.getStandardDeduction(), 15000, 'no-arg call uses profile.taxYear + profile.filingStatus');
 });
@@ -544,7 +548,7 @@ test('(follow-up) an unreadable profile returns a structured io failure', { skip
   writeFileSync(p, JSON.stringify(validBase()));
   chmodSync(p, 0o000);
   try {
-    const r = loadProfile({ profilePath: p });
+    const r = loadProfile({ dataDir: TMP, profilePath: p });
     assert.equal(r.ok, false);
     assert.equal(r.error.kind, 'io');
     assert.equal(r.profile, null);
@@ -555,7 +559,7 @@ test('(follow-up) an unreadable profile returns a structured io failure', { skip
 
 test('(follow-up) a missing bundled ruleset throws (packaging invariant, not a user error)', () => {
   assert.throws(
-    () => loadProfile({ profilePath: ABSENT, defaultsPath: join(TMP, 'no-such-ruleset.json') }),
+    () => loadProfile({ dataDir: TMP, profilePath: ABSENT, defaultsPath: join(TMP, 'no-such-ruleset.json') }),
     /cannot read bundled default ruleset/,
   );
 });
@@ -563,13 +567,13 @@ test('(follow-up) a missing bundled ruleset throws (packaging invariant, not a u
 test('(follow-up) a missing bundled schema throws once a user profile is present', () => {
   const p = writeProfile({ ...validBase() });
   assert.throws(
-    () => loadProfile({ profilePath: p, schemaPath: join(TMP, 'no-such-schema.json') }),
+    () => loadProfile({ dataDir: TMP, profilePath: p, schemaPath: join(TMP, 'no-such-schema.json') }),
     /cannot read tax-profile schema/,
   );
 });
 
 test('(follow-up) the freeze is deep — nested-beyond-two-levels values are frozen', () => {
-  const r = loadProfile({ profilePath: ABSENT });
+  const r = loadProfile({ dataDir: TMP, profilePath: ABSENT });
   // standardDeductionByYear → single → '2025' is three levels deep.
   assert.ok(Object.isFrozen(r.profile.standardDeductionByYear.single));
   assert.throws(() => {
@@ -577,6 +581,233 @@ test('(follow-up) the freeze is deep — nested-beyond-two-levels values are fro
   }, TypeError);
 });
 
+// --- (#169) path containment: reads outside the allowlisted roots refused ---
+// The loader's allowlist is the resolved dataDir (here: the explicit TMP root)
+// plus the bundled assets/tax/ dir. Everything below targets a SECOND temp dir
+// outside both roots, holding SCHEMA-VALID files — proving each refusal comes
+// from containment, never from validation or a missing file. `OUTSIDE/dir` is a
+// real directory a symlink can point at; `secret.json`, `evil-defaults.json`,
+// and `evil-schema.json` are all real, readable, would-succeed-if-read files, so
+// a guard that silently skipped containment would surface as a *successful* read
+// (or a parse/schema error), never as the `containment` failure asserted here.
+
+const OUTSIDE = mkdtempSync(join(tmpdir(), 'ynab-tax-outside-'));
+mkdirSync(join(OUTSIDE, 'dir'));
+writeFileSync(join(OUTSIDE, 'secret.json'), JSON.stringify(validBase()));
+// A real, valid default ruleset copied out to the escaping root, so the escaping
+// -defaultsPath test proves containment beats a genuinely readable file.
+writeFileSync(join(OUTSIDE, 'evil-defaults.json'), readFileSync(join(ROOT, 'assets', 'tax', 'us-tax-lines.json'), 'utf8'));
+writeFileSync(join(OUTSIDE, 'evil-schema.json'), JSON.stringify(SCHEMA));
+
+// Assert a full containment refusal: right kind/keyword, redacted message, and a
+// wiped result envelope (profile + provenance null) — so a regression that
+// returned `containment` alongside a non-null profile is caught, not just the
+// error.kind.
+function assertContained(r) {
+  assert.equal(r.ok, false);
+  assert.equal(r.error.kind, 'containment');
+  assert.equal(r.error.errors[0].keyword, 'containment');
+  assert.match(r.error.message, /outside the allowed roots/);
+  assert.equal(r.profile, null);
+  assert.equal(r.provenance, null);
+}
+
+test('(#169) a `..`-traversal profilePath escaping the dataDir root is refused unread', () => {
+  // Built by string concat, NOT path.join — join() would normalize the `..`
+  // away at construction time, so the `..` must survive to reach canonicalize.
+  const escaping = `${TMP}/../${basename(OUTSIDE)}/secret.json`;
+  assertContained(loadProfile({ dataDir: TMP, profilePath: escaping }));
+});
+
+test('(#169) a symlink inside the root pointing outside it is refused (realpath, not lexical)', () => {
+  const link = join(TMP, 'sneaky-link.json');
+  symlinkSync(join(OUTSIDE, 'secret.json'), link);
+  assertContained(loadProfile({ dataDir: TMP, profilePath: link }));
+});
+
+test('(#169) a symlink-then-`..` path (kernel-order realpath) is refused — the exact bypass', () => {
+  // `dir-link` → OUTSIDE/dir (outside every root). `dir-link/../secret.json`
+  // resolves, in KERNEL order (symlink first, then `..`), to OUTSIDE/secret.json.
+  // A lexical-first canonicalizer collapses `dir-link/..` to TMP and wrongly
+  // vouches for it as in-root — the #169 arbitrary-read bypass. Built by string
+  // concat so the `..` reaches the guard intact.
+  const dirLink = join(TMP, 'dir-link');
+  symlinkSync(join(OUTSIDE, 'dir'), dirLink);
+  assertContained(loadProfile({ dataDir: TMP, profilePath: `${dirLink}/../secret.json` }));
+});
+
+test('(#169) a symlink-then-`..` path to an ABSENT target is also refused (fallback stays kernel-order)', () => {
+  const dirLink = join(TMP, 'dir-link-absent');
+  symlinkSync(join(OUTSIDE, 'dir'), dirLink);
+  assertContained(loadProfile({ dataDir: TMP, profilePath: `${dirLink}/../does-not-exist.json` }));
+});
+
+test('(#169) an absolute profilePath outside every root is refused even though the file exists and is valid', () => {
+  assertContained(loadProfile({ dataDir: TMP, profilePath: join(OUTSIDE, 'secret.json') }));
+});
+
+test('(#169) an escaping profilePath is refused even when ABSENT (no existence oracle)', () => {
+  assertContained(loadProfile({ dataDir: TMP, profilePath: join(OUTSIDE, 'does-not-exist.json') }));
+});
+
+test('(#169) an unresolvable path (symlink loop, ELOOP) fails CLOSED, not open', () => {
+  // realpath throws a non-ENOENT error here. The guard must treat an
+  // unresolvable target as outside every root — never fabricate an in-root path.
+  const a = join(TMP, 'loop-a');
+  const b = join(TMP, 'loop-b');
+  symlinkSync(b, a);
+  symlinkSync(a, b);
+  assertContained(loadProfile({ dataDir: TMP, profilePath: a }));
+});
+
+test('(#169) an escaping defaultsPath is a structured containment failure, not a packaging throw', () => {
+  assertContained(loadProfile({ dataDir: TMP, profilePath: ABSENT, defaultsPath: join(OUTSIDE, 'evil-defaults.json') }));
+});
+
+test('(#169) an escaping schemaPath is a structured containment failure', () => {
+  const p = writeProfile(validBase());
+  assertContained(loadProfile({ dataDir: TMP, profilePath: p, schemaPath: join(OUTSIDE, 'evil-schema.json') }));
+});
+
+test('(#169) the YNAB_DATA_DIR env seam defines a root — a contained profile under it loads', () => {
+  const p = writeProfile({ ...validBase(), filingStatus: 'mfj' });
+  const r = loadProfile({ env: { YNAB_DATA_DIR: TMP, YNAB_TAX_PROFILE_FILE: p } });
+  assert.equal(r.ok, true);
+  assert.equal(r.profile.filingStatus, 'mfj');
+});
+
+test('(#169) an escaping profile via the YNAB_TAX_PROFILE_FILE env seam is refused', () => {
+  const r = loadProfile({ env: { YNAB_DATA_DIR: TMP, YNAB_TAX_PROFILE_FILE: join(OUTSIDE, 'secret.json') } });
+  assertContained(r);
+});
+
+test('(#169) a bare profilePath with no dataDir does NOT widen the allowlist — escaping is refused', () => {
+  // No dataDir/env override: the roots stay pinned to the production default
+  // (canonical plugin-data dir + assets/tax/). A bare escaping profilePath must
+  // still be refused — it never joins the allowlist on its own.
+  assertContained(loadProfile({ profilePath: join(OUTSIDE, 'secret.json') }));
+});
+
+// --- (#169) redaction + the real no-options default chain (out-of-process) ---
+// The loader captures homedir() at module import, and os.homedir() honours
+// $HOME on POSIX — so these run in a spawned child (the stdout-discipline
+// pattern above) whose $HOME points at a controlled fixture. The module writes
+// nothing to stdout, so the child's stdout is exactly the JSON the script
+// prints — parsing it doubles as one more stdout-discipline check.
+
+const REAL_HOME = mkdtempSync(join(tmpdir(), 'ynab-tax-realhome-'));
+// A home that is ITSELF a symlink (homedir() !== realpath(homedir()) — the
+// macOS-firmlink / NFS / containerized-home shape the redaction must survive).
+const LINK_HOME = join(tmpdir(), `ynab-tax-linkhome-${basename(REAL_HOME)}`);
+symlinkSync(REAL_HOME, LINK_HOME);
+const FAKE_HOME = mkdtempSync(join(tmpdir(), 'ynab-tax-home-'));
+const EMPTY_HOME = mkdtempSync(join(tmpdir(), 'ynab-tax-emptyhome-'));
+
+// Child env: $HOME re-pointed, and the loader's env seams STRIPPED so the child
+// exercises the genuine no-options resolution chain, not an inherited override.
+function childEnv(home) {
+  const env = { ...process.env, HOME: home };
+  delete env.YNAB_DATA_DIR;
+  delete env.YNAB_TAX_PROFILE_FILE;
+  return env;
+}
+
+function loadInChild(home, optionsLiteral, resultExpr) {
+  const script = `
+    import(${JSON.stringify(pathToFileURL(MODULE_PATH).href)}).then((m) => {
+      const r = m.loadProfile(${optionsLiteral});
+      process.stdout.write(JSON.stringify(${resultExpr}));
+    });
+  `;
+  const res = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env: childEnv(home) });
+  assert.equal(res.status, 0, res.stderr);
+  return JSON.parse(res.stdout);
+}
+
+test('(#169) the containment failure stays redacted when $HOME itself resolves through a symlink', () => {
+  // A path under $HOME but outside both roots → containment failure whose
+  // message echoes the caller's path. With a symlinked home, the RAW spelling
+  // (under LINK_HOME) never matches the canonical home, so a canonical-only
+  // mask ships the absolute path — this pins the both-spellings redaction.
+  const escaping = join(LINK_HOME, 'secret.json');
+  const out = loadInChild(
+    LINK_HOME,
+    `{ profilePath: ${JSON.stringify(escaping)} }`,
+    '{ kind: r.error.kind, message: r.error.message, path: r.error.errors[0].params.path }',
+  );
+  assert.equal(out.kind, 'containment');
+  // Neither spelling of the home dir may leak — raw (as supplied) or canonical
+  // (as resolved). includes() also catches the canonical /private-prefixed form.
+  assert.ok(!out.message.includes(LINK_HOME), `raw home leaked into message: ${out.message}`);
+  assert.ok(!out.message.includes(REAL_HOME), `canonical home leaked into message: ${out.message}`);
+  // The masking branch actually RAN (a no-op redaction would fail here) and the
+  // message agrees with the structured params for the same value.
+  assert.match(out.message, /~[/\\]secret\.json/);
+  assert.equal(out.path, join('~', 'secret.json'));
+});
+
+test('(#169) the io failure envelope is redacted under a symlinked $HOME (message + sources)', () => {
+  // An unreadable profile INSIDE the allowlist exercises the pre-existing
+  // io path: both the composed message (Node's err.message embeds the raw
+  // path) and the echoed sources must mask every home spelling.
+  const dataDir = join(REAL_HOME, '.claude', 'plugins', 'data', 'workbench-ynab-claude-workbench');
+  mkdirSync(dataDir, { recursive: true });
+  const unreadable = join(dataDir, 'tax-profile.json');
+  writeFileSync(unreadable, JSON.stringify(validBase()));
+  chmodSync(unreadable, 0o000);
+  try {
+    const out = loadInChild(
+      LINK_HOME,
+      '{}',
+      '{ kind: r.ok ? null : r.error.kind, message: r.ok ? "" : r.error.message, profileSource: r.ok ? null : r.sources.profile }',
+    );
+    assert.equal(out.kind, 'io');
+    assert.ok(!out.message.includes(LINK_HOME) && !out.message.includes(REAL_HOME), `home leaked into io message: ${out.message}`);
+    assert.ok(!out.profileSource.includes(LINK_HOME) && !out.profileSource.includes(REAL_HOME), `home leaked into failure sources: ${out.profileSource}`);
+  } finally {
+    chmodSync(unreadable, 0o600);
+    rmSync(unreadable);
+  }
+});
+
+test('(#169 / AC#5) zero-options loadProfile still succeeds through the real homedir() chain', () => {
+  // Every other success test passes an explicit dataDir / env seam, so this is
+  // the only guard on the production default: join(homedir(), <data-dir>) must
+  // canonicalize into the allowlist and load. A resolution bug here would flip
+  // every real install to a hard containment refusal — exactly AC#5's line.
+  const dataDir = join(FAKE_HOME, '.claude', 'plugins', 'data', 'workbench-ynab-claude-workbench');
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, 'tax-profile.json'), JSON.stringify({ ...validBase(), filingStatus: 'mfj' }));
+  const out = loadInChild(
+    FAKE_HOME,
+    '{}',
+    '{ ok: r.ok, defaultsOnly: r.defaultsOnly, filingStatus: r.ok ? r.profile.filingStatus : null, error: r.ok ? null : r.error }',
+  );
+  assert.equal(out.ok, true, `expected ok:true through the default chain, got: ${JSON.stringify(out.error)}`);
+  assert.equal(out.defaultsOnly, false);
+  assert.equal(out.filingStatus, 'mfj'); // the user profile actually merged
+});
+
+test('(#169 / AC#5) zero-options defaults-only load succeeds when no data dir exists at all', () => {
+  // Fresh-install state: the plugin-data dir is entirely absent. The dataDir
+  // root canonicalizes via the ENOENT ancestor walk, the missing profile is a
+  // normal defaults-only result — never a containment refusal.
+  const out = loadInChild(
+    EMPTY_HOME,
+    '{}',
+    '{ ok: r.ok, defaultsOnly: r.defaultsOnly, error: r.ok ? null : r.error }',
+  );
+  assert.equal(out.ok, true, `expected defaults-only ok:true, got: ${JSON.stringify(out.error)}`);
+  assert.equal(out.defaultsOnly, true);
+});
+
 // --- cleanup ----------------------------------------------------------------
 
-test.after(() => rmSync(TMP, { recursive: true, force: true }));
+test.after(() => {
+  rmSync(TMP, { recursive: true, force: true });
+  rmSync(OUTSIDE, { recursive: true, force: true });
+  rmSync(LINK_HOME, { force: true });
+  rmSync(REAL_HOME, { recursive: true, force: true });
+  rmSync(FAKE_HOME, { recursive: true, force: true });
+  rmSync(EMPTY_HOME, { recursive: true, force: true });
+});
