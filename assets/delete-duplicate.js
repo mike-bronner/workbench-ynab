@@ -498,7 +498,7 @@ async function applyDeleteDuplicates(changeset, options = {}) {
               err.rule = 'twin_missing';
               throw err;
             }
-            const drifted = ['payee_name', 'amount', 'date'].filter((f) => liveTwin[f] !== op.twin[f]);
+            const drifted = TWIN_REQUIRED_FIELDS.filter((f) => f !== 'id' && liveTwin[f] !== op.twin[f]);
             if (drifted.length > 0) {
               const err = new Error(
                 `twin_drifted: delete_duplicate op ${op.id != null ? op.id : '(no id)'} carries surviving-twin evidence that no `

@@ -630,6 +630,94 @@ test('(#151) a surviving twin that MATERIALLY CHANGED live aborts the delete eve
   assert.equal(apply.calls.length, 0, 'the delete tool must NEVER be invoked when the surviving twin drifted');
 });
 
+test('(#151) a live twin whose PAYEE_NAME drifted aborts the delete — every evidence field is drift-checked, not just amount', async () => {
+  // Pins payee_name as a decisive drift field in its own right: a refactor that
+  // narrows the checked field list (dropping payee_name) must fail this test.
+  const cs = loadFixture('delete-duplicate.example.json');
+  const twinId = cs.operations[0].twin.id;
+  const apply = spy();
+  // The victim reads back clean; the live twin's payee no longer matches the
+  // evidence the human approved.
+  const read = spy((op) => (op.transaction_id === twinId
+    ? { ...clone(cs.operations[0].twin), payee_name: 'Amazon Marketplace' }
+    : clone(op.before)));
+
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: read,
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit: auditSpy(),
+  });
+
+  const res = out.results.find((r) => r.op_id === cs.operations[0].id);
+  assert.equal(res.status, STATUS.ERROR); // terminal per-op — never dispatched
+  assert.match(res.detail.message, /twin_drifted/);
+  assert.match(res.detail.message, /payee_name/);
+  assert.equal(apply.calls.length, 0, 'the delete tool must NEVER be invoked when the surviving twin drifted on payee_name');
+});
+
+test('(#151) a live twin whose DATE drifted aborts the delete — every evidence field is drift-checked, not just amount', async () => {
+  // Pins date as a decisive drift field in its own right: a refactor that
+  // narrows the checked field list (dropping date) must fail this test.
+  const cs = loadFixture('delete-duplicate.example.json');
+  const twinId = cs.operations[0].twin.id;
+  const apply = spy();
+  // The victim reads back clean; the live twin's date no longer matches the
+  // evidence the human approved.
+  const read = spy((op) => (op.transaction_id === twinId
+    ? { ...clone(cs.operations[0].twin), date: '2026-06-13' }
+    : clone(op.before)));
+
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: read,
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit: auditSpy(),
+  });
+
+  const res = out.results.find((r) => r.op_id === cs.operations[0].id);
+  assert.equal(res.status, STATUS.ERROR); // terminal per-op — never dispatched
+  assert.match(res.detail.message, /twin_drifted/);
+  assert.match(res.detail.message, /date/);
+  assert.equal(apply.calls.length, 0, 'the delete tool must NEVER be invoked when the surviving twin drifted on date');
+});
+
+test('(#151) a STALE victim with a missing twin is skipped-stale, not errored — the twin gate is decisive only when the victim is fresh', async () => {
+  // Pins the deliberate `if (!isStale(op.before, live))` short-circuit: when the
+  // victim ITSELF is stale, the executor's own victim-drift skip owns the outcome
+  // (richer skip detail, pinned behavior) and the twin liveness gate stands down —
+  // even though the twin is gone. Either way nothing is deleted; this test makes
+  // the precedence intentional instead of collateral from an unrelated drift test.
+  const cs = loadFixture('delete-duplicate.example.json');
+  const twinId = cs.operations[0].twin.id;
+  const apply = spy();
+  // The victim reads back drifted (stale op) AND the twin's live read resolves
+  // to nothing — both conditions at once.
+  const read = spy((op) => (op.transaction_id === twinId
+    ? null
+    : { ...clone(op.before), amount: op.before.amount + 1 }));
+
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: read,
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit: auditSpy(),
+  });
+
+  assert.equal(out.ok, true);
+  const res = out.results.find((r) => r.op_id === cs.operations[0].id);
+  assert.equal(res.status, STATUS.SKIPPED_STALE, 'the stale victim is SKIPPED by the executor, never errored by the twin gate');
+  assert.equal(res.detail.reason, 'stale');
+  assert.equal(read.calls.length, 2, 'BOTH candidates are still live-read: the victim, then the twin by its own id');
+  assert.equal(apply.calls.length, 0, 'the delete tool must NEVER be invoked for a stale victim');
+});
+
 test('(#151) an unchanged live twin lets a clean delete proceed — the gate adds no false positives', async () => {
   const cs = loadFixture('delete-duplicate.example.json');
   const twinId = cs.operations[0].twin.id;
