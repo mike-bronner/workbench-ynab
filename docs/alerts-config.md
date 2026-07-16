@@ -113,7 +113,10 @@ top 5** (`MAX_FINDINGS`, matching the review dispatch's fixed five):
   active channel — this is the audit trail. Each line is one JSON entry:
   `{ timestamp, channel, findings, rendered }`, with the **full** findings
   (`detail` and `dedupe_key` included). The file is written owner-only
-  (dir `0700`, file `0600`), same sensitivity class as the monitor state.
+  (dir `0700`, file `0600`), same sensitivity class as the monitor state —
+  and the modes are re-enforced on every append (creation-time modes alone
+  never tighten a pre-existing dir/file; `bin/audit-log.sh` keeps the same
+  guarantee the same way).
 - **Notification is best-effort by contract.** Off-darwin it is skipped; a
   missing or failing `osascript` returns `false` and logs to stderr — a failed
   notification **never** raises an exception or crashes the monitor pass.

@@ -16,7 +16,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -323,6 +323,21 @@ test('dispatchAlerts never throws on malformed findings — junk is dropped, val
   const noop = dispatchAlerts([null, 'junk'], { config: sanitizeAlertsConfig({}), logPath: noopLog });
   assert.equal(noop.dispatched, false);
   assert.equal(existsSync(noopLog), false);
+});
+
+test('appendAlertLog enforces owner-only modes on every append, not just at creation', () => {
+  // A pre-existing dir/file left at looser modes (an earlier run, tampering)
+  // must be tightened by the append — creation-time `mode` options alone never
+  // re-assert anything. Mirrors bin/audit-log.sh and the writeState mode test.
+  const dir = join(TMP, `loose-${seq++}`);
+  const logPath = join(dir, 'alert-log.jsonl');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(logPath, '{"stale":true}\n');
+  chmodSync(dir, 0o755);
+  chmodSync(logPath, 0o644);
+  appendAlertLog({ probe: true }, { logPath });
+  assert.equal(statSync(logPath).mode & 0o777, 0o600);
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
 });
 
 // --- Path seam ------------------------------------------------------------------
