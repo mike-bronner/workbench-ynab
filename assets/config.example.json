@@ -49,6 +49,15 @@
       "enabled": true
     }
   },
+  "alerts": {
+    "enabled": true,
+    "large_transaction_amount": 500,
+    "unusual_multiplier": 3,
+    "budget_overrun_pct": 100,
+    "bill_due_lookahead_days": 3,
+    "overdrawn": true,
+    "channel": "macos-notification"
+  },
   "classification": {
     "highThreshold": 0.85,
     "mediumThreshold": 0.6
