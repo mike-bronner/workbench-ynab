@@ -17,6 +17,10 @@
 #      version via npm's own published keys (`npm audit signatures`); if the
 #      registry publishes no signature for the package the gate is not skipped
 #      silently — it is recorded as a residual supply-chain risk in the marker.
+#      The audited install is BOUND to the exact packed tarball: its
+#      lockfile-recorded integrity must equal the packed tarball's computed SRI,
+#      so a `verified` verdict attests the same bytes that are extracted and
+#      committed — never a divergent second fetch.
 #   3. Extracts dist/bundle/index.cjs and overwrites vendor/ynab-mcp/index.cjs.
 #   4. Recomputes the upstream tarball + vendored-bundle SHA-256 and rewrites the
 #      version marker (vendored.json) — package, version, both hashes, today's
@@ -128,8 +132,16 @@ TARBALL_SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
 # SHA-512 SRI must match dist.integrity AND the computed SHA-1 must match
 # dist.shasum. A mismatch means the download does not descend from the
 # registry-published artifact — refuse to extract.
-log "Verifying tarball against npm registry provenance for $SPEC…"
-if ! REG_META="$(npm view "$SPEC" --json dist.integrity dist.shasum dist.tarball 2>"$TMP/view.err")"; then
+# ${SPEC} is braced: glued directly to the multibyte '…', some bash builds fold
+# the ellipsis's first byte into the variable name ("SPEC\xE2: unbound variable"
+# under set -u), aborting before the provenance check runs.
+log "Verifying tarball against npm registry provenance for ${SPEC}…"
+# cd-isolated into $TMP for parity with `npm pack` (above) and the audit
+# `npm install` (below), which both run there: all three registry reads must
+# resolve through the SAME npm config scope, so a repo-level .npmrc introduced
+# later can never silently point `view` at a different registry than the one
+# the tarball and the signature audit actually come from.
+if ! REG_META="$( cd "$TMP" && npm view "$SPEC" --json dist.integrity dist.shasum dist.tarball 2>"$TMP/view.err" )"; then
   cat "$TMP/view.err" >&2 || true
   die "npm view failed for $SPEC — cannot fetch the registry integrity metadata to verify against"
 fi
@@ -204,6 +216,20 @@ if ! ( cd "$SIGDIR" && npm install --ignore-scripts --no-audit --no-fund "$SPEC"
   cat "$TMP/sig-install.log" >&2 || true
   die "isolated install for signature verification failed for $SPEC"
 fi
+# --- Bind the audit to the exact packed tarball --------------------------------
+# `npm audit signatures` only audits REGISTRY-resolved installs (pointing it at
+# the local $TARBALL makes it error: "found no dependencies to audit that were
+# installed from a supported registry"), so the audited tree is necessarily a
+# second fetch. Close that two-download window mathematically instead: npm
+# refuses (EINTEGRITY) to install bytes that do not match the lockfile-recorded
+# integrity, so requiring that recorded SRI to EQUAL the packed tarball's
+# computed SRI ties the audited bytes to the exact artifact integrity-verified
+# above and extracted below. A registry swapping bytes between the pack/view
+# reads and this install dies here, instead of a signature verdict earned by
+# different bytes being stamped onto the committed ones.
+LOCK_INTEGRITY="$(jq -r --arg n "$NAME" '.packages["node_modules/" + $n].integrity // ""' "$SIGDIR/package-lock.json" 2>/dev/null || true)"
+[ "$LOCK_INTEGRITY" = "$TARBALL_SRI" ] \
+  || die "signature-audit install is not the packed tarball — lockfile integrity '${LOCK_INTEGRITY:-<missing>}' != packed '$TARBALL_SRI'; refusing to trust the signature verdict"
 # Keep the audit's stderr (mirroring the install step's sig-install.log) so a
 # non-signature failure — old npm, network, a registry hiccup — is shown with
 # npm's own diagnostics, not swallowed behind the generic guard below.

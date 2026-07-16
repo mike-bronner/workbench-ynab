@@ -26,13 +26,17 @@
 #     the missing prerequisite, rather than failing obscurely half-way through.
 #
 # The mock `npm` covers the four subcommands the script now drives — `pack --json`
-# (packs MOCK_BUNDLE_SRC and records the tarball's REAL hashes so `view` can echo
-# registry-matching values), `view … --json` (returns dist.integrity/shasum/tarball,
-# overridable via MOCK_REG_* to force a mismatch, or MOCK_VIEW_NONJSON to emit
-# non-JSON noise), `install` (no-op), and
+# (packs MOCK_BUNDLE_SRC and records the tarball's REAL hashes so `view`/`install`
+# can echo registry-matching values), `view … --json` (returns
+# dist.integrity/shasum/tarball, overridable via MOCK_REG_* to force a mismatch,
+# MOCK_VIEW_NONJSON to emit non-JSON noise, or MOCK_VIEW_FAIL to exit non-zero),
+# `install` (writes a package-lock.json recording the packed tarball's real SRI,
+# overridable via MOCK_LOCK_INTEGRITY to simulate a divergent second fetch), and
 # `audit signatures --json` (MOCK_SIG_STATUS ∈ verified|missing|invalid). A stub
-# `node` exists only so the prereq check's `command -v node` passes. Real
-# jq/shasum/tar/openssl come from $PATH. Zero third-party deps — pure bash + the
+# `node` exists only so the prereq check's `command -v node` passes; a transparent
+# `tar` wrapper logs every invocation to state/tar.log (pinning the gate's
+# before-extraction ordering) then delegates to the real tar. Real
+# jq/shasum/openssl come from $PATH. Zero third-party deps — pure bash + the
 # assert lib (see docs/testing.md).
 #
 set -euo pipefail
@@ -90,25 +94,40 @@ case "${1:-}" in
     file="mock-ynab-mcpb.tgz"
     tar -czf "$PWD/$file" -C "$work" package
     rm -rf "$work"
-    # Record this tarball's REAL hashes so `view` can return registry-matching
-    # values (the integrity gate's PASS path) without the two mock invocations
-    # having to know each other's temp paths.
+    # Record this tarball's REAL hashes so `view`/`install` can return
+    # registry-matching values (the integrity gate's PASS path) without the mock
+    # invocations having to know each other's temp paths — and so the marker
+    # tests can VALUE-assert tarball_sha256 instead of length-checking it.
     printf 'sha512-%s' "$(openssl dgst -sha512 -binary "$PWD/$file" | openssl base64 -A)" > "$STATE/integrity"
     shasum -a 1 "$PWD/$file" | awk '{print $1}' > "$STATE/shasum"
+    shasum -a 256 "$PWD/$file" | awk '{print $1}' > "$STATE/sha256"
     printf '[{"filename":"%s","integrity":"%s"}]\n' "$file" "$(cat "$STATE/integrity")"
     ;;
   view)
     # `npm view <spec> --json dist.integrity dist.shasum dist.tarball`. Default to
     # the real hashes recorded by pack; MOCK_REG_* override to force a mismatch.
-    # Production depends on --json here (bin/revendor.sh:132); drop it and real npm
+    # Production depends on --json here (bin/revendor.sh:144); drop it and real npm
     # emits non-JSON the script's jq chokes on — fail loudly if the contract regresses.
     [[ " $* " == *" --json "* ]] || { echo "mock npm: 'view' must pass --json, got: $*" >&2; exit 1; }
-    # Production reads all three of these fields (bin/revendor.sh:132,147-149); drop
+    # Production reads all three of these fields (bin/revendor.sh:144,159-161); drop
     # any one from the real call and the registry cross-check loses a term — fail
     # loudly so the contract is pinned, not just the --json flag.
     for f in dist.integrity dist.shasum dist.tarball; do
       [[ " $* " == *" $f "* ]] || { echo "mock npm: 'view' must request $f, got: $*" >&2; exit 1; }
     done
+    # Pin the spec argument (bin/revendor.sh's `npm view "$SPEC" …`), matching the
+    # pack branch's coverage: hardcoding a wrong package in the real call must go
+    # red here, not ship green on a syntactically-plausible mock reply.
+    if [ -n "${EXPECTED_SPEC:-}" ] && [ "${2:-}" != "$EXPECTED_SPEC" ]; then
+      echo "mock npm: 'view' expected spec '$EXPECTED_SPEC', got: '${2:-}'" >&2; exit 1
+    fi
+    # Force a hard `npm view` failure (registry unreachable / npm error) to
+    # exercise the fail-closed guard around the REG_META fetch — the script must
+    # die with its own actionable message, surfacing npm's stderr diagnostics.
+    if [ -n "${MOCK_VIEW_FAIL:-}" ]; then
+      echo "npm error network request to https://registry.npmjs.org failed" >&2
+      exit 1
+    fi
     # Force a non-JSON payload on a clean exit 0 to exercise the script's view
     # shape-guard: a future npm/wrapper emitting noise must hard-error with an
     # actionable message, not a raw jq crash when the fields are indexed.
@@ -127,14 +146,28 @@ case "${1:-}" in
     # flag: without it, `npm install` of a possibly-compromised package runs its
     # install hooks with full privileges during the very audit meant to catch
     # tampering (the isolated $SIGDIR scopes WHERE files land, not WHAT code runs).
-    # Drop it from the real call (bin/revendor.sh:203) and the suite must go red —
+    # Drop it from the real call (bin/revendor.sh:215) and the suite must go red —
     # so the mock fails loudly if the contract regresses.
     [[ " $* " == *" --ignore-scripts "* ]] || { echo "mock npm: 'install' must pass --ignore-scripts, got: $*" >&2; exit 1; }
+    # Pin the spec argument, matching the pack branch's coverage: hardcoding a
+    # wrong package in the audit install must go red here, not ship green.
+    if [ -n "${EXPECTED_SPEC:-}" ] && [[ " $* " != *" $EXPECTED_SPEC "* ]]; then
+      echo "mock npm: 'install' expected spec '$EXPECTED_SPEC', got: $*" >&2; exit 1
+    fi
+    # Production binds the signature audit to the packed tarball via the
+    # lockfile-recorded integrity — emulate npm writing package-lock.json with
+    # the integrity of what it installed (real npm enforces this with
+    # EINTEGRITY). Defaults to the REAL SRI pack recorded (the bound PASS path);
+    # MOCK_LOCK_INTEGRITY simulates a divergent second fetch.
+    lockname="${MOCK_PKG_NAME:?mock npm install needs MOCK_PKG_NAME}"
+    lockinteg="${MOCK_LOCK_INTEGRITY:-$(cat "$STATE/integrity" 2>/dev/null || true)}"
+    printf '{"lockfileVersion":3,"packages":{"node_modules/%s":{"integrity":"%s"}}}\n' \
+      "$lockname" "$lockinteg" > "$PWD/package-lock.json"
     exit 0
     ;;
   audit)
     [ "${2:-}" = "signatures" ] || { echo "mock npm: only 'audit signatures' supported, got: $*" >&2; exit 1; }
-    # Production depends on --json here too (bin/revendor.sh:210); drop it and real
+    # Production depends on --json here too (bin/revendor.sh:236); drop it and real
     # npm emits non-JSON — fail loudly if the contract regresses.
     [[ " $* " == *" --json "* ]] || { echo "mock npm: 'audit signatures' must pass --json, got: $*" >&2; exit 1; }
     name="${MOCK_PKG_NAME:?mock npm audit needs MOCK_PKG_NAME}"
@@ -163,7 +196,20 @@ NPM
 #!/usr/bin/env bash
 exit 0
 NODE
-  chmod +x "$dir/npm" "$dir/node"
+  # Transparent tar wrapper: records every invocation's args to state/tar.log,
+  # then delegates to the real tar. This is what lets the integrity-mismatch
+  # tests assert extraction (`-xzf`) NEVER ran — pinning the gate's
+  # before-extraction ORDERING, not just that the tracked files stayed
+  # untouched (moving the gate after `tar -xzf` must go red). The success-path
+  # test asserts `-xzf` IS logged, proving the wrapper intercepts extraction.
+  local real_tar
+  real_tar="$(command -v tar)"
+  cat > "$dir/tar" <<TAR
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$dir/state/tar.log"
+exec "$real_tar" "\$@"
+TAR
+  chmod +x "$dir/npm" "$dir/node" "$dir/tar"
   printf '%s' "$dir"
 }
 
@@ -178,7 +224,7 @@ test_idempotent_no_change() {
   bundle="$sb/vendor/ynab-mcp/index.cjs"
   marker_before="$(hash_of "$marker")"
   bundle_before="$(hash_of "$bundle")"
-  # No version arg → the script defaults to the pinned version (bin/revendor.sh:86).
+  # No version arg → the script defaults to the pinned version (bin/revendor.sh:90).
   spec="$(jq -r '.name' "$marker")@$(jq -r '.version' "$marker")"
 
   set +e
@@ -231,8 +277,18 @@ test_changed_bundle_updates_marker_and_bundle() {
   # (b) marker rewritten: version, bundle hash, tarball hash, and date
   assert_eq "$new_version" "$(jq -r '.version' "$marker")" "marker version must be rewritten"
   assert_eq "$new_sha" "$(jq -r '.bundle_sha256' "$marker")" "marker bundle_sha256 must match the new bytes"
+  # Value-assert tarball_sha256 against the SHA-256 the pack mock recorded for
+  # the REAL tarball it built — a wrong-but-64-char digest must fail, matching
+  # how the sibling tarball_integrity/tarball_shasum fields are compared.
   tsha="$(jq -r '.tarball_sha256' "$marker")"
-  assert_eq 64 "${#tsha}" "marker tarball_sha256 must be a 64-char SHA-256"
+  assert_eq "$(cat "$mockbin/state/sha256")" "$tsha" \
+    "marker tarball_sha256 must equal the packed tarball's real SHA-256"
+  # Value-assert tarball_url against the dist.tarball the view mock returns —
+  # neutralizing the REG_TARBALL fallback (always synthesizing the URL instead
+  # of recording the registry's) must fail this, since the synthesized shape
+  # (…/${NAME}/-/…-${VERSION}.tgz) differs from the mock's recorded value.
+  assert_eq "https://registry.npmjs.org/mock/-/mock.tgz" "$(jq -r '.tarball_url' "$marker")" \
+    "marker tarball_url must record the registry's dist.tarball, not the synthesized fallback"
   # (b2) provenance fields: registry SHA-1 + verified signature outcome. Assert the
   # EXACT registry dist.shasum the pack mock recorded (view echoes it back), not a
   # 40-char length check — a wrong-but-40-char SHA-1 would pass a length probe but
@@ -259,13 +315,18 @@ test_changed_bundle_updates_marker_and_bundle() {
   if [ -e "$marker.tmp" ]; then
     fail "vendored.json.tmp must not remain in the vendor dir after a successful write"
   fi
+  # (e) positive control for the tar-invocation log: the write path DOES extract,
+  # so `-xzf` must be recorded — proving the wrapper intercepts extraction and
+  # the mismatch tests' "no -xzf" assertions can't pass vacuously.
+  assert_contains "$(cat "$mockbin/state/tar.log")" "-xzf" \
+    "the success path must record a tar extraction in the invocation log"
   rm -rf "$sb"
 }
 
-# The headline invariant (bin/revendor.sh:32-34): identity is the artifact HASH,
+# The headline invariant (bin/revendor.sh:36-38): identity is the artifact HASH,
 # not the version string. Same PINNED version BUT different bundle bytes must
 # still write — the one case that proves the hash half of the idempotency guard
-# (bin/revendor.sh:184) matters. A regression dropping the bundle-hash term would
+# (bin/revendor.sh:196) matters. A regression dropping the bundle-hash term would
 # pass both the no-change and changed-version tests silently; this catches it.
 test_same_version_different_bytes_writes() {
   local sb mockbin marker bundle newsrc name pinned new_sha out rc
@@ -298,7 +359,7 @@ test_same_version_different_bytes_writes() {
 
 # Hardening: if npm pack exits 0 but emits non-JSON noise on stdout, the script
 # must surface the actionable "did not return the expected JSON" message (and the
-# captured output), not a raw jq parse error mid-pipeline (bin/revendor.sh:109-116).
+# captured output), not a raw jq parse error mid-pipeline (bin/revendor.sh:113-120).
 test_npm_non_json_stdout_errors() {
   local sb dir out rc
   sb="$(make_sandbox)"
@@ -330,7 +391,7 @@ NODE
 # Parity hardening for the registry-metadata fetch: if `npm view` exits 0 but emits
 # non-JSON noise on stdout, the fail-closed shape guard must surface the actionable
 # "did not return the expected JSON" message BEFORE the registry fields are indexed
-# (bin/revendor.sh:142-146) — not a raw jq crash — and touch nothing. MOCK_VIEW_NONJSON
+# (bin/revendor.sh:154-158) — not a raw jq crash — and touch nothing. MOCK_VIEW_NONJSON
 # forces that payload. Mirrors test_npm_non_json_stdout_errors (the pack path).
 test_npm_view_non_json_aborts() {
   local sb mockbin marker bundle marker_before bundle_before out rc
@@ -351,6 +412,36 @@ test_npm_view_non_json_aborts() {
   assert_contains "$out" "expected JSON" "error must name the JSON-shape failure"
   assert_eq "$marker_before" "$(hash_of "$marker")" "marker must be untouched when view output is rejected"
   assert_eq "$bundle_before" "$(hash_of "$bundle")" "bundle must be untouched when view output is rejected"
+  rm -rf "$sb"
+}
+
+# The `npm view` FAILURE branch (registry unreachable, npm error): the guard
+# around the REG_META fetch must die with its own actionable message — and
+# surface npm's stderr diagnostics — not fall through to a raw `set -e` abort.
+# MOCK_VIEW_FAIL drives the mock's view case to a non-zero exit; removing the
+# `if ! REG_META=…; then die; fi` guard loses the actionable message (the bare
+# assignment still aborts under set -e, but silently), so this test pins the
+# guard itself, not just the exit code.
+test_npm_view_failure_aborts() {
+  local sb mockbin marker bundle marker_before bundle_before out rc
+  sb="$(make_sandbox)"
+  mockbin="$(make_mockbin "$sb")"
+  marker="$sb/vendor/ynab-mcp/vendored.json"
+  bundle="$sb/vendor/ynab-mcp/index.cjs"
+  marker_before="$(hash_of "$marker")"
+  bundle_before="$(hash_of "$bundle")"
+
+  set +e
+  out="$(env PATH="$mockbin:$PATH" MOCK_BUNDLE_SRC="$bundle" MOCK_VIEW_FAIL=1 \
+    "$BASH_BIN" "$sb/bin/revendor.sh" 2>&1)"
+  rc=$?
+  set -e
+
+  assert_eq 1 "$rc" "a failing npm view must hard-error"
+  assert_contains "$out" "npm view failed" "must die via the guard's actionable message, not a bare set -e abort"
+  assert_contains "$out" "network request" "npm's own stderr diagnostics must be surfaced, not swallowed"
+  assert_eq "$marker_before" "$(hash_of "$marker")" "marker must be untouched when npm view fails"
+  assert_eq "$bundle_before" "$(hash_of "$bundle")" "bundle must be untouched when npm view fails"
   rm -rf "$sb"
 }
 
@@ -378,7 +469,7 @@ NODE
 
 # With openssl missing from $PATH (but every earlier prereq present) the script
 # must hard-error at the openssl require and name it — the provenance gate's
-# SHA-512 SRI can't be computed without it (bin/revendor.sh:71,155). Parallels
+# SHA-512 SRI can't be computed without it (bin/revendor.sh:75,167). Parallels
 # test_prereq_missing_npm_errors for the prereq the provenance gate (#5) added.
 test_prereq_missing_openssl_errors() {
   local sb noopenssl out rc t
@@ -427,6 +518,12 @@ test_integrity_sri_mismatch_aborts_before_extraction() {
   assert_contains "$out" "refusing to extract" "error must state extraction was refused"
   assert_eq "$marker_before" "$(hash_of "$marker")" "marker must be untouched on an integrity abort"
   assert_eq "$bundle_before" "$(hash_of "$bundle")" "bundle must be untouched on an integrity abort"
+  # ORDERING pin: "aborts BEFORE extraction" must mean tar never extracted —
+  # moving the integrity gate after `tar -xzf` leaves the tracked files
+  # untouched (the extract dir is a temp) yet must still go red here.
+  if grep -q -- '-xzf' "$mockbin/state/tar.log" 2>/dev/null; then
+    fail "tar extraction ran despite the integrity mismatch — the gate must fire BEFORE extraction"
+  fi
   rm -rf "$sb"
 }
 
@@ -453,6 +550,11 @@ test_integrity_shasum_mismatch_aborts_before_extraction() {
   assert_contains "$out" "refusing to extract" "error must state extraction was refused (before-extraction semantic, proven by message)"
   assert_eq "$marker_before" "$(hash_of "$marker")" "marker must be untouched on a shasum abort"
   assert_eq "$bundle_before" "$(hash_of "$bundle")" "bundle must be untouched on a shasum abort"
+  # Same ORDERING pin as the SRI test: a mismatch must abort before any tar
+  # extraction is even attempted, not merely leave the tracked files untouched.
+  if grep -q -- '-xzf' "$mockbin/state/tar.log" 2>/dev/null; then
+    fail "tar extraction ran despite the shasum mismatch — the gate must fire BEFORE extraction"
+  fi
   rm -rf "$sb"
 }
 
@@ -596,6 +698,41 @@ test_floor_never_modified_by_revendor() {
     "the summary must name the latest-LTS policy"
   assert_contains "$out" "update vendor/ynab-mcp/NODE_VERSION" \
     "the next steps must carry the manual-bump reminder that replaced the automation"
+  rm -rf "$sb"
+}
+
+# Signature-audit BINDING: the audited install's lockfile-recorded integrity
+# must equal the packed tarball's computed SRI, or the run dies without writing
+# — a signature verdict earned by a divergent second fetch must never be
+# stamped onto the committed bytes. MOCK_LOCK_INTEGRITY simulates the registry
+# serving different bytes to the audit install than to `npm pack`; removing the
+# binding check lets this run complete (the mock audit says verified), so the
+# rc-1 assertion kills that mutation.
+test_signature_audit_bound_to_packed_tarball() {
+  local sb mockbin marker bundle newsrc name new_version marker_before bundle_before out rc
+  sb="$(make_sandbox)"
+  mockbin="$(make_mockbin "$sb")"
+  marker="$sb/vendor/ynab-mcp/vendored.json"
+  bundle="$sb/vendor/ynab-mcp/index.cjs"
+  name="$(jq -r '.name' "$marker")"
+  new_version="9.9.9-unbound"
+  newsrc="$sb/new-index.cjs"
+  printf 'divergent-audit-bytes %s\n' "$(date +%s)-$RANDOM" > "$newsrc"
+  marker_before="$(hash_of "$marker")"
+  bundle_before="$(hash_of "$bundle")"
+
+  set +e
+  out="$(env PATH="$mockbin:$PATH" MOCK_BUNDLE_SRC="$newsrc" EXPECTED_SPEC="$name@$new_version" \
+    MOCK_PKG_NAME="$name" \
+    MOCK_LOCK_INTEGRITY="sha512-DIVERGENTsecondFETCHdivergentSECONDfetchDIVERGENTsecondFETCHdivergentSECONDfe==" \
+    "$BASH_BIN" "$sb/bin/revendor.sh" "$new_version" 2>&1)"
+  rc=$?
+  set -e
+
+  assert_eq 1 "$rc" "an audit install that is not the packed tarball must hard-error"
+  assert_contains "$out" "not the packed tarball" "error must name the binding failure"
+  assert_eq "$marker_before" "$(hash_of "$marker")" "marker must be untouched on a binding abort"
+  assert_eq "$bundle_before" "$(hash_of "$bundle")" "bundle must be untouched on a binding abort"
   rm -rf "$sb"
 }
 
