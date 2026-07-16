@@ -59,6 +59,29 @@ assert_absent_re() {
   fi
 }
 
+# assert_present_flat_re <desc> <regex> — like assert_present_re, but newlines
+# are flattened to spaces first, so prose assertions survive markdown
+# line-wrapping (grep is line-based; wrapped sentences would never match).
+assert_present_flat_re() {
+  local desc="$1" re="$2"
+  if tr '\n' ' ' < "$FILE" | grep -qiE -- "$re"; then
+    printf 'ok   — %s\n' "$desc"; pass=$((pass + 1))
+  else
+    printf 'FAIL — %s: /%s/ did not match (flattened) in %s\n' "$desc" "$re" "${FILE##*/}"; fail=$((fail + 1))
+  fi
+}
+
+# assert_absent_flat_re <desc> <regex> — like assert_absent_re, on the
+# newline-flattened file, so a defect phrase can't hide across a line wrap.
+assert_absent_flat_re() {
+  local desc="$1" re="$2"
+  if tr '\n' ' ' < "$FILE" | grep -qiE -- "$re"; then
+    printf 'FAIL — %s: /%s/ unexpectedly matched (flattened) in %s\n' "$desc" "$re" "${FILE##*/}"; fail=$((fail + 1))
+  else
+    printf 'ok   — %s\n' "$desc"; pass=$((pass + 1))
+  fi
+}
+
 # Shared invariants for all five command files (router + ad-hoc tiers).
 check_shared() {
   local label="$1"
@@ -76,19 +99,29 @@ check_shared() {
   assert_present "[$label] resolves tool names from the protocol SSoT" \
     'skills/protocol/ynab-tools.md'
 
-  # Pre-warm is best-effort, via ToolSearch, and never a gate.
+  # Pre-warm is best-effort, via ToolSearch, one discarded call, never a gate.
   assert_present "[$label] pre-warms via ToolSearch" 'ToolSearch'
   assert_present_re "[$label] pre-warm is best-effort" 'best-effort'
+  assert_present_flat_re "[$label] pre-warm makes one discardable call" \
+    'one[^.]*(discardable call|call and discard)'
   assert_present_re "[$label] pre-warm never gates dispatch" \
     'never gate|proceed on any (warm-up )?error'
 
-  # Dispatches the read-only orchestrator exactly once.
+  # Dispatches the read-only orchestrator exactly once, handing it today's
+  # date and the configured timezone in the prompt.
   assert_present "[$label] dispatches the ynab-orchestrator" 'ynab-orchestrator'
+  assert_present_re "[$label] dispatch carries today" 'today: <?YYYY-MM-DD'
+  assert_present_re "[$label] dispatch carries the timezone" 'timezone:'
   assert_present_re "[$label] orchestrator dispatched only once" \
     '(exactly|only) once|once per run'
 
   # No fabricated answers when the user doesn't respond.
   assert_present_re "[$label] never fabricates an answer" 'never fabricate|no fabricated'
+
+  # No instruction anywhere to dump the raw warnings at the user (the negated
+  # rule — "never dump raw YAML" — never phrases it this way).
+  assert_absent_flat_re "[$label] never instructs dumping raw output at the user" \
+    '(paste|dump|print|show|write) the raw'
 
   # Read-only stance reaffirmed.
   assert_present_re "[$label] reaffirms read-only" 'read-only'
@@ -119,24 +152,27 @@ else
   assert_present_re "[router] scheduled task uses this same router" \
     'scheduled task uses this same router'
 
-  # Plan: config resolution through the shared loader, then the orchestrator
-  # prompt carries today + timezone, and the trailing YAML plan is parsed.
+  # Plan: config resolution through the shared loader, then the trailing YAML
+  # plan is parsed (today/timezone in the dispatch are covered by check_shared).
   assert_present "[router] resolves config via the shared loader" 'bin/config.sh'
-  assert_present_re "[router] passes today to the orchestrator"    'today: <?YYYY-MM-DD'
-  assert_present_re "[router] passes timezone to the orchestrator" 'timezone:'
   assert_present_re "[router] parses the trailing YAML plan block" \
     '(last|trailing) YAML block'
   assert_present "[router] consumes plan.report.tiers" 'plan.report.tiers'
   assert_present "[router] consumes plan.warnings"     'plan.warnings'
-  assert_present_re "[router] consumes the per-tier window" 'window'
+  # Anchored to the Step 3 hand-off — the bare word "window" also appears in
+  # doc prose, which must not satisfy this check.
+  # shellcheck disable=SC2016
+  assert_present "[router] hands each tier its window from the plan reasons" \
+    'window from `plan.report.reasons.<tier>.window`'
 
   # Surface: silent skip when empty; translated warnings; one batched ask;
   # the answer is honored.
   assert_present_re "[router] empty warnings skip silently" \
     'proceed to Step 3 silently'
   assert_present_re "[router] warnings translated to plain English" 'plain.English'
-  assert_absent_re "[router] never dumps raw warning YAML at the user" \
-    'dump.*(yaml|kind).*(is|as) fine'
+  # Guard the actual Rule A instruction — deleting it must fail this test.
+  assert_present_flat_re "[router] carries the never-dump-raw-YAML rule" \
+    'Never dump .kind:.{0,20}options:.{0,20}or raw YAML'
   assert_present "[router] decisions via AskUserQuestion" 'AskUserQuestion'
   assert_present_re "[router] batches decisions into a single ask" \
     'single.{0,30}AskUserQuestion'
@@ -190,13 +226,22 @@ for tier in weekly monthly quarterly-tax annual; do
     "force the execution tier to[[:space:]\`']*${tier}"
   assert_present_re "[$tier] runs only its own tier" 'do not run other tiers'
 
-  # Retains the plan's window + warnings for its tier.
+  # Retains the plan's window + warnings for its tier — anchored to the
+  # "Keep everything else" override sentence, not the bare word "warnings"
+  # (which the Phase 2 heading alone would satisfy).
   assert_present_re "[$tier] retains the plan window"   "${tier}[[:space:]\`']*window|window[^.]*${tier}"
-  assert_present_re "[$tier] retains the plan warnings" 'warnings'
+  assert_present_flat_re "[$tier] retains the plan warnings" \
+    "Keep everything else.{0,80}\`warnings\`"
 
-  # Surfaces warnings identically to the router.
+  # Surfaces warnings identically to the router: plain English, no raw YAML
+  # dumps, one batched ask, silent skip when empty.
   assert_present "[$tier] surfaces warnings like the router" '/ynab-review'
-  assert_present "[$tier] decisions via AskUserQuestion" 'AskUserQuestion'
+  assert_present_re "[$tier] warnings translated to plain English" 'plain.English'
+  assert_present_re "[$tier] never dumps raw YAML" 'never dump raw YAML'
+  assert_present_re "[$tier] batches decisions into a single ask" \
+    'single.{0,30}AskUserQuestion'
+  assert_present_flat_re "[$tier] empty warnings proceed silently" \
+    'If .warnings. is empty, proceed silently'
 
   # Executes its own wrapper via the plugin-root variable.
   # shellcheck disable=SC2016
