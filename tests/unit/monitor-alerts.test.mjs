@@ -171,6 +171,19 @@ test('renderAlerts caps at MAX_FINDINGS, keeping the most severe', () => {
   assert.deepEqual(lines.map((l) => l.slice(0, 2).trim()), ['🔴', '🔴', '🟡', '🟡', '🟢']);
 });
 
+test('renderAlerts skips malformed elements (no throw, no cap slot) and renders unknown severities as 🟢', () => {
+  const unknown = { severity: 'catastrophic', title: 'odd one.', detail: 'd', suggested_action: 'Look.', dedupe_key: 'k:s:p' };
+  const lines = renderAlerts([null, finding(ACTION, 1), undefined, 42, unknown]).split('\n');
+  assert.deepEqual(lines, [
+    `${SEVERITY_EMOJI[ACTION]} **action finding 1.** Do the action thing 1.`,
+    '🟢 **odd one.** Look.', // unknown severity → the documented 🟢 fallback
+  ]);
+  // Malformed elements never consume a cap slot: MAX_FINDINGS junk entries
+  // ahead of a valid finding still leave room for it.
+  const junkFirst = Array.from({ length: MAX_FINDINGS }, () => null).concat([finding(INFO, 9)]);
+  assert.equal(renderAlerts(junkFirst), `${SEVERITY_EMOJI[INFO]} **info finding 9.** Do the info thing 9.`);
+});
+
 // --- Best-effort notification -----------------------------------------------------
 
 test('sendMacNotification is a no-op off darwin: returns false, never spawns', () => {
@@ -290,6 +303,26 @@ test('dispatchAlerts never throws when the log append fails (unattended pass sur
   });
   assert.equal(result.dispatched, true);
   assert.equal(result.logPath, null);
+});
+
+test('dispatchAlerts never throws on malformed findings — junk is dropped, valid ones still dispatch', () => {
+  // The NEVER-throws contract: a single bad element from a detector must not
+  // kill an unattended monitor pass (renderAlerts used to dereference it
+  // outside dispatchAlerts's try/catch).
+  const logPath = freshPath('malformed.jsonl');
+  const result = dispatchAlerts([finding(ACTION, 1), null, undefined, 42, 'junk'], {
+    config: sanitizeAlertsConfig({ channel: CHANNEL_LOG_ONLY }), logPath,
+  });
+  assert.equal(result.dispatched, true);
+  assert.equal(result.rendered.split('\n').length, 1, 'only the valid finding renders');
+  const entry = JSON.parse(readFileSync(logPath, 'utf8').trim());
+  assert.deepEqual(entry.findings.map((f) => f.severity), [ACTION], 'junk never reaches the audit log');
+
+  // A list with NO valid finding left is the same complete no-op as an empty list.
+  const noopLog = freshPath('all-malformed.jsonl');
+  const noop = dispatchAlerts([null, 'junk'], { config: sanitizeAlertsConfig({}), logPath: noopLog });
+  assert.equal(noop.dispatched, false);
+  assert.equal(existsSync(noopLog), false);
 });
 
 // --- Path seam ------------------------------------------------------------------
