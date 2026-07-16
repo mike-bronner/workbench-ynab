@@ -31,6 +31,7 @@ const {
   destructiveOps,
   buildToolMap,
   makeAuditingDeleteApplyOp,
+  resolveDeleteTool,
   DELETE_TOOL,
   OP_TYPE,
   TWIN_REQUIRED_FIELDS,
@@ -277,6 +278,31 @@ test('buildToolMap registers delete_duplicate → the namespaced delete tool', (
   assert.equal(OP_TYPE, 'delete_duplicate');
   assert.ok(DELETE_TOOL.endsWith('_delete_transaction'));
   assert.deepEqual(buildToolMap(), { delete_duplicate: DELETE_TOOL });
+});
+
+// --- resolveDeleteTool (uniqueness asserted, fail-closed — issue #151) -------
+
+test('resolveDeleteTool resolves the single suffix match', () => {
+  assert.equal(
+    resolveDeleteTool(['mcp__x__ynab_get_transaction', 'mcp__x__ynab_delete_transaction']),
+    'mcp__x__ynab_delete_transaction',
+  );
+});
+
+test('resolveDeleteTool fails closed on ZERO matches — never resolves undefined for the destructive tool', () => {
+  assert.throws(() => resolveDeleteTool(['mcp__x__ynab_get_transaction']), /exactly ONE.*found 0/);
+  assert.throws(() => resolveDeleteTool([]), /found 0/);
+  assert.throws(() => resolveDeleteTool(undefined), /found 0/);
+});
+
+test('resolveDeleteTool fails closed on MULTIPLE matches — a suffix collision must never silently pick the first', () => {
+  // The regression this guards: `.find()` silently took the first match, so a
+  // future allow-list entry sharing the suffix could route irreversible deletes
+  // to the wrong tool. Both matches are named in the error for diagnosis.
+  assert.throws(
+    () => resolveDeleteTool(['mcp__x__ynab_delete_transaction', 'mcp__x__ynab_bulk_delete_transaction']),
+    /found 2.*ynab_delete_transaction.*ynab_bulk_delete_transaction/,
+  );
 });
 
 // --- makeAuditingDeleteApplyOp (dryRun propagation, not a hardcoded literal) -

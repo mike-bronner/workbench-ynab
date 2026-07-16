@@ -137,6 +137,38 @@ test('a delete op whose victim IS the surviving twin is rejected before any MCP 
   assert.equal(audit.calls.length, 0);
 });
 
+test('a delete op with no victim transaction_id is rejected before any MCP call (victim_id_missing, #151)', async () => {
+  const cs = loadFixture('delete-duplicate.example.json');
+  // Strip the victim id: the op cannot name its target, and an absent id (undefined)
+  // would slip past the twin_is_victim collision guard (undefined !== twin.id) — the
+  // pre-flight's presence check must reject it end-to-end, symmetric with the
+  // twin_evidence_missing / twin_is_victim cases above.
+  delete cs.operations[0].transaction_id;
+  const read = noDrift();
+  const apply = spy();
+  const audit = auditSpy();
+
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: read,
+    applyOp: apply,
+    audit,
+  });
+
+  assert.equal(out.ok, false);
+  assert.equal(out.aborted, true);
+  assert.equal(out.reason, 'twin_evidence_missing');
+  assert.equal(out.twinErrors[0].rule, 'victim_id_missing');
+  assert.equal(out.twinErrors[0].op_id, cs.operations[0].id);
+  assert.deepEqual(out.twinErrors[0].missing, ['transaction_id']);
+  assert.deepEqual(out.results, []);
+  // No port was touched — not the read, not the delete, not the audit.
+  assert.equal(read.calls.length, 0);
+  assert.equal(apply.calls.length, 0);
+  assert.equal(audit.calls.length, 0);
+});
+
 test('every failing delete op accumulates — a multi-op change-set reports all twin errors, not just the first', async () => {
   // The fixtures are single-op, so the accumulate-vs-short-circuit loop in
   // applyDeleteDuplicates was previously unverified. Build a two-op change-set where
@@ -533,4 +565,89 @@ test('(#49) a LIVE transfer-leg TWIN is hard-blocked from the live read even whe
   assert.equal(read.calls.length, 2, 'BOTH candidates are live-read: the victim, then the twin by its own id');
   assert.equal(read.calls[1][0].transaction_id, twinId);
   assert.equal(apply.calls.length, 0, 'the delete tool must NEVER be invoked when the live twin is a transfer leg');
+});
+
+// --- (#151) surviving-twin liveness + drift — never delete the only copy -----
+
+test('(#151) a surviving twin that NO LONGER EXISTS live aborts the delete — a fresh victim never deletes the only remaining copy', async () => {
+  // The data-loss scenario #151 closes: the twin is deleted by another process
+  // (e.g. the YNAB app) during the generate → approve → apply window. The victim's
+  // own `before` snapshot is UNCHANGED — the op is not stale — so without the twin
+  // liveness gate the victim would be deleted, removing the only remaining copy.
+  const cs = loadFixture('delete-duplicate.example.json');
+  const twinId = cs.operations[0].twin.id;
+  const apply = spy();
+  // The victim reads back clean (no drift); the twin's live read resolves to
+  // nothing (the projected shape of a transaction that is gone).
+  const read = spy((op) => (op.transaction_id === twinId ? null : clone(op.before)));
+  const records = [];
+
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: read,
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit: async (rec) => { records.push(rec); },
+  });
+
+  const res = out.results.find((r) => r.op_id === cs.operations[0].id);
+  assert.equal(res.status, STATUS.ERROR); // terminal per-op — never dispatched
+  assert.match(res.detail.message, /twin_missing/);
+  assert.match(res.detail.message, /only remaining copy/i);
+  assert.equal(read.calls.length, 2, 'BOTH candidates are live-read: the victim, then the twin by its own id');
+  assert.equal(read.calls[1][0].transaction_id, twinId);
+  assert.equal(apply.calls.length, 0, 'the delete tool must NEVER be invoked when the surviving twin is gone');
+  // The abort is not silent: the errored op still leaves a paper trail, and no
+  // pending_delete intent was written (the wrapped applyOp never ran).
+  assert.equal(records.some((r) => r.result.status === STATUS.ERROR), true);
+  assert.equal(records.some((r) => r.result.status === 'pending_delete'), false);
+});
+
+test('(#151) a surviving twin that MATERIALLY CHANGED live aborts the delete even though the victim itself has not drifted', async () => {
+  const cs = loadFixture('delete-duplicate.example.json');
+  const twinId = cs.operations[0].twin.id;
+  const apply = spy();
+  // The victim reads back clean; the live twin's amount no longer matches the
+  // evidence the human approved — the pairing is unproven.
+  const read = spy((op) => (op.transaction_id === twinId
+    ? { ...clone(cs.operations[0].twin), amount: cs.operations[0].twin.amount + 1000 }
+    : clone(op.before)));
+
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: read,
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit: auditSpy(),
+  });
+
+  const res = out.results.find((r) => r.op_id === cs.operations[0].id);
+  assert.equal(res.status, STATUS.ERROR); // terminal per-op — never dispatched
+  assert.match(res.detail.message, /twin_drifted/);
+  assert.match(res.detail.message, /amount/);
+  assert.equal(apply.calls.length, 0, 'the delete tool must NEVER be invoked when the surviving twin drifted');
+});
+
+test('(#151) an unchanged live twin lets a clean delete proceed — the gate adds no false positives', async () => {
+  const cs = loadFixture('delete-duplicate.example.json');
+  const twinId = cs.operations[0].twin.id;
+  const apply = spy(() => ({ ok: true }));
+  // Both candidates read back exactly as the evidence promised.
+  const read = spy((op) => (op.transaction_id === twinId ? clone(cs.operations[0].twin) : clone(op.before)));
+
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: read,
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit: auditSpy(),
+  });
+
+  assert.equal(out.ok, true);
+  assert.equal(out.results[0].status, STATUS.APPLIED);
+  assert.equal(apply.calls.length, 1);
+  assert.equal(apply.calls[0][0], DELETE_TOOL);
 });
