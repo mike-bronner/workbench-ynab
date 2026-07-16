@@ -362,9 +362,16 @@ once, here, at the assembly boundary. Long transaction lists go inside
 `<details><summary>…</summary><div class="details__body">…</div></details>` so
 they collapse on screen (the print CSS forces them open). Use the template's
 existing classes (`card`, `kpi`, `badge is-good|is-attention|is-warning`,
-`progress`, `table-scroll`, `td.num`) — don't introduce new CSS; accessibility,
-print, and responsive behavior are the frozen template's responsibility, not the
-fragment's.
+`progress`, `table-scroll`, `td.num`) — don't introduce new CSS; palette
+contrast, print, and responsive behavior are the frozen template's
+responsibility, not the fragment's. Fragment **structure** does own its share of
+accessibility (issue #29) — follow the accessibility contract in `SLOTS.md`:
+every severity badge pairs its emoji with a visible text label (`Good` /
+`Attention` / `Action required`), each card opens with an `<h2>` and never skips
+a heading level, `<th>` cells carry `scope`, uncaptioned tables carry an
+`aria-label`, and every `.progress` gauge is a `role="meter"` with
+`aria-valuenow`/`min`/`max` beside a visible numeric label. The full checklist:
+[`../../docs/a11y-baseline.md`](../../docs/a11y-baseline.md).
 
 ### Assemble & save — `bin/report-writer.sh` (final step)
 
