@@ -25,7 +25,9 @@
 # USAGE
 #   source "${CLAUDE_PLUGIN_ROOT}/bin/config.sh"
 #   _require_config || exit 1                 # fail fast if unconfigured
-#   budget="$(_cfg '.budget.name')"
+#   budgets="$(_cfg_budgets)"                 # full budgets array as JSON
+#   group="$(_cfg_budget_field 'Business' 'business_category_group')"
+#   default_entry="$(_cfg_default_budget)"    # one budgets entry as JSON
 #   persona="$(_cfg '.persona.name')"
 #   persona="${persona:-$DEFAULT_PERSONA}"    # caller applies its own default
 #
@@ -66,4 +68,59 @@ _require_config() {
     return 1
   fi
   return 0
+}
+
+# _migrate_config
+#   Echo the EFFECTIVE config JSON: the file's content with the legacy→multi
+#   budget migration applied in memory. A schema-v1 file (singular `budget`, no
+#   `budgets` key) gets a single-entry `budgets` array synthesized from
+#   `budget.name`/`budget.id` — label = the budget name, role = `personal` (the
+#   v1 shape modeled one personal budget; its side-business lived in the
+#   `business` block, not a separate budget). A file that already has `budgets`
+#   passes through unchanged.
+#
+#   READ-ONLY: the config file is never rewritten, so a legacy file's
+#   schema_version stays 1 — the migration never auto-bumps it; the user
+#   re-runs /workbench-ynab:setup to upgrade the file itself. Emits nothing
+#   when the file is missing or jq is unavailable, same as _cfg.
+_migrate_config() {
+  [ -f "$YNAB_CONFIG_FILE" ] && command -v jq >/dev/null 2>&1 \
+    && jq 'if has("budgets") then .
+           else . + { budgets: [
+             { label: (.budget.name // "default"), role: "personal" }
+             + (if .budget.name != null then { budget_name: .budget.name } else {} end)
+             + (if .budget.id   != null then { budget_id:   .budget.id   } else {} end)
+           ] } end' "$YNAB_CONFIG_FILE" 2>/dev/null
+}
+
+# _cfg_budgets
+#   Echo the full `budgets` array as compact JSON (one line), after the legacy
+#   migration — a v1 file yields its synthesized single-entry array. Emits
+#   nothing when unconfigured. No budget name is hardcoded here or in any
+#   helper below: every value comes from the user's config instance.
+_cfg_budgets() {
+  _migrate_config | jq -c '.budgets // empty' 2>/dev/null
+}
+
+# _cfg_budget_field LABEL FIELD
+#   Echo one field of the budgets entry whose `label` equals LABEL, or nothing
+#   when the entry or field is absent. Unlike _cfg's `// empty` idiom this is
+#   null-aware, so a boolean `false` (e.g. write_back_enabled) reads back as
+#   the string "false" instead of vanishing.
+_cfg_budget_field() {
+  _migrate_config | jq -r --arg label "$1" --arg field "$2" \
+    '.budgets[]? | select(.label == $label) | .[$field] | if . == null then empty else . end' 2>/dev/null
+}
+
+# _cfg_default_budget
+#   Echo the budgets entry (compact JSON, one line) selected as the default:
+#   the entry whose `label` matches the top-level `default_budget` key, or the
+#   FIRST entry when `default_budget` is absent. A `default_budget` that
+#   matches no entry emits nothing — a config typo surfaces as empty for the
+#   caller to guard, never as a silently different budget.
+_cfg_default_budget() {
+  _migrate_config | jq -c '.default_budget as $d
+    | (.budgets // [])
+    | if $d == null then (.[0] // empty)
+      else (map(select(.label == $d)) | .[0] // empty) end' 2>/dev/null
 }
