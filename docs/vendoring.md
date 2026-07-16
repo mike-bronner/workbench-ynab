@@ -53,15 +53,20 @@ What it does, end to end:
    artifact. (See [Verifying upstream provenance](#verifying-upstream-provenance).)
 4. **Provenance gate — signature** — verifies the registry's cryptographic
    signature on the version with npm's own published keys (`npm audit
-   signatures`), in an isolated temp install (never the repo). An **invalid**
-   signature is a hard stop (possible tampering); a **missing** signature is
-   recorded in the marker as a residual supply-chain risk, never skipped
-   silently. The gate is **fail-closed**: `verified` is recorded only when the
-   audit output is a shape it fully recognizes (an object with `invalid` and
-   `missing` arrays and no other keys). Anything else — non-JSON noise, null
-   fields, or a *new* failure category a future npm might add — aborts the run
-   rather than passing, so an unexpected shape can never be mistaken for a clean
-   signature.
+   signatures`), in an isolated temp install (never the repo). The audited
+   install is **bound to the packed tarball**: the audit must read a
+   registry-resolved install (npm refuses to audit a local-path one), so the
+   script requires the install's lockfile-recorded integrity — which npm itself
+   enforces against the installed bytes — to equal the SRI computed from the
+   exact tarball verified in step 3, closing the window between the two
+   downloads. An **invalid** signature is a hard stop (possible tampering); a
+   **missing** signature is recorded in the marker as a residual supply-chain
+   risk, never skipped silently. The gate is **fail-closed**: `verified` is
+   recorded only when the audit output is a shape it fully recognizes (an object
+   with `invalid` and `missing` arrays and no other keys). Anything else —
+   non-JSON noise, null fields, or a *new* failure category a future npm might
+   add — aborts the run rather than passing, so an unexpected shape can never be
+   mistaken for a clean signature.
 5. **Extract** — copies `dist/bundle/index.cjs` from the unpacked tarball over
    `vendor/ynab-mcp/index.cjs`.
 6. **Re-hash + rewrite the marker** — recomputes the SHA-256 of both the
