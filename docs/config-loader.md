@@ -23,9 +23,11 @@ reimplementing the same `jq` plumbing. It mirrors the `_cfg()` idiom from
 source "${CLAUDE_PLUGIN_ROOT}/bin/config.sh"
 ```
 
-Sourcing only **defines** two functions (`_cfg`, `_require_config`) and one path
-variable (`YNAB_CONFIG_FILE`). It never runs `set -e`/`set -u` or any command with
-side effects, so it cannot abort or mutate the caller's shell.
+Sourcing only **defines** functions (`_cfg`, `_require_config`, and the
+multi-budget helpers `_migrate_config`, `_cfg_budgets`, `_cfg_budget_field`,
+`_cfg_default_budget`) and one path variable (`YNAB_CONFIG_FILE`). It never runs
+`set -e`/`set -u` or any command with side effects, so it cannot abort or mutate
+the caller's shell.
 
 ## The config path
 
@@ -48,7 +50,7 @@ guarded on file existence and `jq` availability — the same shape as
 `mcp-memory.sh`.
 
 ```bash
-budget_name="$(_cfg '.budget.name')"
+persona_name="$(_cfg '.persona.name')"
 ```
 
 `_cfg` **never bakes in a default** — that is how no owner-specific value can ever
@@ -81,6 +83,38 @@ _require_config || exit 1     # fail fast, pointing the user at /workbench-ynab:
 skill that has its own defaults can read optional fields without the guard. Use
 `_require_config` when a missing config is a hard stop.
 
+## The multi-budget helpers (schema v2, issue #84)
+
+Skills resolve their target budget set through three helpers instead of reading
+a singular budget path. All three apply the **legacy migration at read time**
+(below), emit compact one-line JSON (or plain text for a single field), and
+emit **nothing** when unconfigured — same tolerance as `_cfg`. No budget name
+is ever hardcoded in the loader.
+
+| Helper | Emits |
+|---|---|
+| `_cfg_budgets` | The full `budgets` array as JSON. |
+| `_cfg_budget_field LABEL FIELD` | One field of the entry whose `label` equals `LABEL`. **Null-aware**, unlike `_cfg`'s `// empty` idiom: a boolean `false` (e.g. `write_back_enabled`) reads back as `false` instead of vanishing. |
+| `_cfg_default_budget` | The entry whose `label` matches `default_budget`, or the **first** entry when `default_budget` is absent. A `default_budget` matching no label emits nothing — a typo surfaces as empty, never as a silently different budget. |
+
+```bash
+budgets_json="$(_cfg_budgets)"                                    # e.g. loop with: jq -c '.[]' <<<"$budgets_json"
+biz_group="$(_cfg_budget_field 'Business' 'business_category_group')"
+default_label="$(_cfg_default_budget | jq -r '.label')"
+```
+
+### Legacy migration: `_migrate_config`
+
+`_migrate_config` echoes the **effective** config JSON: a schema-v1 file
+(singular `budget`, no `budgets` key) gets a single-entry `budgets` array
+synthesized from `budget.name`/`budget.id` (`label` = the budget name, `role` =
+`personal`), so an existing config keeps working without manual editing. The
+migration is **read-only** — the file is never rewritten and its
+`schema_version` stays `1`; re-run `/workbench-ynab:setup` to upgrade the file
+itself. A file that already has `budgets` passes through unchanged. See the
+[migration note](config-schema.md#migrating-a-v1-config-singular-budget) in the
+schema doc.
+
 ## Worked example — one read per top-level key
 
 ```bash
@@ -90,9 +124,9 @@ _require_config || exit 1
 # schema_version (integer) — branch on it for forward migration
 version="$(_cfg '.schema_version')"
 
-# budget (required) — resolve by name, fall back to id
-budget_name="$(_cfg '.budget.name')"
-budget_id="$(_cfg '.budget.id')"
+# budgets (required) — resolve the target set, or the default entry
+budget_count="$(_cfg_budgets | jq 'length')"
+default_budget_id="$(_cfg_default_budget | jq -r '.budget_id // empty')"
 
 # business (optional) — read the first business account and the category group
 business_name="$(_cfg '.business.name')"
@@ -127,7 +161,10 @@ filters) — they are passed straight through to `jq`.
 `tests/unit/config.test.sh` sources `bin/config.sh` against a sandbox config (via
 the `YNAB_CONFIG_FILE` seam) and asserts: a present field reads back correctly, an
 absent field returns empty, and the missing-config guard emits the expected error
-text and a non-zero exit. It follows the issue #4 harness convention — sources
+text and a non-zero exit. `tests/unit/config-budgets.test.sh` covers the
+multi-budget helpers the same way: two-budget isolation, per-label field reads
+(including boolean-`false` readback), the read-time legacy migration (file
+untouched, `schema_version` stays 1), and the `default_budget` fallback rules. It follows the issue #4 harness convention — sources
 `tests/lib/assert.sh`, organises the cases into `test_*` functions, and ends with
 `run_tests` — so the repo-wide entrypoint auto-discovers it. Run the whole suite,
 or just this file:
