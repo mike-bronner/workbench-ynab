@@ -338,6 +338,50 @@ test('dispatchAlerts never throws on malformed findings — junk is dropped, val
   assert.equal(existsSync(noopLog), false);
 });
 
+test('dispatchAlerts never throws on poisoned finding FIELDS — exotic objects degrade, never crash', () => {
+  // A finding can pass the is-object gate and still be hostile: a throwing
+  // getter or a Symbol-valued field used to blow up in renderAlerts's template
+  // literal — outside dispatchAlerts's try/catch — and a throwing `severity`
+  // getter would blow up even earlier, in sortFindings. Boundary normalization
+  // must degrade the poisoned field, keep the finding, and keep the audit log.
+  const logPath = freshPath('poisoned.jsonl');
+  const base = { detail: 'd', suggested_action: 'Act.', dedupe_key: 'k:s:p' };
+  const poisoned = [
+    finding(ACTION, 1), // the healthy control
+    { ...base, severity: ATTENTION, get title() { throw new Error('boom'); } },
+    { ...base, severity: ATTENTION, title: Symbol('x') },
+    { ...base, title: 'sev getter throws.', get severity() { throw new Error('boom'); } },
+    { ...base, title: 'unstringable severity.', severity: { toString() { throw new Error('boom'); } } },
+  ];
+  const result = dispatchAlerts(poisoned, {
+    config: sanitizeAlertsConfig({ channel: CHANNEL_LOG_ONLY }), logPath,
+  });
+  assert.equal(result.dispatched, true);
+  const lines = result.rendered.split('\n');
+  assert.equal(lines.length, 5, 'poisoned fields degrade — the findings still deliver');
+  // The healthy finding is untouched and sorts first.
+  assert.equal(lines[0], `${SEVERITY_EMOJI[ACTION]} **action finding 1.** Do the action thing 1.`);
+  // A throwing title getter degrades to an empty string; severity survives.
+  assert.equal(lines[1], '🟡 **** Act.');
+  // A Symbol title degrades to its string form instead of throwing in the template literal.
+  assert.equal(lines[2], '🟡 **Symbol(x)** Act.');
+  // A throwing or unstringable severity normalizes to the documented 🟢 INFO fallback.
+  assert.equal(lines[3], '🟢 **sev getter throws.** Act.');
+  assert.equal(lines[4], '🟢 **unstringable severity.** Act.');
+  // The audit-log write survives too: the entry records plain, safe strings.
+  const entry = JSON.parse(readFileSync(logPath, 'utf8').trim());
+  assert.equal(entry.findings.length, 5);
+  assert.equal(entry.findings[1].title, '');
+  assert.equal(entry.findings[2].title, 'Symbol(x)');
+  assert.deepEqual(entry.findings.map((f) => f.severity), [ACTION, ATTENTION, ATTENTION, INFO, INFO]);
+
+  // renderAlerts is total on its own, too — direct callers get the same guarantee.
+  assert.equal(
+    renderAlerts([{ severity: INFO, get title() { throw new Error('boom'); }, suggested_action: 'A.' }]),
+    `${SEVERITY_EMOJI[INFO]} **** A.`,
+  );
+});
+
 test('appendAlertLog enforces owner-only modes on every append, not just at creation', () => {
   // A pre-existing dir/file left at looser modes (an earlier run, tampering)
   // must be tightened by the append — creation-time `mode` options alone never
