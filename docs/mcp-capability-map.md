@@ -120,7 +120,7 @@ allowlist. The allowlist is exactly these files:
 |---|---|
 | [`skills/protocol/ynab-tools.md`](../skills/protocol/ynab-tools.md) | the machine-referenced SSoT — the names themselves |
 | `docs/mcp-capability-map.md` (this file) | the human-readable contract — the *why* |
-| [`agents/ynab-orchestrator.md`](../agents/ynab-orchestrator.md) | the read-only orchestrator's `tools:` frontmatter — Claude Code requires literal names there (no file reference, no glob, and a read-only agent must not use the write-inclusive family glob), so it wires the subset of the SSoT read tools the planner stub needs (Sprint 3 widens it to the full read set) and is allowlisted as a deliberate, documented swap consumer |
+| [`agents/ynab-orchestrator.md`](../agents/ynab-orchestrator.md) | the read-only orchestrator's `tools:` frontmatter — Claude Code requires literal names there (no file reference, no glob, and a read-only agent must not use the write-inclusive family glob), so it wires the subset of the SSoT read tools the planner needs (widened only when a planner feature requires more reads) and is allowlisted as a deliberate, documented swap consumer |
 | [`assets/write-safety-guardrail.js`](../assets/write-safety-guardrail.js) | the money-gate denylist — by its security nature the guardrail must enumerate the exact write verbs it gates; a security denylist cannot indirect through markdown parsing, and a namespace swap MUST force a review of this gate regardless, so it is a deliberate, documented swap consumer |
 | [`assets/test/write-safety-guardrail.test.js`](../assets/test/write-safety-guardrail.test.js) | pins the denylist classification — the test proving the gate blocks money movement names the same concrete verbs the `.js` enumerates |
 | [`skills/write-safety-guardrail.md`](../skills/write-safety-guardrail.md) | the human-readable gate contract — documents the exact denylist the `.js` enforces |
@@ -144,7 +144,7 @@ references the source of truth so a namespace change is a **one-file edit**:
 | Consumer | Lands in | Source of truth |
 |---|---|---|
 | Pre-approval globs (read phase, then the tight write set) | Sprint 1 setup / Sprint 4 write paths | the phase-split pre-approval set in [`ynab-tools.md`](../skills/protocol/ynab-tools.md) |
-| Orchestrator agent tools list | Sprint 1 orchestrator stub → fleshed in Sprint 3 | the tools list in [`ynab-tools.md`](../skills/protocol/ynab-tools.md) |
+| Orchestrator agent tools list | Sprint 1 orchestrator stub → fleshed in Sprint 3 (issue #44) | the tools list in [`ynab-tools.md`](../skills/protocol/ynab-tools.md) |
 | Review / write-back skills (prose) | Sprints 3–4 | this map's logical operation names |
 
 A namespace change edits the derivation rule in this map and the lists in

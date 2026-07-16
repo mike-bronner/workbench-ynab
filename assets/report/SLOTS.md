@@ -17,15 +17,15 @@ an empty string (the surrounding `<section>` stays in the document).
 
 | Slot comment | Expected injected HTML |
 |---|---|
-| `<!-- SLOT:kpi-dashboard -->` | A `<div class="kpi-grid">` of four `<div class="kpi">` cards — **income, spending, net cash flow, health score**. Each card: `<div class="kpi__label">…</div><div class="kpi__value is-positive\|is-warning\|is-attention">…</div>`. The health-score card may add a `<div class="progress"><div class="progress__bar" style="width:NN%"></div></div>`. |
-| `<!-- SLOT:section-1-classification -->` | A `<div class="card">` opening with `<h2>` for the **transaction classification** section. Tables use `<div class="table-scroll"><table>…</table></div>` with `<td class="num">` for figures. |
+| `<!-- SLOT:kpi-dashboard -->` | A `<div class="kpi-grid">` of four `<div class="kpi">` cards — **income, spending, net cash flow, health score**. Each card: `<div class="kpi__label">…</div><div class="kpi__value is-positive\|is-warning\|is-attention">…</div>`. The health-score card may add a gauge — the meter shape in the [accessibility contract](#accessibility-contract-issue-29) applies. |
+| `<!-- SLOT:section-1-classification -->` | A `<div class="card">` opening with `<h2>` for the **transaction classification** section. Tables use `<div class="table-scroll"><table>…</table></div>` with `<td class="num">` for figures, `scope`d `<th>` header cells, and a caption or `aria-label` (see the [accessibility contract](#accessibility-contract-issue-29)). |
 | `<!-- SLOT:section-2-income -->` | `<div class="card">` — **income** review. |
 | `<!-- SLOT:section-3-spending -->` | `<div class="card">` — **spending** review. |
-| `<!-- SLOT:section-4-budget-adherence -->` | `<div class="card">` — **budget adherence**. Use `<span class="badge is-good\|is-attention\|is-warning">🟢\|🟡\|🔴 …</span>` for status. |
+| `<!-- SLOT:section-4-budget-adherence -->` | `<div class="card">` — **budget adherence**. Status uses the badge shape from the [accessibility contract](#accessibility-contract-issue-29) — emoji **plus** visible text label, never color alone. |
 | `<!-- SLOT:section-5-cash-flow -->` | `<div class="card">` — **cash flow**. |
 | `<!-- SLOT:section-6-categories -->` | `<div class="card">` — **category breakdown**. |
 | `<!-- SLOT:section-7-accounts -->` | `<div class="card">` — **accounts**. |
-| `<!-- SLOT:section-8-goals -->` | `<div class="card">` — **goals/targets**, typically `<div class="progress">` bars. |
+| `<!-- SLOT:section-8-goals -->` | `<div class="card">` — **goals/targets**, typically `<div class="progress">` bars using the meter shape in the [accessibility contract](#accessibility-contract-issue-29). |
 | `<!-- SLOT:section-9-net-worth -->` | `<div class="card">` — **net worth**. |
 | `<!-- SLOT:section-10-anomalies -->` | `<div class="card">` — **anomalies/flags**. Long transaction lists go in `<details><summary>…</summary><div class="details__body">…</div></details>`. |
 | `<!-- SLOT:section-11-recommendations -->` | `<div class="card">` — **recommendations**, action-oriented. |
@@ -35,6 +35,39 @@ an empty string (the surrounding `<section>` stays in the document).
 > **Long transaction lists** belong inside `<details>/<summary>` so they collapse
 > on screen. The print stylesheet forces every `<details>` open, so nothing is
 > hidden on paper.
+
+## Accessibility contract (issue #29)
+
+Every fragment a slot receives follows these rules — the full checklist the
+snapshot/verify step (M2-12) asserts is
+[`../../docs/a11y-baseline.md`](../../docs/a11y-baseline.md):
+
+- **Severity is never color alone.** Every severity badge pairs the emoji with a
+  co-located visible text label — `Good`, `Attention`, or `Action required` — and
+  hides the emoji from screen readers so the label is announced once:
+
+  ```html
+  <span class="badge is-good"><span aria-hidden="true">🟢</span> Good</span>
+  <span class="badge is-attention"><span aria-hidden="true">🟡</span> Attention</span>
+  <span class="badge is-warning"><span aria-hidden="true">🔴</span> Action required</span>
+  ```
+
+- **Headings are sequential.** Each card opens with an `<h2>`; subsections use
+  `<h3>` and never skip a level (the template's `<h1>` is the report title).
+- **Tables are labelled.** Header cells carry `scope` (`<th scope="col">`, or
+  `scope="row"` for row headers); a table without a visible `<caption>` carries an
+  `aria-label` describing its purpose.
+- **Gauges are meters.** Every `.progress` gauge carries `role="meter"` with
+  `aria-valuenow` / `aria-valuemin` / `aria-valuemax` and an accessible name, and
+  sits next to a visible numeric label (e.g. the KPI value `78/100`) so the value
+  is readable, not just the visual shape:
+
+  ```html
+  <div class="progress" role="meter" aria-label="Health score"
+       aria-valuenow="78" aria-valuemin="0" aria-valuemax="100">
+    <div class="progress__bar" style="width:78%"></div>
+  </div>
+  ```
 
 ## 2. Scalar slots — `{{name}}`
 
@@ -70,3 +103,9 @@ tier via the `{{tier}}` scalar slot. Neither is hardcoded.
   outside the slot system on purpose, so fragment-stitching can never omit it. The
   canonical wording is the single source of truth in
   [`../../skills/shared/disclaimer.md`](../../skills/shared/disclaimer.md).
+- The palette meets **WCAG 2.1 AA contrast** (issue #29): every text token passes
+  ≥4.5:1 against every background it sits on, gated by
+  `tests/unit/report-contrast.test.mjs`; `<summary>` shows a visible
+  `:focus-visible` outline; the a11y checklist is
+  [`../../docs/a11y-baseline.md`](../../docs/a11y-baseline.md), referenced from the
+  template's `<!-- a11y-baseline: docs/a11y-baseline.md -->` comment.

@@ -157,7 +157,11 @@ matches the npm registry's published provenance:
 - **Signature** — the registry's cryptographic signature on the version is
   verified with npm's own published keys (`npm audit signatures`). An invalid
   signature is a hard stop; a missing one is recorded as a residual supply-chain
-  risk in the marker, never skipped silently.
+  risk in the marker, never skipped silently. The audited install is **bound to
+  the packed tarball**: its lockfile-recorded integrity (which npm itself
+  enforces against the installed bytes) must equal the SRI computed from the
+  exact tarball that was integrity-verified and extracted, so the signature
+  verdict can never attest different bytes than the committed ones.
 
 The integrity gate re-runs on **every** invocation; only the signature check is
 skipped when no new bytes are adopted. Re-running `bin/revendor.sh` against an

@@ -17,6 +17,10 @@
 #      version via npm's own published keys (`npm audit signatures`); if the
 #      registry publishes no signature for the package the gate is not skipped
 #      silently — it is recorded as a residual supply-chain risk in the marker.
+#      The audited install is BOUND to the exact packed tarball: its
+#      lockfile-recorded integrity must equal the packed tarball's computed SRI,
+#      so a `verified` verdict attests the same bytes that are extracted and
+#      committed — never a divergent second fetch.
 #   3. Extracts dist/bundle/index.cjs and overwrites vendor/ynab-mcp/index.cjs.
 #   4. Recomputes the upstream tarball + vendored-bundle SHA-256 and rewrites the
 #      version marker (vendored.json) — package, version, both hashes, today's
@@ -128,8 +132,16 @@ TARBALL_SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
 # SHA-512 SRI must match dist.integrity AND the computed SHA-1 must match
 # dist.shasum. A mismatch means the download does not descend from the
 # registry-published artifact — refuse to extract.
-log "Verifying tarball against npm registry provenance for $SPEC…"
-if ! REG_META="$(npm view "$SPEC" --json dist.integrity dist.shasum dist.tarball 2>"$TMP/view.err")"; then
+# ${SPEC} is braced: glued directly to the multibyte '…', some bash builds fold
+# the ellipsis's first byte into the variable name ("SPEC\xE2: unbound variable"
+# under set -u), aborting before the provenance check runs.
+log "Verifying tarball against npm registry provenance for ${SPEC}…"
+# cd-isolated into $TMP for parity with `npm pack` (above) and the audit
+# `npm install` (below), which both run there: all three registry reads must
+# resolve through the SAME npm config scope, so a repo-level .npmrc introduced
+# later can never silently point `view` at a different registry than the one
+# the tarball and the signature audit actually come from.
+if ! REG_META="$( cd "$TMP" && npm view "$SPEC" --json dist.integrity dist.shasum dist.tarball 2>"$TMP/view.err" )"; then
   cat "$TMP/view.err" >&2 || true
   die "npm view failed for $SPEC — cannot fetch the registry integrity metadata to verify against"
 fi
@@ -204,6 +216,20 @@ if ! ( cd "$SIGDIR" && npm install --ignore-scripts --no-audit --no-fund "$SPEC"
   cat "$TMP/sig-install.log" >&2 || true
   die "isolated install for signature verification failed for $SPEC"
 fi
+# --- Bind the audit to the exact packed tarball --------------------------------
+# `npm audit signatures` only audits REGISTRY-resolved installs (pointing it at
+# the local $TARBALL makes it error: "found no dependencies to audit that were
+# installed from a supported registry"), so the audited tree is necessarily a
+# second fetch. Close that two-download window mathematically instead: npm
+# refuses (EINTEGRITY) to install bytes that do not match the lockfile-recorded
+# integrity, so requiring that recorded SRI to EQUAL the packed tarball's
+# computed SRI ties the audited bytes to the exact artifact integrity-verified
+# above and extracted below. A registry swapping bytes between the pack/view
+# reads and this install dies here, instead of a signature verdict earned by
+# different bytes being stamped onto the committed ones.
+LOCK_INTEGRITY="$(jq -r --arg n "$NAME" '.packages["node_modules/" + $n].integrity // ""' "$SIGDIR/package-lock.json" 2>/dev/null || true)"
+[ "$LOCK_INTEGRITY" = "$TARBALL_SRI" ] \
+  || die "signature-audit install is not the packed tarball — lockfile integrity '${LOCK_INTEGRITY:-<missing>}' != packed '$TARBALL_SRI'; refusing to trust the signature verdict"
 # Keep the audit's stderr (mirroring the install step's sig-install.log) so a
 # non-signature failure — old npm, network, a registry hiccup — is shown with
 # npm's own diagnostics, not swallowed behind the generic guard below.
@@ -246,6 +272,26 @@ else
   SIG_STATUS="verified"
   log "  ✓ registry signature verified against npm's published keys"
 fi
+
+# --- Node floor (issue #3) ---------------------------------------------------
+# vendor/ynab-mcp/NODE_VERSION pins the minimum Node major the plugin supports.
+# POLICY (decided on PR #205): the floor IS the latest Node LTS major at the
+# time the bundle was last (re)vendored — a support policy set by a human, not
+# a value derived from upstream metadata. An earlier revision re-derived the
+# floor here from the incoming package's engines.node; a shell
+# re-implementation of node-semver's operator grammar kept sprouting corner
+# cases (three review rounds' worth), and an npm tarball carries no
+# node_modules, so transitive constraints were invisible to that read anyway.
+# The floor therefore never changes automatically: adopting new bundle bytes is
+# simply the moment the operator re-checks the LTS line (see the next steps
+# printed below). tests/unit/node-floor.test.sh keeps README + the ci.yml
+# matrix in sync with the pinned value, and the CI floor lane boots the bundle
+# on exactly that major — the boot proof, not metadata, is what validates the
+# floor against the new bundle. See docs/vendoring.md ("The Node floor").
+FLOOR_FILE="$VENDOR_DIR/NODE_VERSION"
+CUR_FLOOR=""
+[ -f "$FLOOR_FILE" ] && CUR_FLOOR="$(tr -d '[:space:]' < "$FLOOR_FILE")"
+FLOOR_NOTE="${CUR_FLOOR:-unset} (policy: latest Node LTS at vendor time — re-check on every bump; see next steps)"
 
 # --- Write the new bundle + rewrite the marker ------------------------------
 log "Bundle changed — updating $VENDORED_PATH and the marker…"
@@ -297,9 +343,14 @@ printf '  version:   %s → %s\n' "$PINNED_VERSION" "$VERSION"
 printf '  bundle:    %s → %s\n' "$(short "${OLD_BUNDLE_SHA:-none}")" "$(short "$NEW_BUNDLE_SHA")"
 printf '  tarball:   %s\n' "$(short "$TARBALL_SHA")"
 printf '  provenance: integrity ✓ (SHA-512 SRI + SHA-1 match registry); signature %s\n' "$SIG_STATUS"
+printf '  node floor: %s\n' "$FLOOR_NOTE"
 printf '  marker:    %s\n' "$VENDORED_PATH (vendored.json updated)"
 printf '\n'
 printf 'Next steps (NOT done for you):\n'
 printf '  1. Run the offline-boot verification before committing:\n'
 printf '       scripts/test.sh tests/integration/offline-boot.test.sh\n'
-printf '  2. Review the diff, then commit manually (no auto-commit).\n'
+printf '     (CI also boots the bundle on the pinned Node floor — vendor/ynab-mcp/NODE_VERSION.)\n'
+printf '  2. The floor policy is the LATEST Node LTS: if a newer LTS has shipped since\n'
+printf '     the last bump, update vendor/ynab-mcp/NODE_VERSION — and the README bullet\n'
+printf '     + ci.yml matrix with it (tests/unit/node-floor.test.sh enforces the sync).\n'
+printf '  3. Review the diff, then commit manually (no auto-commit).\n'

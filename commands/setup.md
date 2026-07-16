@@ -65,9 +65,22 @@ if [ ${#missing[@]} -gt 0 ]; then
   exit 1
 fi
 echo "✅ node, jq, security all present"
+
+# node being ON PATH is not enough — it must also be NEW ENOUGH for the
+# vendored bundle (issue #3). bin/node-floor.sh compares `node --version`
+# against the pinned floor in vendor/ynab-mcp/NODE_VERSION and prints its own
+# actionable error to STDERR ("workbench-ynab requires Node >= X; you have Y —
+# upgrade via …"), so a failure here adds nothing to stdout.
+if ! bash "${CLAUDE_PLUGIN_ROOT}/bin/node-floor.sh"; then
+  exit 1
+fi
+NODE_FLOOR="$(cat "${CLAUDE_PLUGIN_ROOT}/vendor/ynab-mcp/NODE_VERSION")"
+echo "✅ node $(node --version) meets the Node >= ${NODE_FLOOR} floor"
 ```
 
-If anything is missing, **stop here** — do not run any further step.
+If anything is missing, **stop here** — do not run any further step. The same
+goes for a below-floor Node: the version check exits non-zero with upgrade
+guidance on stderr — relay that guidance and stop.
 
 ### 1b. Scheduled-tasks MCP probe (report-only, never hard-stops)
 

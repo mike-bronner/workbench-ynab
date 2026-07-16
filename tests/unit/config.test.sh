@@ -105,10 +105,10 @@ test_jq_absent() {
 # shipped example config reads through the loader.
 test_example_config() {
   assert_file_exists "$EXAMPLE"
-  assert_eq "1" "$(YNAB_CONFIG_FILE="$EXAMPLE" _cfg '.schema_version')" "example schema_version is an integer"
+  assert_eq "2" "$(YNAB_CONFIG_FILE="$EXAMPLE" _cfg '.schema_version')" "example schema_version is the current schema version"
   # every required top-level key is present and reads back non-empty
   local path val
-  for path in '.budget.name' '.tax_profile.filing_status' '.persona.name' '.report.output_dir'; do
+  for path in '.budgets[0].label' '.tax_profile.filing_status' '.persona.name' '.report.output_dir'; do
     val="$(YNAB_CONFIG_FILE="$EXAMPLE" _cfg "$path")"
     [ -n "$val" ] || fail "example $path empty"
   done

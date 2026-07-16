@@ -11,10 +11,17 @@
 #   any mutation, and a misbehaving write path leaves a paper trail for debugging.
 #
 # WHO SOURCES THIS
-#   - The apply executor (M4-4) sources this file and calls `_audit_append`
-#     after each operation result. The writer is a pure function of its three
-#     inputs — it reads no external state and never touches a YNAB API — so it
-#     is unit-testable in isolation (see tests/unit/audit-log.test.sh).
+#   - Only the apply gate's shell context (commands/ynab-apply.md, M4-5)
+#     actually `source`s this file; it wires the resulting `_audit_append`
+#     function through as the injected `audit(record)` port. THREE production
+#     producers write result_status through that port — assets/apply-executor.js's
+#     recordAudit, assets/reconcile-handler.js's recordAudit, and
+#     assets/delete-duplicate.js's makeAuditingDeleteApplyOp (two-phase delete
+#     trail, #50) — none of them sources this bash file directly (see THE WRITER
+#     CONTRACT and TRUSTED PASS-THROUGH below for the vocabulary they produce).
+#     The writer is a pure function of its three inputs — it reads no external
+#     state and never touches a YNAB API — so it is unit-testable in isolation
+#     (see tests/unit/audit-log.test.sh).
 #   - The approval command / report path calls the read helpers (`_audit_read_last`,
 #     `_audit_read_run`) — or runs this file as a CLI (`last` / `run`) — to render
 #     the log for a human.

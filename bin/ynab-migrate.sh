@@ -26,11 +26,20 @@
 #                         be a known deprecated name — never an arbitrary path — so
 #                         a bad argument can never rm -rf the wrong thing.
 #                         Idempotent. Exit 0 ok, 2 on a rejected name.
+#   seed-config CONFIG    Create CONFIG from the shipped example on FIRST RUN,
+#                         with the example's placeholder `budgets` array and
+#                         `default_budget` stripped so Step 5's migrate-config
+#                         calls can land the user's REAL budget (issue #84 —
+#                         a placeholder budgets array is not "blank", so seeding
+#                         it verbatim would lock the factory placeholders in).
+#                         No-op when CONFIG already exists. Writes via
+#                         temp-file→validate→mv at mode 0600. Exit 0 ok,
+#                         2 on a missing/unparseable example or a failed write.
 #   migrate-config CONFIG PATH VALUE
 #                         Set ONE config.json field to VALUE only when it is
 #                         currently blank (absent, null, "", [], {}, or a
 #                         <PLACEHOLDER> string) — an existing real value is NEVER
-#                         overwritten. PATH is a JSON array (e.g. ["budget","name"])
+#                         overwritten. PATH is a JSON array (e.g. ["budgets"])
 #                         and VALUE a JSON literal. Writes via temp-file→validate→mv,
 #                         so a jq failure can't leave a half-written config. Idempotent.
 #                         Exit 0 ok (wrote or already-set), 2 on a config it cannot
@@ -40,6 +49,7 @@
 # test harness point every surface at a sandbox):
 #   YNAB_DESKTOP_CONFIG   Claude Desktop config JSON.
 #   YNAB_SCHEDULED_ROOT   Root holding the prototype scheduled-task directories.
+#   YNAB_CONFIG_EXAMPLE   The shipped config example seed-config copies from.
 #
 # FAIL CLOSED: a Desktop config that exists but cannot be parsed is NEVER treated
 # as "no connector" — the connector subcommands exit non-zero so a malformed or
@@ -51,8 +61,11 @@
 #
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 DESKTOP_CONFIG="${YNAB_DESKTOP_CONFIG:-$HOME/Library/Application Support/Claude/claude_desktop_config.json}"
 SCHEDULED_ROOT="${YNAB_SCHEDULED_ROOT:-$HOME/Documents/Claude/Scheduled}"
+CONFIG_EXAMPLE="${YNAB_CONFIG_EXAMPLE:-$SCRIPT_DIR/../assets/config.example.json}"
 
 # The npx package the legacy standalone connector runs. Used to tell the legacy
 # `ynab` connector apart from any unrelated server a user might have named "ynab".
@@ -181,9 +194,52 @@ do_remove_task_dir() {
   printf 'Removed deprecated task directory: %s\n' "$target"
 }
 
+# Create CONFIG from the shipped example on FIRST RUN — with the example's
+# placeholder `budgets` array and `default_budget` stripped. The example ships
+# a two-budget placeholder array to document the v2 shape (issue #84), but
+# seeding it verbatim breaks the migration: migrate-config fills only BLANK
+# fields, and an array of placeholder OBJECTS is not blank, so the factory
+# placeholders would win over the user's real migrated budget forever (and the
+# legacy ["budget","name"] patch would strand the real name in a key the v2
+# loader never reads — bin/config.sh's `has("budgets")` gate sees the
+# placeholders and skips the legacy synthesis). With the array absent, Step 5's
+# `migrate-config CONFIG '["budgets"]' …` lands the real entry and the emitted
+# file validates against assets/config.schema.json. Idempotent: an existing
+# CONFIG is never touched. Written at mode 0600 — the file will hold the user's
+# budget/business/tax data. Exit 0 ok (seeded or already present), 2 on a
+# missing/unparseable example or a failed write.
+do_seed_config() {
+  local config="${1:-}" tmp
+  [ -n "$config" ] || die "seed-config requires a CONFIG path"
+  if [ -f "$config" ]; then
+    printf 'Config already present — not seeding (already done): %s\n' "$config"
+    return 0
+  fi
+  if [ ! -f "$CONFIG_EXAMPLE" ]; then
+    printf '⚠️  Shipped example not found — cannot seed: %s\n' "$CONFIG_EXAMPLE" >&2
+    return 2
+  fi
+  jq -e . "$CONFIG_EXAMPLE" >/dev/null 2>&1 || { printf '⚠️  Unparseable example — refusing to seed from it: %s\n' "$CONFIG_EXAMPLE" >&2; return 2; }
+  mkdir -p "$(dirname "$config")" || return 2
+  tmp="$(mktemp)" || return 2
+  # Clean the temp copy on EVERY exit, mirroring the other writers, so a failure
+  # can never strand a half-built seed (or leave an empty config that a re-run
+  # would then mistake for "already present").
+  trap 'rm -f "$tmp"; trap - RETURN' RETURN
+  if jq 'del(.budgets, .default_budget)' "$CONFIG_EXAMPLE" > "$tmp" \
+    && jq -e . "$tmp" >/dev/null 2>&1 \
+    && chmod 600 "$tmp" \
+    && mv "$tmp" "$config"; then
+    printf 'Seeded %s from the shipped example (placeholder budgets stripped — Step 5 fills the real one).\n' "$config"
+    return 0
+  fi
+  printf '⚠️  Failed to seed config — nothing written: %s\n' "$config" >&2
+  return 2
+}
+
 # Set ONE config.json field, but ONLY when it is currently blank — never
 # blind-overwrite a real value. "Blank" = absent, null, "", [], {}, or a
-# <PLACEHOLDER>-shaped string. PATH is a JSON array (e.g. ["budget","name"]);
+# <PLACEHOLDER>-shaped string. PATH is a JSON array (e.g. ["business","name"]);
 # VALUE is a JSON literal (a string is "\"x\"", an array "[…]", an object "{…}").
 # Both go through jq via --argjson, so a config value can never be interpreted as
 # a jq program. Writes through a temp file validated before mv, mirroring
@@ -240,13 +296,19 @@ Usage: $(basename "$0") <subcommand> [args]
   detect-task-dirs      Report which deprecated prototype task directories exist
                         under the Scheduled root. Exit 0 if any exist, else 1.
   remove-task-dir NAME  Remove one known deprecated task directory. Idempotent.
+  seed-config CONFIG    Create CONFIG from the shipped example on first run, with
+                        the placeholder budgets array and default_budget stripped
+                        so migrate-config can land the real budget. No-op when
+                        CONFIG exists. Exit 0 ok, 2 on a missing/unparseable
+                        example or a failed write.
   migrate-config CONFIG PATH VALUE
                         Set one config.json field (PATH = JSON array, VALUE = JSON
                         literal) only when it is currently blank — never a blind
                         overwrite. Idempotent. Exit 0 ok, 2 on parse/rewrite failure.
   -h, --help            Show this help.
 
-Path overrides: YNAB_DESKTOP_CONFIG, YNAB_SCHEDULED_ROOT (see the header).
+Path overrides: YNAB_DESKTOP_CONFIG, YNAB_SCHEDULED_ROOT, YNAB_CONFIG_EXAMPLE
+(see the header).
 EOF
 }
 
@@ -256,6 +318,7 @@ main() {
     remove-connector)  do_remove_connector ;;
     detect-task-dirs)  do_detect_task_dirs ;;
     remove-task-dir)   shift; do_remove_task_dir "${1:-}" ;;
+    seed-config)       shift; do_seed_config "${1:-}" ;;
     migrate-config)    shift; do_migrate_config "$@" ;;
     -h | --help | '')  usage ;;
     *)                 usage >&2; die "Unknown subcommand: $1" ;;

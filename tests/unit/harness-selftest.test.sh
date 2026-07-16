@@ -50,6 +50,21 @@ test_run_tests_reports_failures() {
   fi
 }
 
+# Regression guard for the non-final-failure fix (tests/lib/assert.sh, the
+# `set +e; ( set -euo pipefail; "$fn" ); rc=$?; set -e` form): a failed
+# assertion FOLLOWED BY further code must still fail the test. The other two
+# self-tests use a function whose failing command is also its LAST command, so
+# they pass identically under the old buggy `if ( set -euo pipefail; "$fn" )`
+# pattern — where bash suspends `set -e` inside an if-condition subshell, the
+# non-final failure is swallowed, and the trailing success turns the test
+# green. Every *.test.sh in the repo leans on this fix; reverting it must go
+# red here.
+test_run_tests_nonfinal_failure_is_authoritative() {
+  if bash -c "set -euo pipefail; source '$ROOT/tests/lib/assert.sh'; test_x() { assert_eq a b; true; }; run_tests" >/dev/null 2>&1; then
+    fail "run_tests returned 0 when a NON-final assertion failed (trailing success masked it)"
+  fi
+}
+
 # The headline contract (AC #6, what CI #16 depends on): scripts/test.sh must
 # exit non-zero when any test fails. Drive the real entrypoint over a throwaway
 # failing test file and assert the non-zero exit.

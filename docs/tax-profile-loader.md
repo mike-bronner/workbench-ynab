@@ -36,6 +36,74 @@ This mirrors how `bin/config.sh` honours `YNAB_CONFIG_FILE`.
 An **absent** user profile is a normal result, not an error: the loader returns a
 **defaults-only** profile with every provenance entry stamped `defaults`.
 
+## Path containment — reads are allowlisted (issue #169)
+
+The loader forwards caller-supplied paths (`options.profilePath` / `dataDir` /
+`defaultsPath` / `schemaPath`, or their env seams) into `readFileSync` — left
+unchecked, a latent **arbitrary-file-read** primitive if any of those values ever
+arrive from a less-trusted source. So before **any** read, the requested path is
+**canonicalized** — resolved to the exact target the kernel would `open(2)`,
+using the native `realpathSync.native` so symlinks are dereferenced in true
+kernel order (**symlink first, then `..`**). This matters: the non-native
+`realpathSync` collapses `..` *lexically* before walking any symlink, so a
+`link/../x` path (`link` → outside the roots) would canonicalize to the wrong,
+in-root location while `readFileSync` opens the real, outside target — the two
+would disagree and the read would win. A not-yet-existing target is canonicalized
+via its deepest existing ancestor (walking up on the raw path, never a lexical
+`resolve`, so the same kernel ordering holds). The canonicalized path must fall
+inside an explicit allowlist of roots:
+
+1. the **resolved data dir** — `options.dataDir` → `YNAB_DATA_DIR` → the
+   canonical plugin-data dir;
+2. the **bundled `assets/tax/` directory** (the defaults and schema live there).
+
+A path that resolves outside every root is refused with a structured failure —
+`error.kind === 'containment'`, following the `io`/`parse`/`schema`/`depth`
+pattern — and the file is **never opened**. The profile path is checked before
+the existence probe, so an escaping request fails deterministically whether or
+not its target exists (no existence oracle). An escaping `defaultsPath` /
+`schemaPath` is likewise a structured `containment` failure — only a
+missing-but-contained bundled file remains the packaging-invariant **throw**.
+
+The canonicalizer **fails closed**: only a not-yet-existing target (`ENOENT`) is
+resolved via its deepest existing ancestor — a read of a missing path `ENOENT`s
+regardless, so nothing leaks. Any *other* `realpath` error (`EACCES`, `ELOOP`, a
+symlink loop, `ENOTDIR`, …) means the true target is unknowable, so the path is
+treated as outside every root and refused, never vouched for with a fabricated
+in-root path.
+
+The **failure envelope is redacted end-to-end**: every path echoed on an error
+path — the `containment` message (which echoes only the caller's own supplied
+path, with the absolute resolved roots dropped from the human-readable text and
+surviving, redacted, in the structured `params`), the pre-existing `io`/`parse`
+messages (including the OS-level `err.message`, which embeds the raw path), the
+`sources` field of a failure result, and the packaging-invariant throw messages
+— has the home directory masked to `~`. **Both spellings** of home are masked:
+as reported by `os.homedir()` *and* as the kernel canonicalizes it, so the
+masking holds even when `$HOME` itself resolves through a symlink or macOS
+firmlink (`homedir() !== realpath(homedir())`). This keeps the OS username /
+absolute plugin-data path from leaking should the failure cross an MCP/JSON-RPC
+boundary. On a **successful** load, `sources` deliberately carries the real,
+unredacted paths — callers consume those programmatically, and success values
+never ride an error message across that boundary.
+
+**Residual race (known limitation).** The guard canonicalizes the path, then the
+read reopens that same raw path (the check-then-open shape the AC prescribes). A
+filesystem mutation *between* check and read — swapping a component for a symlink
+in that window — could still redirect the read; closing it fully needs an
+open-then-`fstat` / `O_NOFOLLOW`-style read, out of scope here. It is not
+reachable through the only caller (paths come from env/defaults, not an attacker
+who also controls the filesystem mid-call). The guard defends against malicious
+*paths*, not concurrent filesystem *mutation*.
+
+**How the test seams stay usable without weakening production:** naming a root is
+an embedding-level trust decision. An explicitly-passed `options.dataDir` (or
+`YNAB_DATA_DIR`) *joins the allowlist as a root* — that is how the test harness
+points the loader at a `mkdtemp` directory (`{ dataDir: TMP, profilePath: … }`)
+— while the default no-options surface stays pinned to the canonical plugin-data
+dir plus `assets/tax/`. A bare `options.profilePath` does **not** widen the
+allowlist: it must still canonicalize into one of the roots.
+
 ## Validation — before any merge
 
 The user profile is validated against the canonical JSON Schema (#20, draft
@@ -128,7 +196,7 @@ import { loadProfile } from '../../lib/tax/loadProfile.mjs';
 
 const r = loadProfile();
 if (!r.ok) {
-  // r.error = { kind: 'schema' | 'parse' | 'io' | 'depth', message, errors: [{ path, keyword, message, params }] }
+  // r.error = { kind: 'schema' | 'parse' | 'io' | 'depth' | 'containment', message, errors: [{ path, keyword, message, params }] }
   // r.profile === null  (no silent fallback)
 } else {
   // r.defaultsOnly  — true when no user profile was found
@@ -177,7 +245,21 @@ type-incompatible / id-less / empty-array overrides failing loud, `$`-prefixed
 annotation keys never leaking into the frozen profile, a too-deep override yielding
 a structured `depth` failure instead of a crash, the `propertyNames` container-path
 convention, the `schemaVersion` `oneOf` arms, the `io`/missing-ruleset/missing-schema
-failure paths, and a beyond-two-levels deep-freeze assertion.
+failure paths, and a beyond-two-levels deep-freeze assertion. The path-containment
+allowlist (#169) is covered too: `..`-traversal, symlink-escape, the combined
+**symlink-then-`..`** kernel-order bypass (both existing- and absent-target),
+absolute-escape, and escaping `defaultsPath`/`schemaPath` requests all refused
+with a structured `containment` failure and a wiped result envelope; a symlink
+loop (`ELOOP`) proves the canonicalizer **fails closed** on a non-`ENOENT` error;
+and the `YNAB_DATA_DIR` env seam is exercised as an allowlist root, with a bare
+escaping `profilePath` (no `dataDir`) confirmed not to widen it. The tests' own
+`mkdtemp` dir is admitted via the explicit `dataDir` root. Out-of-process tests
+(a spawned child with a re-pointed `$HOME`) pin the redaction under a
+**symlinked home** — neither the raw nor the canonical home spelling leaks from
+a `containment` or `io` failure envelope — and guard the real **no-options
+default chain**: a profile under `~/.claude/plugins/data/…` loads and merges
+with zero options, and a fresh install with no data dir at all still resolves
+defaults-only rather than tripping containment.
 
 > **Not tax advice.** This tool organizes financial data and surfaces tax-relevant
 > signals. It is not a substitute for professional tax advice.
