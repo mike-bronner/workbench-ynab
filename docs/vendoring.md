@@ -211,8 +211,11 @@ empirically by booting the vendored `index.cjs` on candidate majors.
 `bin/revendor.sh` reads the incoming package's `engines.node` (when declared),
 derives the implied minimum operator-aware (lower bounds, caret/tilde, and
 bare/x-range versions establish a floor; upper bounds like `<20` never do; a
-`||` list implies the minimum across its alternatives), and raises
-`NODE_VERSION` if the requirement moved up — never lowers it automatically.
+hyphen range `A - B` contributes its lower endpoint; a bare-major `>N`
+desugars — as node-semver does — to `>=N+1`; a `||` list implies the minimum
+across its alternatives), and raises `NODE_VERSION` if the requirement moved
+up — never lowers it automatically. The string is control-byte-sanitized
+before it is parsed or echoed into the summary/log.
 
 Know the limit of that read: an npm tarball carries no `node_modules`, so a
 **transitive** dependency's constraint is invisible to it. The current floor

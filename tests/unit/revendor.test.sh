@@ -651,4 +651,93 @@ test_floor_takes_minimum_across_or_alternatives() {
     "the raise must use the minimum alternative, not the first digit run"
 }
 
+# A tilde range (`~X.y.z`) is a lower bound at its own major — a common
+# upstream shape, so the branch must be exercised, not just documented
+# (review round 3: the tilde arm was mutation-proven dead-tested).
+test_floor_raised_by_tilde_range() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines "~$((cur + 2)).1.0" "$((cur + 2))"
+}
+
+# A bare version (`X`) — the single most common engines.node shape — derives
+# its own major as the floor.
+test_floor_raised_by_bare_version() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines "$((cur + 2))" "$((cur + 2))"
+}
+
+# An x-range (`X.x`, `X.*`) derives major X. The `X.*` call doubles as the
+# `set -f` scoping proof: an unquoted `*` in the expression must never glob
+# against the CWD while the comparators are word-split.
+test_floor_raised_by_x_range() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines "$((cur + 2)).x" "$((cur + 2))"
+  _revendor_changed_bundle_with_engines "$((cur + 2)).*" "$((cur + 2))"
+}
+
+# node-semver desugars a bare-major exclusive lower bound (`>N`) to
+# `>=(N+1).0.0` — no major-N version satisfies it, so the implied floor is
+# N+1, not N (review round 2: deriving N silently under-enforces the floor).
+test_floor_bare_major_gt_desugars_to_next_major() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines ">$((cur + 1))" "$((cur + 2))"
+}
+
+# …but `>` with a concrete minor (`>N.0.0`) keeps major N — versions like
+# N.0.1 satisfy it. The +1 desugar must apply ONLY to the bare-major form.
+test_floor_gt_with_concrete_minor_keeps_major() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines ">$((cur + 2)).0.0" "$((cur + 2))"
+}
+
+# An exact pin (`=X`) is a lower (and upper) bound at X — floor X.
+test_floor_raised_by_exact_pin() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines "=$((cur + 2))" "$((cur + 2))"
+}
+
+# Comparators inside ONE alternative AND together: its floor is the MAX of
+# its lower bounds (`>=N ^N+2` → N+2). Until now every alternative carried a
+# single lower bound, so the `-gt` selection was only exercised trivially.
+test_floor_uses_max_lower_bound_within_alternative() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines ">=$cur ^$((cur + 2)).0.0" "$((cur + 2))"
+}
+
+# An npm hyphen range (`A - B`) means `>=A <=B` — the floor is the LOWER
+# endpoint. The bare `-` token must not be dropped as garbage: that ANDs both
+# endpoints as lower bounds and derives the UPPER one (review round 3
+# addendum: the over-raise hard-blocks majors upstream actually supports).
+test_floor_hyphen_range_derives_lower_endpoint() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines \
+    "$((cur + 2)).0.0 - $((cur + 4)).0.0" "$((cur + 2))"
+  assert_contains "$LAST_FLOOR_OUT" "$cur → $((cur + 2))" \
+    "the raise must use the range's lower endpoint, not its upper"
+}
+
+# The hyphen range's RHS is purely an upper bound: `cur - cur+4` implies
+# floor `cur`, so the pinned floor must stay UNCHANGED (the buggy parse
+# derived cur+4 and rewrote NODE_VERSION).
+test_floor_hyphen_range_upper_endpoint_adds_no_floor() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines "$cur - $((cur + 4))" "$cur"
+  assert_contains "$LAST_FLOOR_OUT" "unchanged" \
+    "a hyphen range starting at the current floor must not raise it"
+}
+
+# The engines string is untrusted upstream metadata spliced into the summary
+# (stdout) and the progress log (stderr): raw control bytes (ANSI escapes)
+# must never reach either stream (CWE-150). The literal backslash-u001b in
+# the engines value below survives printf %s into the mock package.json as a
+# JSON escape, which jq -r decodes to a raw ESC byte before the script sees it.
+test_floor_summary_sanitizes_control_bytes() {
+  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
+  _revendor_changed_bundle_with_engines \
+    ">=$((cur + 2)) \\u001b[31mboo" "$((cur + 2))"
+  case "$LAST_FLOOR_OUT" in
+    *$'\x1b'*) fail "raw ESC byte leaked into the re-vendor summary" ;;
+  esac
+}
+
 run_tests

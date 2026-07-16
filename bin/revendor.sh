@@ -268,11 +268,15 @@ fi
 # the expression implies, or nothing when it implies no minimum. Operator-
 # aware: only a lower bound (`>=X`, `>X`, `=X`), a caret/tilde range (`^X`,
 # `~X`), or a bare / x-range version (`X`, `X.x`, `X.*`) establishes a floor;
-# upper bounds (`<X`, `<=X`) never do. `||` alternatives OR together, so the
-# result is the MINIMUM across them; comparators inside one alternative AND
-# together, so its floor is the MAXIMUM of its lower bounds. Any alternative
-# with no lower bound (e.g. `<20` alone, or `*`) is satisfiable by arbitrarily
-# old majors — the whole expression then implies no minimum.
+# upper bounds (`<X`, `<=X`) never do. A hyphen range (`A - B`) means
+# `>=A <=B`, so it contributes A (its RHS is an upper bound, no floor). A
+# bare-major `>N` (or `>N.x`) desugars — exactly as node-semver does — to
+# `>=(N+1).0.0`, contributing N+1; `>N.m…` with a concrete minor stays at N.
+# `||` alternatives OR together, so the result is the MINIMUM across them;
+# comparators inside one alternative AND together, so its floor is the
+# MAXIMUM of its lower bounds. Any alternative with no lower bound (e.g.
+# `<20` alone, or `*`) is satisfiable by arbitrarily old majors — the whole
+# expression then implies no minimum.
 # Subshell body: `set -f` must not leak (engines can legally contain `*`,
 # which a plain word-split would glob against the CWD).
 derive_node_floor() (
@@ -283,14 +287,28 @@ derive_node_floor() (
     alt_floor="" skip_next=0
     # shellcheck disable=SC2086  # word-splitting the comparators is the point
     for comp in $alt; do
-      # A detached upper-bound operator (`< 20`) consumes the next word too,
-      # so its version is never misread as a bare-version floor.
+      # A detached upper-bound operator (`< 20`) — or the `-` of a hyphen
+      # range (`16 - 20`), whose RHS is likewise an upper endpoint — consumes
+      # the next word too, so its version is never misread as a bare-version
+      # floor. (The hyphen range's LOWER endpoint was already taken as a bare
+      # version by the time the `-` is seen — exactly the floor it implies.)
       if [ "$skip_next" = 1 ]; then skip_next=0; continue; fi
       case "$comp" in
-        '<' | '<=') skip_next=1; continue ;;   # detached upper bound
+        '<' | '<=' | '-') skip_next=1; continue ;;   # detached upper bound
         \<*) continue ;;                        # <X / <=X: no floor implied
         \>=*) major="${comp#>=}" ;;
-        \>*)  major="${comp#>}" ;;
+        \>*)
+          # node-semver desugars a bare-major `>N` (and `>N.x`) to
+          # `>=(N+1).0.0` — no major-N version satisfies it, so the floor is
+          # N+1. A concrete minor (`>N.m…`) keeps major N (N.m+1 satisfies it).
+          major="${comp#>}"; major="${major#v}"
+          maj="${major%%.*}"
+          case "$maj" in '' | *[!0-9]*) continue ;; esac
+          minor=""
+          [ "$major" != "$maj" ] && { minor="${major#*.}"; minor="${minor%%.*}"; }
+          case "$minor" in '' | x | X | \*) maj=$((maj + 1)) ;; esac
+          major="$maj"
+          ;;
         '^'*) major="${comp#^}" ;;
         \~*)  major="${comp#\~}" ;;   # \~: bare ~ in the pattern would tilde-expand
         =*)   major="${comp#=}" ;;
@@ -316,7 +334,14 @@ derive_node_floor() (
 FLOOR_FILE="$VENDOR_DIR/NODE_VERSION"
 CUR_FLOOR=""
 [ -f "$FLOOR_FILE" ] && CUR_FLOOR="$(tr -d '[:space:]' < "$FLOOR_FILE")"
-ENGINES_NODE="$(jq -r '.engines.node // ""' "$EXTRACT/package/package.json" 2>/dev/null || true)"
+# engines.node is untrusted upstream metadata that gets spliced into the
+# summary (stdout) and the progress log (stderr): map control bytes (ANSI
+# escapes, tabs, embedded newlines) to spaces — a safe comparator separator —
+# before anything parses or prints it (CWE-150 escape injection), then trim
+# the trailing blank jq's own newline leaves so an absent field still reads
+# as empty.
+ENGINES_NODE="$(jq -r '.engines.node // ""' "$EXTRACT/package/package.json" 2>/dev/null | tr -c '[:print:]' ' ' || true)"
+ENGINES_NODE="${ENGINES_NODE%"${ENGINES_NODE##*[! ]}"}"
 DERIVED_FLOOR="$(derive_node_floor "$ENGINES_NODE")"
 if [ -n "$DERIVED_FLOOR" ] && { [ -z "$CUR_FLOOR" ] || [ "$DERIVED_FLOOR" -gt "$CUR_FLOOR" ]; }; then
   printf '%s\n' "$DERIVED_FLOOR" > "$FLOOR_FILE"
