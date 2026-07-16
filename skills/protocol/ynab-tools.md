@@ -7,7 +7,7 @@
 > orchestrator agent's `tools:` frontmatter
 > ([`agents/ynab-orchestrator.md`](../../agents/ynab-orchestrator.md)) — which
 > Claude Code requires to hold literal names and which wires the subset of the
-> read tools below that the planner stub currently needs. Every other skill,
+> read tools below that the planner currently needs. Every other skill,
 > command, hook, and the pre-approval globs reference or are generated from this
 > file. A namespace change is an edit here (plus the derivation rule in the
 > capability map, and any changed suffix the orchestrator wires mirrored into
@@ -49,7 +49,7 @@ victim transaction with `ynab_get_transaction` for drift detection before any
 delete, and the dry-run preview may corroborate the duplicate pairing with
 `ynab_compare_transactions`. Both are read-only and were verified as registered
 tool ids in the vendored bundle. They are **not** wired into the read-only
-orchestrator's `tools:` list (that stub carries only the planner's five reads);
+orchestrator's `tools:` list (the agent carries only the planner's five reads);
 they are invoked from the approval-gated apply path, not the orchestrator.
 
 ## Write tools (ledger-only — gated, approved in Sprint 4)
@@ -131,12 +131,12 @@ phase-split set above, so the delete verb is never blanket-approved.
 ## Orchestrator tools list
 
 The read-only orchestrator agent's `tools:` allow-list is a **subset** of the
-**read tools** above: the planner stub currently wires the five reads it needs
+**read tools** above: the planner currently wires the five reads it needs
 (`list_budgets`, `list_accounts`, `list_categories`, `list_transactions`,
 `get_month`). The remaining two read tools — `list_payees` and
-`export_transactions` — are in the canonical read set above but are not yet
-wired into the stub; they widen into the orchestrator in Sprint 3 as the planner
-grows. The orchestrator never holds write tools — write paths run from the
+`export_transactions` — are in the canonical read set above but are not
+wired into the agent; they widen into the orchestrator only if a future planner
+feature needs them. The orchestrator never holds write tools — write paths run from the
 approval-gated `/ynab-apply` command (Sprint 4), not the orchestrator.
 
 ## Port wrappers must throw on failure — check `result.isError`
