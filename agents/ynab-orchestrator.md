@@ -101,6 +101,7 @@ For each eligible tier, record in `plan.report.reasons` **why** it fired and its
 **Worked examples (known dates, default schedule):**
 
 - `today = 2026-01-01` (Thursday) → `tiers: [annual, monthly]` — annual window (Jan 1–7) and day == 1; Jan 15's reminder window (Jan 8–15) hasn't opened, and Thursday isn't the weekly day.
+- `today = 2026-04-07` (Tuesday) → `tiers: []` — 8 days before Apr 15, one day before its reminder window (Apr 8–15) opens; Tuesday isn't the weekly day.
 - `today = 2026-04-13` (Monday) → `tiers: [quarterly-tax, weekly]` — inside the Apr 15 reminder window (Apr 8–15) and the configured weekly day. See the full plan block below.
 - `today = 2026-04-22` (Wednesday) → `tiers: []` — no window matches; the plan says so and the router does nothing.
 

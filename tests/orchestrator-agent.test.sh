@@ -15,9 +15,9 @@
 # date→tier eligibility rules with strict deterministic ordering, per-tier
 # reasons/windows emitted through the EXISTING plan schema ynab-review.md
 # consumes, anomaly detection as warnings, and the schedule-ownership statement.
-# The smoke test extracts the worked-example plan block for a known date
-# (2026-04-13) and asserts it names the right tiers in the right order with the
-# right window.
+# The smoke test extracts the "Clean scheduled run" worked-example plan block
+# (known date 2026-04-13) and asserts it names the right tiers in the right
+# order with the right window.
 
 set -u
 
@@ -156,6 +156,8 @@ assert_present    "strict deterministic tier ordering"      '[annual, quarterly-
 assert_present_re "weekly default is Monday"                'weekly_day.*= *Monday|default Monday'
 assert_present    "monthly fires on day 1"                  'today.day == 1'
 assert_present_re "quarterly default due dates"             'Apr 15,? Jun 15,? Sep 15,? (and )?Jan 15'
+assert_present    "quarterly trigger window: 7 days before through due date" 'from **7 days before** the due date **through the due date**'
+assert_present    "7-day-edge boundary example (8 days out is not eligible)" '8 days before Apr 15, one day before its reminder window'
 assert_present_re "annual early-January window"             'early.January'
 assert_present    "annual window override name"             'annual_window'
 assert_present_re "empty tier list is a valid plan"         'tiers: \[\]'
@@ -177,6 +179,9 @@ assert_present_re "warnings carry kind/detail/options"      'kind: .+'
 assert_present    "missed weekly anomaly"                   "missed_weekly"
 assert_present    "missed monthly anomaly"                  "missed_monthly"
 assert_present    "unreminded quarterly anomaly"            "quarterly_due_soon"
+assert_present    "missed-weekly threshold is 9 days"       'dated more than 9 days before'
+assert_present    "missed-monthly threshold is 35 days"     'dated more than 35 days before'
+assert_present    "quarterly reminder lookahead is 7 days"  'opens within the next 7 days'
 assert_present_re "anomalies are report-only"               'detect (and|\+) report'
 
 # ── Hard read-only enforcement ────────────────────────────────────────────────
@@ -184,11 +189,13 @@ assert_present_re "mutation impulse becomes a warning"      '(stop and add a war
 assert_present_re "no user interaction"                     'No user interaction'
 
 # ── Smoke test: worked-example plan block for a known date (2026-04-13) ───────
-# Extract the fenced yaml block that contains the known date and assert it names
-# the right tiers, in the right order, with the union window sized correctly.
-EXAMPLE="$(awk '/^```yaml$/{buf=""; inb=1; next} /^```$/{if (inb && buf ~ /2026-04-13/) print buf; inb=0; next} inb{buf=buf $0 "\n"}' "$FILE")"
+# Extract the first fenced yaml block after the "Clean scheduled run" label —
+# anchored on the label, not the date content, so a future second block that
+# happens to mention the same date can't silently concatenate — and assert it
+# names the right tiers, in the right order, with the union window sized right.
+EXAMPLE="$(awk '/^Clean scheduled run/{lbl=1; next} lbl && /^```yaml$/{inb=1; next} inb && /^```$/{exit} inb{print}' "$FILE")"
 if [ -n "$EXAMPLE" ]; then
-  printf 'ok   — worked-example plan block for 2026-04-13 exists\n'; pass=$((pass + 1))
+  printf 'ok   — Clean-scheduled-run worked-example plan block exists\n'; pass=$((pass + 1))
   if printf '%s' "$EXAMPLE" | grep -qF 'tiers: ["quarterly-tax", "weekly"]'; then
     printf 'ok   — known date yields [quarterly-tax, weekly] in strict order\n'; pass=$((pass + 1))
   else
@@ -208,7 +215,7 @@ if [ -n "$EXAMPLE" ]; then
     fi
   done
 else
-  printf 'FAIL — no worked-example yaml block containing 2026-04-13\n'; fail=$((fail + 1))
+  printf 'FAIL — no worked-example yaml block after the Clean scheduled run label\n'; fail=$((fail + 1))
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
