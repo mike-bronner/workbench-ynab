@@ -202,32 +202,25 @@ every enforcement point reads:
   entry and the README's documented floor must match the canonical file, or
   the suite fails.
 
-The floor was derived from the bundle's dependency chain (the strongest
-declared constraint is `@modelcontextprotocol/sdk`'s `engines.node >=18`;
-upstream `@dizzlkheinz/ynab-mcpb` declares no `engines` field) and confirmed
-empirically by booting the vendored `index.cjs` on candidate majors.
+The floor is a **support policy, not a derived value** (decided on PR #205):
+it is the latest Node LTS major at the time the bundle was last (re)vendored.
+An earlier revision derived the floor from the incoming package's
+`engines.node` with a shell re-implementation of node-semver's operator
+grammar; three review rounds of corner cases (operator-blind upper bounds,
+`>N` desugaring, hyphen ranges, …) showed that treadmill never ends — and an
+npm tarball carries no `node_modules`, so a **transitive** dependency's
+constraint was invisible to that read anyway. The policy replaces all of it:
+one number, set by a human, validated by a boot proof.
 
-**Re-vendoring re-derives it — from the package's OWN metadata only**:
-`bin/revendor.sh` reads the incoming package's `engines.node` (when declared),
-derives the implied minimum operator-aware (lower bounds, caret/tilde, and
-bare/x-range versions establish a floor; upper bounds like `<20` never do; a
-hyphen range `A - B` contributes its lower endpoint; a bare-major `>N`
-desugars — as node-semver does — to `>=N+1`; a `||` list implies the minimum
-across its alternatives), and raises `NODE_VERSION` if the requirement moved
-up — never lowers it automatically. The string is control-byte-sanitized
-before it is parsed or echoed into the summary/log.
-
-Know the limit of that read: an npm tarball carries no `node_modules`, so a
-**transitive** dependency's constraint is invisible to it. The current floor
-of 18 is exactly that case — it came from `@modelcontextprotocol/sdk`
-(`engines.node >=18`), not from upstream's own (absent) engines field, so the
-automated raise could never have derived it. The **CI floor lane** — which
-boots the vendored bundle on exactly the floor major — is the enforcement
-that catches a transitive raise: a bundle that no longer runs on the floor
-fails CI even though the metadata read saw nothing. When upstream declares no
-engines field (or one that implies no minimum) the floor is kept and that
-boot proof carries it. After any bump, update the README bullet and the CI
-matrix entry — `tests/unit/node-floor.test.sh` fails until they agree.
+**Re-vendoring never touches the floor.** `bin/revendor.sh` reports the
+pinned value in its summary and reminds the operator, in its printed next
+steps, to re-check the LTS line: if a newer LTS has shipped since the last
+bump, update `vendor/ynab-mcp/NODE_VERSION` — and the README bullet and the
+ci.yml matrix entry with it (`tests/unit/node-floor.test.sh` fails until all
+three agree). The **CI floor lane** — which boots the vendored bundle on
+exactly the floor major — is what proves the bundle actually runs on the
+pinned floor: a re-vendored bundle that needs a newer runtime fails CI before
+it ships, no metadata read required.
 
 ## Verifying the result
 

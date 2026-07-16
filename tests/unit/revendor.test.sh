@@ -87,13 +87,6 @@ case "${1:-}" in
     work="$(mktemp -d)"
     mkdir -p "$work/package/dist/bundle"
     cp "$MOCK_BUNDLE_SRC" "$work/package/dist/bundle/index.cjs"
-    # Optional engines declaration (issue #3): when MOCK_PKG_ENGINES_NODE is
-    # set, ship a package.json so the script's Node-floor re-derivation has an
-    # engines.node to read; unset mirrors upstream today (no engines field).
-    if [ -n "${MOCK_PKG_ENGINES_NODE:-}" ]; then
-      printf '{"name":"mock","version":"0.0.0","engines":{"node":"%s"}}\n' \
-        "$MOCK_PKG_ENGINES_NODE" > "$work/package/package.json"
-    fi
     file="mock-ynab-mcpb.tgz"
     tar -czf "$PWD/$file" -C "$work" package
     rm -rf "$work"
@@ -566,178 +559,44 @@ test_signature_null_shape_aborts_before_write() { assert_sig_shape_aborts nullsh
 # for the fail-open fix.)
 test_signature_unknown_category_aborts_before_write() { assert_sig_shape_aborts newcategory; }
 
-# --- Node floor re-derivation (issue #3) -------------------------------------
-# Shared driver: re-vendor a changed bundle with an optional upstream
-# engines.node declaration, then assert the sandbox NODE_VERSION outcome.
-# $1 = MOCK_PKG_ENGINES_NODE value ("" = upstream declares no engines field)
-# $2 = expected NODE_VERSION content after the run
-_revendor_changed_bundle_with_engines() {
-  local engines="$1" expected_floor="$2" sb mockbin marker name newsrc out rc
+# --- Node floor policy (issue #3, decided on PR #205) ------------------------
+# The floor is a POLICY value — the latest Node LTS major at (re)vendor time,
+# pinned in vendor/ynab-mcp/NODE_VERSION and bumped by a HUMAN. An earlier
+# revision derived it here from the incoming package's engines.node; the
+# shell semver parser kept sprouting operator corner cases (three review
+# rounds' worth), so the derivation was removed in favor of the policy. This
+# test pins both halves of that contract: the script never touches the floor
+# file, and the summary + next steps carry the reminder that replaced the
+# automation.
+test_floor_never_modified_by_revendor() {
+  local sb mockbin marker name newsrc floor_before out rc
   sb="$(make_sandbox)"
   mockbin="$(make_mockbin "$sb")"
   marker="$sb/vendor/ynab-mcp/vendored.json"
   name="$(jq -r '.name' "$marker")"
   newsrc="$sb/new-index.cjs"
   printf 'changed-bundle-bytes %s\n' "$(date +%s)-$RANDOM" > "$newsrc"
+  floor_before="$(cat "$sb/vendor/ynab-mcp/NODE_VERSION")"
 
   set +e
   out="$(env PATH="$mockbin:$PATH" MOCK_BUNDLE_SRC="$newsrc" \
     EXPECTED_SPEC="$name@9.9.9-test" MOCK_PKG_NAME="$name" \
-    MOCK_PKG_ENGINES_NODE="$engines" \
     "$BASH_BIN" "$sb/bin/revendor.sh" "9.9.9-test" 2>/dev/null)"
   rc=$?
   set -e
 
   assert_eq 0 "$rc" "changed-bundle re-vendor should exit 0"
-  assert_eq "$expected_floor" "$(tr -d '[:space:]' < "$sb/vendor/ynab-mcp/NODE_VERSION")" \
-    "NODE_VERSION must hold the expected floor after the run"
-  assert_contains "$out" "node floor:" "the summary must report the floor outcome"
-  LAST_FLOOR_OUT="$out"
+  # The write path ran (new bytes adopted) yet the floor file is byte-identical:
+  # no derivation, no auto-raise, regardless of upstream metadata.
+  assert_eq "$floor_before" "$(cat "$sb/vendor/ynab-mcp/NODE_VERSION")" \
+    "NODE_VERSION must be byte-identical after a re-vendor (the floor is policy, not derived)"
+  assert_contains "$out" "node floor:" \
+    "the summary must still report the pinned floor"
+  assert_contains "$out" "latest Node LTS" \
+    "the summary must name the latest-LTS policy"
+  assert_contains "$out" "update vendor/ynab-mcp/NODE_VERSION" \
+    "the next steps must carry the manual-bump reminder that replaced the automation"
   rm -rf "$sb"
-}
-
-# An upstream engines.node demanding a HIGHER major must raise the pinned floor.
-test_floor_raised_by_upstream_engines() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines ">=$((cur + 2))" "$((cur + 2))"
-  assert_contains "$LAST_FLOOR_OUT" "$cur → $((cur + 2))" \
-    "the summary must show the old → new floor"
-}
-
-# No engines field (upstream today) → the floor is KEPT, never invented.
-test_floor_kept_when_upstream_declares_no_engines() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines "" "$cur"
-  assert_contains "$LAST_FLOOR_OUT" "no engines.node" \
-    "the summary must note that upstream declares no engines field"
-}
-
-# An engines.node BELOW the pinned floor must never lower it automatically —
-# lowering needs a human boot-proof on the older major, not a metadata read.
-test_floor_never_lowered_by_upstream_engines() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines ">=1" "$cur"
-  assert_contains "$LAST_FLOOR_OUT" "unchanged" \
-    "the summary must report the floor as unchanged"
-}
-
-# An UPPER bound (`<X`) states no minimum at all — the derivation must not
-# grab its digits and mis-raise the floor (review round 2: the naive
-# first-digit-run parse turned `<20` into a floor of 20, hard-exiting users on
-# perfectly supported majors).
-test_floor_ignores_exclusive_upper_bound() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines "<$((cur + 2))" "$cur"
-  assert_contains "$LAST_FLOOR_OUT" "implies no minimum" \
-    "the summary must report that an upper-bound-only range implies no minimum"
-}
-
-# Same for the inclusive form (`<=X`).
-test_floor_ignores_inclusive_upper_bound() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines "<=$((cur + 2))" "$cur"
-  assert_contains "$LAST_FLOOR_OUT" "implies no minimum" \
-    "the summary must report that an upper-bound-only range implies no minimum"
-}
-
-# `||` alternatives OR together: the implied minimum is the MINIMUM across
-# them, regardless of order — an out-of-order list (`^22 || ^20.1`) must derive
-# the lower major, not whichever alternative appears first.
-test_floor_takes_minimum_across_or_alternatives() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines \
-    "^$((cur + 4)).0.0 || ^$((cur + 2)).1.0" "$((cur + 2))"
-  assert_contains "$LAST_FLOOR_OUT" "$cur → $((cur + 2))" \
-    "the raise must use the minimum alternative, not the first digit run"
-}
-
-# A tilde range (`~X.y.z`) is a lower bound at its own major — a common
-# upstream shape, so the branch must be exercised, not just documented
-# (review round 3: the tilde arm was mutation-proven dead-tested).
-test_floor_raised_by_tilde_range() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines "~$((cur + 2)).1.0" "$((cur + 2))"
-}
-
-# A bare version (`X`) — the single most common engines.node shape — derives
-# its own major as the floor.
-test_floor_raised_by_bare_version() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines "$((cur + 2))" "$((cur + 2))"
-}
-
-# An x-range (`X.x`, `X.*`) derives major X. The `X.*` call doubles as the
-# `set -f` scoping proof: an unquoted `*` in the expression must never glob
-# against the CWD while the comparators are word-split.
-test_floor_raised_by_x_range() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines "$((cur + 2)).x" "$((cur + 2))"
-  _revendor_changed_bundle_with_engines "$((cur + 2)).*" "$((cur + 2))"
-}
-
-# node-semver desugars a bare-major exclusive lower bound (`>N`) to
-# `>=(N+1).0.0` — no major-N version satisfies it, so the implied floor is
-# N+1, not N (review round 2: deriving N silently under-enforces the floor).
-test_floor_bare_major_gt_desugars_to_next_major() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines ">$((cur + 1))" "$((cur + 2))"
-}
-
-# …but `>` with a concrete minor (`>N.0.0`) keeps major N — versions like
-# N.0.1 satisfy it. The +1 desugar must apply ONLY to the bare-major form.
-test_floor_gt_with_concrete_minor_keeps_major() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines ">$((cur + 2)).0.0" "$((cur + 2))"
-}
-
-# An exact pin (`=X`) is a lower (and upper) bound at X — floor X.
-test_floor_raised_by_exact_pin() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines "=$((cur + 2))" "$((cur + 2))"
-}
-
-# Comparators inside ONE alternative AND together: its floor is the MAX of
-# its lower bounds (`>=N ^N+2` → N+2). Until now every alternative carried a
-# single lower bound, so the `-gt` selection was only exercised trivially.
-test_floor_uses_max_lower_bound_within_alternative() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines ">=$cur ^$((cur + 2)).0.0" "$((cur + 2))"
-}
-
-# An npm hyphen range (`A - B`) means `>=A <=B` — the floor is the LOWER
-# endpoint. The bare `-` token must not be dropped as garbage: that ANDs both
-# endpoints as lower bounds and derives the UPPER one (review round 3
-# addendum: the over-raise hard-blocks majors upstream actually supports).
-test_floor_hyphen_range_derives_lower_endpoint() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines \
-    "$((cur + 2)).0.0 - $((cur + 4)).0.0" "$((cur + 2))"
-  assert_contains "$LAST_FLOOR_OUT" "$cur → $((cur + 2))" \
-    "the raise must use the range's lower endpoint, not its upper"
-}
-
-# The hyphen range's RHS is purely an upper bound: `cur - cur+4` implies
-# floor `cur`, so the pinned floor must stay UNCHANGED (the buggy parse
-# derived cur+4 and rewrote NODE_VERSION).
-test_floor_hyphen_range_upper_endpoint_adds_no_floor() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines "$cur - $((cur + 4))" "$cur"
-  assert_contains "$LAST_FLOOR_OUT" "unchanged" \
-    "a hyphen range starting at the current floor must not raise it"
-}
-
-# The engines string is untrusted upstream metadata spliced into the summary
-# (stdout) and the progress log (stderr): raw control bytes (ANSI escapes)
-# must never reach either stream (CWE-150). The literal backslash-u001b in
-# the engines value below survives printf %s into the mock package.json as a
-# JSON escape, which jq -r decodes to a raw ESC byte before the script sees it.
-test_floor_summary_sanitizes_control_bytes() {
-  local cur; cur="$(tr -d '[:space:]' < "$FLOOR_SRC")"
-  _revendor_changed_bundle_with_engines \
-    ">=$((cur + 2)) \\u001b[31mboo" "$((cur + 2))"
-  case "$LAST_FLOOR_OUT" in
-    *$'\x1b'*) fail "raw ESC byte leaked into the re-vendor summary" ;;
-  esac
 }
 
 run_tests

@@ -10,15 +10,16 @@
 #   * /workbench-ynab:setup Step 1a — the interactive prereq check.
 #
 # CANONICAL FLOOR VALUE
-#   vendor/ynab-mcp/NODE_VERSION — a single bare Node major (e.g. `18`), pinned
-#   next to the bundle it describes. It is derived from the bundle's dependency
-#   chain (the strongest declared constraint: @modelcontextprotocol/sdk's
-#   `engines.node >=18`) and confirmed by booting the vendored index.cjs on
-#   candidate majors; bin/revendor.sh re-derives it on every bundle bump from
-#   the incoming package's OWN engines.node only (transitive constraints are
-#   invisible in a tarball — CI's floor lane, which boots the bundle on exactly
-#   this major, is the backstop that catches those; see docs/ci.md).
-#   tests/unit/node-floor.test.sh keeps README + ci.yml in sync with it.
+#   vendor/ynab-mcp/NODE_VERSION — a single bare Node major (e.g. `24`), pinned
+#   next to the bundle it describes. POLICY (decided on PR #205): the floor is
+#   the latest Node LTS major at the time the bundle was last (re)vendored — a
+#   support policy set by a human, never a value derived from upstream
+#   metadata (a shell semver parser proved untrustworthy across three review
+#   rounds, and a tarball can't see transitive constraints anyway).
+#   bin/revendor.sh reminds the operator to re-check the LTS line on every
+#   bundle bump; CI's floor lane boots the bundle on exactly this major (see
+#   docs/ci.md), and tests/unit/node-floor.test.sh keeps README + ci.yml in
+#   sync with it.
 #
 # CONTRACT (asserted by tests/unit/node-floor.test.sh + tests/launcher.test.sh)
 #   * PATH `node` major >= floor  → exit 0, no output at all.

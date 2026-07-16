@@ -66,11 +66,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        # '18' is the pinned Node floor — the canonical value lives in
+        # '24' is the pinned Node floor — by policy the latest LTS major at the
+        # last bundle bump (issue #3 / PR #205); the canonical value lives in
         # vendor/ynab-mcp/NODE_VERSION, and tests/unit/node-floor.test.sh fails
-        # the suite if this matrix entry drifts from it. 'lts/*' keeps the
-        # current-LTS coverage.
-        node-version: ['18', 'lts/*']
+        # the suite if this matrix entry drifts from it. 'lts/*' tracks the
+        # moving LTS line, so the lanes diverge exactly when a new LTS ships —
+        # the cue to bump the floor.
+        node-version: ['24', 'lts/*']
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4

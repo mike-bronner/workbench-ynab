@@ -29,7 +29,7 @@ Workflow hygiene, common to all jobs:
 - Actions are pinned to exact majors (`actions/checkout@v4`,
   `actions/setup-node@v5`, `lycheeverse/lychee-action@v2`) — no `@latest`, no
   floating tags.
-- The `test` job runs a two-lane Node matrix: the pinned floor (`18`, canonical value in `vendor/ynab-mcp/NODE_VERSION`, issue #3) and current LTS (`lts/*`). The floor lane boots the vendored bundle on the oldest supported major, so a re-vendor that raises the requirement fails CI before it ships; `tests/unit/node-floor.test.sh` fails if the matrix entry drifts from the canonical floor file. Every other job stays single-version.
+- The `test` job runs a two-lane Node matrix: the pinned floor (`24`, canonical value in `vendor/ynab-mcp/NODE_VERSION` — by policy the latest Node LTS major at the last bundle bump, issue #3 / PR #205) and current LTS (`lts/*`). The floor lane boots the vendored bundle on the oldest supported major, so a re-vendor that raises the requirement fails CI before it ships; `tests/unit/node-floor.test.sh` fails if the matrix entry drifts from the canonical floor file. The lanes diverge exactly when a new LTS ships — the cue to bump the floor. Every other job stays single-version.
 
 ### The jobs
 
