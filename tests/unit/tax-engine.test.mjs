@@ -38,7 +38,7 @@ const TMP = mkdtempSync(join(tmpdir(), 'ynab-tax-engine-'));
 const ABSENT = join(TMP, 'no-such-profile.json');
 
 function loadFixtureProfile() {
-  const profile = loadEffectiveProfile({ profilePath: ABSENT });
+  const profile = loadEffectiveProfile({ dataDir: TMP, profilePath: ABSENT });
   assert.equal(profile.ok, true, 'fixture profile should load cleanly from defaults');
   return profile;
 }
@@ -301,7 +301,7 @@ test('a failed profile load is refused consistently across classify/batch/summar
   // An invalid-JSON user profile → loadEffectiveProfile returns { ok:false }.
   const badPath = join(TMP, 'invalid-profile.json');
   writeFileSync(badPath, '{ not valid json');
-  const bad = loadEffectiveProfile({ profilePath: badPath });
+  const bad = loadEffectiveProfile({ dataDir: TMP, profilePath: badPath });
   assert.equal(bad.ok, false);
   // All three consumers must refuse it the SAME way — never silently classify a
   // failure envelope into a plausible-looking suggestion, never leak a raw
@@ -334,7 +334,7 @@ test('AC#11 exercising the whole facade writes zero bytes to stdout', () => {
       medicalExpenses: 5000,
       itemizedDeductionsTotal: 10000,
     });
-    loadEffectiveProfile({ profilePath: ABSENT });
+    loadEffectiveProfile({ dataDir: TMP, profilePath: ABSENT });
   } finally {
     process.stdout.write = original;
   }

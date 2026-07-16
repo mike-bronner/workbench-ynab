@@ -160,11 +160,16 @@ plugin's out-of-repo config so the user doesn't re-enter it.
 
 1. If the SKILL.md is absent, say so and skip this step.
 2. Read it and extract the equivalents of these `config.json` fields (see
-   `docs/config-schema.md`): `budget.name`, the side-business `business.name` /
+   `docs/config-schema.md`): the budget name (which lands as the single entry of
+   the schema-v2 `budgets` array), the side-business `business.name` /
    `business.accounts` / `business.category_group` / `business.expense_categories`,
    and the `tax_profile` (filing status, schedules, public rates/due dates).
 3. **Idempotency** — read the existing config and only offer to fill fields that
-   are **absent, null, empty, or still a `<PLACEHOLDER>`**. If every target field
+   are **absent, null, empty, or still a `<PLACEHOLDER>`**. The budget counts as
+   **already migrated** when the config holds a real budget in *either* shape — a
+   `budgets` entry with a non-placeholder `budget_name`/`budget_id`, or a legacy
+   v1 `budget.name` with a real value (the loader migrates that shape at read
+   time; never write a `budgets` array next to it). If every target field
    already holds a real value, print "Config already migrated — nothing to write"
    and skip.
 
@@ -172,11 +177,13 @@ plugin's out-of-repo config so the user doesn't re-enter it.
    CONFIG_DIR="$HOME/.claude/plugins/data/workbench-ynab-claude-workbench"
    CONFIG_FILE="$CONFIG_DIR/config.json"
    mkdir -p "$CONFIG_DIR"
-   # Seed from the shipped example shape on first run.
-   [ -f "$CONFIG_FILE" ] || cp "${CLAUDE_PLUGIN_ROOT}/assets/config.example.json" "$CONFIG_FILE"
-   # This file holds the budget name, business accounts, and tax profile — keep it
-   # owner-only (config.example.json ships 0644, which cp would otherwise inherit).
-   chmod 600 "$CONFIG_FILE"
+   # Seed on first run via the tested helper: it copies the shipped example with
+   # the placeholder `budgets` array and `default_budget` STRIPPED (so the real
+   # migrated budget can land below — migrate-config fills only blank fields, and
+   # a placeholder budgets array is not blank), writes temp→validate→mv, and
+   # chmods the file 0600 (it holds budget/business/tax data). No-op when the
+   # config already exists.
+   bash "${CLAUDE_PLUGIN_ROOT}/bin/ynab-migrate.sh" seed-config "$CONFIG_FILE"
    ```
 
 4. Show the user the exact fields you propose to write (their migrated values) and
@@ -190,7 +197,13 @@ plugin's out-of-repo config so the user doesn't re-enter it.
    # migrated value as a JSON literal. A field that already holds a real value is
    # left untouched and reported "already set".
    M="${CLAUDE_PLUGIN_ROOT}/bin/ynab-migrate.sh"
-   bash "$M" migrate-config "$CONFIG_FILE" '["budget","name"]'              "$(jq -n --arg v "$BUDGET_NAME" '$v')"
+   # The migrated budget becomes the single schema-v2 `budgets` entry, mirroring
+   # the loader's legacy synthesis (label = budget name, role = personal), plus
+   # the matching `default_budget`. SKIP BOTH calls when Step 3 found the budget
+   # already migrated in the legacy shape (real `.budget.name`) — writing
+   # `budgets` next to a live legacy `budget` would leave a hybrid file.
+   bash "$M" migrate-config "$CONFIG_FILE" '["budgets"]'        "$(jq -n --arg v "$BUDGET_NAME" '[{label: $v, role: "personal", budget_name: $v}]')"
+   bash "$M" migrate-config "$CONFIG_FILE" '["default_budget"]' "$(jq -n --arg v "$BUDGET_NAME" '$v')"
    bash "$M" migrate-config "$CONFIG_FILE" '["business","name"]'            "$(jq -n --arg v "$BUSINESS_NAME" '$v')"
    bash "$M" migrate-config "$CONFIG_FILE" '["business","accounts"]'        "$BUSINESS_ACCOUNTS_JSON"      # a JSON array
    bash "$M" migrate-config "$CONFIG_FILE" '["business","category_group"]'  "$(jq -n --arg v "$CATEGORY_GROUP" '$v')"

@@ -53,15 +53,20 @@ What it does, end to end:
    artifact. (See [Verifying upstream provenance](#verifying-upstream-provenance).)
 4. **Provenance gate — signature** — verifies the registry's cryptographic
    signature on the version with npm's own published keys (`npm audit
-   signatures`), in an isolated temp install (never the repo). An **invalid**
-   signature is a hard stop (possible tampering); a **missing** signature is
-   recorded in the marker as a residual supply-chain risk, never skipped
-   silently. The gate is **fail-closed**: `verified` is recorded only when the
-   audit output is a shape it fully recognizes (an object with `invalid` and
-   `missing` arrays and no other keys). Anything else — non-JSON noise, null
-   fields, or a *new* failure category a future npm might add — aborts the run
-   rather than passing, so an unexpected shape can never be mistaken for a clean
-   signature.
+   signatures`), in an isolated temp install (never the repo). The audited
+   install is **bound to the packed tarball**: the audit must read a
+   registry-resolved install (npm refuses to audit a local-path one), so the
+   script requires the install's lockfile-recorded integrity — which npm itself
+   enforces against the installed bytes — to equal the SRI computed from the
+   exact tarball verified in step 3, closing the window between the two
+   downloads. An **invalid** signature is a hard stop (possible tampering); a
+   **missing** signature is recorded in the marker as a residual supply-chain
+   risk, never skipped silently. The gate is **fail-closed**: `verified` is
+   recorded only when the audit output is a shape it fully recognizes (an object
+   with `invalid` and `missing` arrays and no other keys). Anything else —
+   non-JSON noise, null fields, or a *new* failure category a future npm might
+   add — aborts the run rather than passing, so an unexpected shape can never be
+   mistaken for a clean signature.
 5. **Extract** — copies `dist/bundle/index.cjs` from the unpacked tarball over
    `vendor/ynab-mcp/index.cjs`.
 6. **Re-hash + rewrite the marker** — recomputes the SHA-256 of both the
@@ -183,6 +188,44 @@ the marker is the single auditable record of the full provenance chain.
 > against the pinned version: SHA-512 SRI and SHA-1 both match the registry, and
 > the registry signature verified against npm's published keys
 > (`signature_status: "verified"`). The outcome is recorded in the marker.
+
+## The Node floor
+
+`vendor/ynab-mcp/NODE_VERSION` pins the minimum Node **major** the vendored
+bundle supports (issue #3) — a single bare integer, the one canonical value
+every enforcement point reads:
+
+- **`bin/node-floor.sh`** compares `node --version` against it and fails with
+  one actionable STDERR line (`workbench-ynab requires Node >= X; you have Y —
+  upgrade via …`). Both `/workbench-ynab:setup` (Step 1a) and `bin/launcher.sh`
+  run it, so interactive setup *and* scheduled runs fail fast instead of
+  letting the bundle die cryptically mid-boot.
+- **CI** (`.github/workflows/ci.yml`) runs the `test` job on both the floor
+  major and current LTS; the floor lane boots the bundle (the offline-boot
+  proof) on exactly that major.
+- **`tests/unit/node-floor.test.sh`** keeps the copies honest: the CI matrix
+  entry and the README's documented floor must match the canonical file, or
+  the suite fails.
+
+The floor is a **support policy, not a derived value** (decided on PR #205):
+it is the latest Node LTS major at the time the bundle was last (re)vendored.
+An earlier revision derived the floor from the incoming package's
+`engines.node` with a shell re-implementation of node-semver's operator
+grammar; three review rounds of corner cases (operator-blind upper bounds,
+`>N` desugaring, hyphen ranges, …) showed that treadmill never ends — and an
+npm tarball carries no `node_modules`, so a **transitive** dependency's
+constraint was invisible to that read anyway. The policy replaces all of it:
+one number, set by a human, validated by a boot proof.
+
+**Re-vendoring never touches the floor.** `bin/revendor.sh` reports the
+pinned value in its summary and reminds the operator, in its printed next
+steps, to re-check the LTS line: if a newer LTS has shipped since the last
+bump, update `vendor/ynab-mcp/NODE_VERSION` — and the README bullet and the
+ci.yml matrix entry with it (`tests/unit/node-floor.test.sh` fails until all
+three agree). The **CI floor lane** — which boots the vendored bundle on
+exactly the floor major — is what proves the bundle actually runs on the
+pinned floor: a re-vendored bundle that needs a newer runtime fails CI before
+it ships, no metadata read required.
 
 ## Verifying the result
 

@@ -38,7 +38,8 @@ loader, the JSON Schema, or any default.
 | Key | Type | Required | Summary |
 |---|---|---|---|
 | `schema_version` | integer | **required** | Config schema version, for forward migration. |
-| `budget` | object | **required** | The target YNAB budget to review. |
+| `budgets` | array | **required** | The YNAB budgets the plugin operates on (replaces the v1 singular `budget`). |
+| `default_budget` | string | optional | `label` of the entry used when a caller needs a single budget. |
 | `business` | object | optional | Side-business config (accounts, category group, expense categories). |
 | `tax_profile` | object | **required** | Data-driven, generic tax parameters. |
 | `mapping_rules` | array | optional | Payee/category → tax-line rules, expressed as data. |
@@ -54,26 +55,80 @@ loader, the JSON Schema, or any default.
 
 A monotonically increasing integer. Increment it when a breaking change to this
 shape ships; `/workbench-ynab:setup` and downstream migration can then detect and
-upgrade an older file. Current version: **`1`**.
+upgrade an older file. Current version: **`2`** (the multi-budget shape, issue
+#84 — version 1 had a singular `budget` object; see the
+[migration note](#migrating-a-v1-config-singular-budget) below).
 
 ```json
-"schema_version": 1
+"schema_version": 2
 ```
 
 ---
 
-### `budget` *(object, required)*
+### `budgets` *(array, required)*
 
-The YNAB budget to review. Replaces the prototype's hardcoded budget name.
+The YNAB budgets this plugin operates on. **Replaces the schema-v1 singular
+`budget` object**: config declares which budget(s) to target, and every skill
+resolves its budget set from this array instead of assuming one budget. At
+least one entry is required.
+
+> **Scope note.** Per-budget overrides are **resolved by skills** as each skill
+> is built (the review, monitor, and tax-tracker issues own their own budget
+> iteration) — this config layer delivers the contract only: the shape, the
+> loader helpers ([`config-loader.md`](config-loader.md)), and the migration.
+
+Each entry:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `name` | string | **required** | Human-readable budget name as shown in YNAB. |
-| `id` | string \| null | optional | YNAB budget id (UUID). When `null`, the budget is resolved by `name`. |
+| `budget_id` | string | one of id/name | YNAB budget id (UUID). Preferred when known — ids are rename-proof. |
+| `budget_name` | string | one of id/name | Human-readable budget name as shown in YNAB; resolved to an id at runtime. |
+| `label` | string | **required** | Human display string, unique across the array. The lookup key for `_cfg_budget_field` and `default_budget`. |
+| `role` | string | **required** | Role/tag, e.g. `personal`, `business`, `archive`. Free-form; skills may group or filter by it. |
+| `business_category_group` | string | optional | Per-budget override: YNAB category group holding this budget's business expense categories. |
+| `tax_profile_path` | string | optional | Per-budget override: path to a tax-profile file linked to this budget (`~`/env-var expansion at use time), so Schedule C activity attributes to the correct budget. |
+| `monitoring_enabled` | boolean | optional (default `true`) | Per-budget override: whether the monitoring poll covers this budget. |
+| `write_back_enabled` | boolean | optional (default `true`) | Per-budget override: whether the write-back path may target this budget. The mandatory human approval gate applies regardless. |
 
 ```json
-"budget": { "name": "<YOUR_BUDGET_NAME>", "id": null }
+"budgets": [
+  { "label": "Personal", "role": "personal",
+    "budget_name": "<YOUR_PERSONAL_BUDGET_NAME>" },
+  { "label": "Business", "role": "business",
+    "budget_id": "<YOUR_BUSINESS_BUDGET_UUID>",
+    "business_category_group": "Business Expenses",
+    "write_back_enabled": false }
+]
 ```
+
+---
+
+### `default_budget` *(string, optional)*
+
+The `label` of the `budgets` entry to use when a caller needs a single budget
+and does not specify one — the fallback that keeps single-budget users working
+without naming a budget everywhere. When absent, the **first** `budgets` entry
+is the default. A value matching no entry's `label` resolves to **nothing**
+(the loader emits empty; a typo surfaces loudly rather than silently picking a
+different budget).
+
+```json
+"default_budget": "Personal"
+```
+
+---
+
+### Migrating a v1 config (singular `budget`)
+
+An existing schema-v1 file — singular `budget`, no `budgets` key — **keeps
+working without manual editing**. The loader ([`bin/config.sh`](config-loader.md))
+applies the migration **at read time, in memory**: `_migrate_config` synthesizes
+a single-entry `budgets` array from the legacy `budget.name`/`budget.id`
+(`label` = the budget name, `role` = `personal` — the v1 shape modeled one
+personal budget whose side-business lived in the `business` block). The file on
+disk is **never rewritten** and its `schema_version` stays `1` — the migration
+never auto-bumps it. Re-run `/workbench-ynab:setup` to upgrade the file itself
+to the v2 shape.
 
 ---
 
@@ -299,4 +354,6 @@ python3 -c 'import json,sys,jsonschema; \
 ```
 
 `assets/config.example.json` is kept valid against `assets/config.schema.json`;
-the unit tests in `tests/unit/config.test.sh` also read it through the loader.
+the unit tests in `tests/unit/config.test.sh` also read it through the loader,
+and `tests/unit/config-budgets.test.sh` covers the multi-budget helpers and the
+v1→v2 read-time migration.

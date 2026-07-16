@@ -31,7 +31,11 @@
   banner near the top of the body (before any tax figures), the compact tag repeats
   at the top of the tax section and in the @media print footer — never a slot, so
   fragment-stitching can never omit it. Canonical text: skills/shared/disclaimer.md.
+  Accessibility (issue #29): the palette is WCAG 2.1 AA-audited, severity is never
+  color-alone, and fragments follow the a11y contract in assets/report/SLOTS.md.
+  The full checklist the snapshot/verify step (M2-12) asserts lives at:
 -->
+<!-- a11y-baseline: docs/a11y-baseline.md -->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -44,12 +48,16 @@
   <style>
     /* ── Design tokens ──────────────────────────────────────────────────────
        Dark theme from the prototype's visual spec (SKILL.md 147-148):
-       navy headers, teal positive, coral warnings, amber attention. */
+       navy headers, teal positive, coral warnings, amber attention.
+       WCAG 2.1 AA audit (issue #29): every text token passes ≥4.5:1 on navy,
+       navy-soft, and row-alt — the stock coral failed and was lightened
+       in-place, same hue family. Audit table: docs/a11y-baseline.md;
+       regression gate: tests/unit/report-contrast.test.mjs. */
     :root {
       --navy: #1a1a2e;      /* headers / chrome           */
       --navy-soft: #232342; /* cards / raised surfaces     */
       --teal: #16a085;      /* positive values            */
-      --coral: #e74c3c;     /* warnings                   */
+      --coral: #ef6e5e;     /* warnings (AA-adjusted, issue #29) */
       --amber: #f39c12;     /* attention                  */
       --ink: #e8e8f0;       /* primary text on dark        */
       --ink-muted: #a4a4bf; /* secondary text             */
@@ -176,9 +184,14 @@
     .badge.is-attention { color: var(--amber); }
     .badge.is-warning   { color: var(--coral); }
 
-    /* ── Collapsible transaction lists ───────────────────────────────────────── */
+    /* ── Collapsible transaction lists ─────────────────────────────────────────
+       Native <details>/<summary> stays keyboard-operable (Tab to focus,
+       Enter/Space to toggle); the print rule below only overrides the DISPLAY
+       of a closed details' children, never the toggle affordance. The
+       focus-visible outline makes keyboard focus visible on the dark theme. */
     details { border: 1px solid var(--line); border-radius: var(--radius); margin: 8px 0; }
     summary { cursor: pointer; padding: 10px var(--gap); font-weight: 600; }
+    summary:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
     details[open] summary { border-bottom: 1px solid var(--line); }
     details .details__body { padding: var(--gap); }
 

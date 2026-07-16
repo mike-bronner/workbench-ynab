@@ -136,17 +136,52 @@ assert_contains     "stderr gives node install guidance" "$err" "node not found 
 assert_not_contains "token never appears on stderr"      "$err" "secret-token-DO-NOT-LEAK"
 assert_not_contains "token never appears on stdout"      "$out" "secret-token-DO-NOT-LEAK"
 
+# ── Case 2b: node below the pinned floor — actionable error, exit 1 (issue #3) ─
+# The launcher runs bin/node-floor.sh before exec'ing node, so a runtime older
+# than vendor/ynab-mcp/NODE_VERSION must fail fast with the upgrade message on
+# STDERR only — scheduled runs bypass interactive setup, and a stray stdout
+# byte would corrupt the MCP JSON-RPC handshake. The stub node answers ONLY
+# --version (one major below the canonical floor, read from the repo file so a
+# future floor bump never stales this case) and records any other invocation:
+# reaching the exec with an under-floor node would be the exact cryptic-boot
+# failure the gate exists to prevent.
+echo "node below the pinned floor — upgrade guidance on stderr, exit 1, clean stdout:"
+NODE_FLOOR_PIN="$(tr -d '[:space:]' < "$REPO_ROOT/vendor/ynab-mcp/NODE_VERSION")"
+BELOW_FLOOR_V="v$((NODE_FLOOR_PIN - 1)).0.0"
+STUB2B="$SANDBOX/case2b-bin"
+CAPTURE2B="$SANDBOX/case2b-node-capture.txt"
+seed_coreutils "$STUB2B"
+make_stub "$STUB2B" security 'echo "secret-token-DO-NOT-LEAK"'
+# Stub bodies are literal by design: they expand when the stub RUNS.
+# shellcheck disable=SC2016
+make_stub "$STUB2B" node \
+  'if [ "${1:-}" = "--version" ]; then echo "'"$BELOW_FLOOR_V"'"; exit 0; fi' \
+  'echo "ARGV: $*" > "$NODE_CAPTURE"' \
+  'exit 0'
+out="$(NODE_CAPTURE="$CAPTURE2B" PATH="$STUB2B" "$BASH_BIN" "$LAUNCHER" 2>"$SANDBOX/case2b.err")"; rc=$?
+err="$(cat "$SANDBOX/case2b.err")"
+assert_eq           "exit code is 1"                    "1" "$rc"
+assert_empty        "stdout is empty"                   "$out"
+assert_contains     "stderr states the required floor"  "$err" "workbench-ynab requires Node >= $NODE_FLOOR_PIN"
+assert_contains     "stderr names the installed version" "$err" "you have $BELOW_FLOOR_V"
+assert_empty        "node is never exec'd on the bundle under an unsupported major" "$(cat "$CAPTURE2B" 2>/dev/null)"
+assert_not_contains "token never appears on stderr"     "$err" "secret-token-DO-NOT-LEAK"
+assert_not_contains "token never appears on stdout"     "$out" "secret-token-DO-NOT-LEAK"
+
 # ── Case 3: happy path — exports token, execs node on the shim, clean stdout ──
 echo "happy path — exports YNAB_ACCESS_TOKEN and execs node on the bin/ynab-mcp shim:"
 STUB3="$SANDBOX/case3-bin"
 CAPTURE="$SANDBOX/node-capture.txt"
 seed_coreutils "$STUB3"
 make_stub "$STUB3" security 'echo "happy-token-12345"'
-# fake node: record argv + the exported token env to a capture file, emit NOTHING
-# to stdout (a stray stdout byte would corrupt the real MCP handshake), exit 0.
+# fake node: answer the floor gate's --version probe with a far-future major
+# (so the issue #3 version gate passes regardless of the pinned floor), then
+# record argv + the exported token env to a capture file, emit NOTHING to
+# stdout (a stray stdout byte would corrupt the real MCP handshake), exit 0.
 # Stub bodies below are literal by design: they expand when the stub RUNS.
 # shellcheck disable=SC2016
 make_stub "$STUB3" node \
+  'if [ "${1:-}" = "--version" ]; then echo "v999.0.0"; exit 0; fi' \
   'echo "ARGV: $*" > "$NODE_CAPTURE"' \
   'echo "TOKEN_ENV: ${YNAB_ACCESS_TOKEN:-<unset>}" >> "$NODE_CAPTURE"' \
   'echo "fake-node: started" 1>&2' \

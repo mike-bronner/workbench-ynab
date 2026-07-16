@@ -1,9 +1,24 @@
 {
-  "schema_version": 1,
-  "budget": {
-    "name": "<YOUR_BUDGET_NAME>",
-    "id": null
-  },
+  "schema_version": 2,
+  "budgets": [
+    {
+      "label": "Personal",
+      "role": "personal",
+      "budget_name": "<YOUR_PERSONAL_BUDGET_NAME>",
+      "monitoring_enabled": true,
+      "write_back_enabled": true
+    },
+    {
+      "label": "Business",
+      "role": "business",
+      "budget_id": "<YOUR_BUSINESS_BUDGET_UUID>",
+      "business_category_group": "Business Expenses",
+      "tax_profile_path": "~/Documents/Claude/Tax/business-profile.json",
+      "monitoring_enabled": true,
+      "write_back_enabled": false
+    }
+  ],
+  "default_budget": "Personal",
   "business": {
     "name": "<YOUR_BUSINESS_NAME>",
     "accounts": ["<YOUR_BUSINESS_CHECKING_ACCOUNT>"],

@@ -109,6 +109,31 @@ terminal per-op `error` naming `transfer_leg_hard_block`; the delete tool is
 never invoked for it, and a twin read that fails is a per-op read error, never
 a skipped check.
 
+The same live twin read also feeds the **surviving-twin liveness + drift gate**
+(issue #151): when the victim itself has **not** drifted (a stale victim is
+already skipped), the twin must be proven **alive** — a comparable live read —
+and **unchanged** on the evidence fields the human approved (`payee_name`,
+`amount`, `date`). A twin that no longer exists aborts the op with a terminal
+per-op `error` naming `twin_missing`; a twin that materially changed aborts with
+`twin_drifted`. Without this gate, a twin deleted or edited by another process
+during the generate → approve → apply window would leave the victim's own
+`before` snapshot unchanged — the op is not stale — and the delete would remove
+the **only remaining copy**: the exact outcome the `twin_is_victim` guard
+prevents, reached via twin-side staleness instead of a malformed op.
+
+The live gate is decisive for **external-process** staleness only. Every op's
+liveness reads run during the executor's **prepare phase** — `applyChangeset`
+prepares every op before dispatching **any** mutation — so a **batch-mate's**
+pending delete of the twin is invisible to it: in a reciprocal pair (op1:
+victim=A/twin=B, op2: victim=B/twin=A) each op reads the other side as still
+alive, both pass, and both copies are deleted. That vector is closed
+**statically** in the pre-flight instead: `findBatchTwinCollisions` rejects any
+change-set where one delete op's victim (`transaction_id`) is another delete
+op's surviving twin (`twin.id`) — reciprocal pairs and overlapping chains alike
+— returning `{ ok: false, reason: 'twin_batch_collision', batchCollisions }`
+**before the executor runs** (dry-run included; no read, no delete, no port
+touched), so batch-mates can never delete each other's survivors.
+
 ### 5. Audit the full before-snapshot, before the delete
 
 YNAB deletes are effectively irreversible from the API surface, so the M4-3 audit
@@ -124,7 +149,10 @@ a crash mid-delete still leaves the snapshot.
 ## Tool resolution — namespaced, never hard-coded
 
 The single delete tool is resolved from the guardrail's exported `ALLOWED_TOOLS`
-by suffix (`DELETE_TOOL`), and `buildToolMap()` supplies `{ delete_duplicate:
+by suffix (`DELETE_TOOL`, via `resolveDeleteTool` — which asserts **exactly one**
+match and throws fail-closed on zero or several, issue #151, so a future
+allow-list entry sharing the suffix can never silently receive irreversible
+deletes), and `buildToolMap()` supplies `{ delete_duplicate:
 DELETE_TOOL }` as the executor's registration point — **no literal
 `mcp__plugin_workbench-ynab_ynab__*` name lives in the module** (the issue #87
 guard stays green). The read tools the runtime wires into the ports — the

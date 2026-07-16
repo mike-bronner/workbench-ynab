@@ -49,6 +49,88 @@ test_references_keychain_entry() {
   assert_contains "$body" 'add-generic-password -s "ynab-mcp" -a "access-token"' "store with -U"
 }
 
+# --- Step 1a Node-floor gate: extract-and-RUN (issue #3, review round 2) -----
+# Grepping the whole command file for needles is hollow — both strings also
+# appear in comment prose, so the test stayed green with the executable gate
+# deleted. Instead, mirror the extract_step4_block convention
+# (tests/unit/setup-config-write.test.sh): pull Step 1a's fenced bash block out
+# and actually execute it against a stubbed environment.
+
+# Extract the first fenced bash block of Step 1 (the prereq check ending in the
+# Node-floor gate).
+extract_step1a_block() {
+  awk '/^## Step 1 /{s=1; next} s && /^## /{exit}
+       s && /^```bash$/{f=1; next} f && /^```$/{exit} f{print}' "$CMD"
+}
+
+# run_step1a <floor-gate-rc> — execute the extracted block with CLAUDE_PLUGIN_ROOT
+# pointing at a sandbox whose bin/node-floor.sh stub exits <floor-gate-rc>
+# (printing the real gate's actionable STDERR line when non-zero), and with
+# stubbed node/jq/security first on PATH. Captures S1_OUT / S1_ERR / S1_RC.
+run_step1a() {
+  local gate_rc="$1" sb block
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/root/bin" "$sb/root/vendor/ynab-mcp" "$sb/stubs"
+  printf '18\n' > "$sb/root/vendor/ynab-mcp/NODE_VERSION"
+  if [ "$gate_rc" -eq 0 ]; then
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$sb/root/bin/node-floor.sh"
+  else
+    printf '#!/usr/bin/env bash\necho "ynab-mcp: workbench-ynab requires Node >= 18; you have v17.0.0 — upgrade via nvm" 1>&2\nexit 1\n' \
+      > "$sb/root/bin/node-floor.sh"
+  fi
+  printf '#!/usr/bin/env bash\necho "v18.20.0"\n' > "$sb/stubs/node"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$sb/stubs/jq"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$sb/stubs/security"
+  chmod +x "$sb/root/bin/node-floor.sh" "$sb/stubs/node" "$sb/stubs/jq" "$sb/stubs/security"
+  block="$(extract_step1a_block)"
+  set +e
+  S1_OUT="$(CLAUDE_PLUGIN_ROOT="$sb/root" PATH="$sb/stubs:$PATH" \
+    bash -c "$block" 2>"$sb/err")"
+  S1_RC=$?
+  set -e
+  S1_ERR="$(cat "$sb/err")"
+  rm -rf "$sb"
+}
+
+# The extraction finds the right block: it must carry the executable gate and
+# the canonical-marker read (needles scoped to the BLOCK, not comment prose).
+test_step1a_block_extracts() {
+  local block; block="$(extract_step1a_block)"
+  # The needles are literal command source text — never expanded here.
+  # shellcheck disable=SC2016
+  assert_contains "$block" 'if ! bash "${CLAUDE_PLUGIN_ROOT}/bin/node-floor.sh"' \
+    "the extracted Step 1a block runs the shared Node-floor gate as a hard stop"
+  # shellcheck disable=SC2016
+  assert_contains "$block" 'vendor/ynab-mcp/NODE_VERSION' \
+    "the extracted Step 1a block reads the canonical floor marker"
+}
+
+# AC 5 enforcement: with a below-floor node (gate stub exits 1) the block must
+# hard-stop — non-zero exit, the actionable message on stderr, and the gate
+# itself adding ZERO stdout bytes. (The prior on-PATH check legitimately echoes
+# its ✅ line to stdout — setup's stdout is not a protocol channel — so assert
+# the gate's own stdout-cleanliness, not whole-flow emptiness.) Deleting the
+# version-check block from the command makes this exit 0 and the test fail.
+test_step1a_gate_blocks_below_floor_node() {
+  run_step1a 1
+  assert_eq 1 "$S1_RC" "Step 1a must exit non-zero when the floor gate fails"
+  assert_contains "$S1_ERR" "workbench-ynab requires Node >=" \
+    "the gate's actionable message must reach stderr"
+  assert_eq "✅ node, jq, security all present" "$S1_OUT" \
+    "stdout must end at the on-PATH ✅ line — the failed gate adds no bytes"
+}
+
+# With the gate passing, the block completes and reports both ✅ lines.
+test_step1a_gate_passes_at_floor() {
+  run_step1a 0
+  assert_eq 0 "$S1_RC" "Step 1a must exit 0 when the floor gate passes"
+  assert_contains "$S1_OUT" "✅ node, jq, security all present" \
+    "the on-PATH check reports success"
+  assert_contains "$S1_OUT" "meets the Node >= 18 floor" \
+    "the version check reports the floor met (marker value + node stub)"
+  assert_eq "" "$S1_ERR" "no stderr on the happy path"
+}
+
 # It sources tool names from the SSoT rather than inlining them.
 test_references_tool_ssot() {
   assert_contains "$(cat "$CMD")" "skills/protocol/ynab-tools.md" \

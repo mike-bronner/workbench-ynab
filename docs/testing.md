@@ -166,6 +166,63 @@ Existing fixtures:
 | `empty-budget.json` | brand-new budget, no accounts/transactions | GAP-4 |
 | `hostile/hostile-transactions.json` | emoji memo, zero-amount, HTML-injection, null fields, very long memo | GAP-13 / GAP-18 |
 | `hostile/malformed-changeset.json` | reject-path samples for the M4 change-set validator (#52) | M4-1 |
+| `mock-budget.json` | M4 write-back sandbox: uncategorized + miscategorized txns, a duplicate pair, allocation headroom, an account mid-reconcile, a disguised transfer leg, a split parent | M4-12 (#55) |
+
+## Mock YNAB MCP (the M4 write-back sandbox)
+
+`tests/lib/mock-ynab-mcp.cjs` is the **in-process mock YNAB MCP** the M4
+write-back tests target (issue #55, M4-12), backed by
+`tests/fixtures/mock-budget.json`. It lives under `tests/lib/` — a helper,
+never discovered as a test.
+
+**How tests point the executor at the mock vs the vendored bundle.** The apply
+executor (M4-4) and every write-path handler (M4-6..M4-9) take their I/O as
+**injected ports** — `callTool`, `readLiveState`, `applyOp`, `authPreflight`
+(see `skills/apply-executor.md`). Production wires those ports to the vendored
+bundle's namespaced tools; tests wire the *same* ports to
+`createMockYnab(fixture).callTool`. The seam is the port, so executor and
+handler code is **identical in test and prod** — nothing is stubbed inside the
+code under test.
+
+**Same namespace, derived — never hard-coded.** Every tool id the mock speaks
+is the fully namespaced id the vendored bundle exposes. The ids are *derived*
+from the guardrail's exported `ALLOWED_TOOLS`/`DENIED_TOOLS`
+(`assets/write-safety-guardrail.js`, an allowlisted tool-name source per issue
+#87), so a namespace swap propagates here with no edit, and a bare or
+mis-namespaced name never resolves.
+
+**Deliberately in-process, not a stdio MCP server.** Because the seam is the
+injected port, there is no JSON-RPC transport, no child process, and no
+stdout/stderr discipline to get wrong — and the mock runs in the
+no-`node_modules` lane. (The stdio stdout-is-JSON-RPC rule therefore doesn't
+apply; it would only bind if the mock ever became a stdio server.)
+
+What it provides:
+
+- **Reads** (`ynab_list_*`, `ynab_get_*`) served from the in-memory fixture —
+  responses carry the shape-evidence fields (`subtransactions`,
+  `transfer_account_id`, `transfer_transaction_id`) so the #49 live-read hard
+  blocks are exercisable end to end.
+- **Mutations** (`ynab_update_transaction(s)`, `ynab_update_category`,
+  `ynab_delete_transaction`, `ynab_reconcile_account`) that update the
+  in-memory state — a read after a write reflects the change
+  (drift/idempotency assertions).
+- **A call log** — every invocation (name + args) recorded in `callLog`, with
+  `callsTo(toolId)` for per-tool assertions.
+- **The never-allow gate** — any create/transfer/payment tool throws and the
+  attempt is recorded in `neverAllowAttempts` (the never-move-money invariant).
+- **Drift injection** — `injectDrift(mutate)` hands the raw in-memory budget to
+  the test between proposal-generation and apply (M4-4 drift detection, M4-8
+  stale-victim aborts).
+
+Where the suites live:
+
+- `tests/unit/mock-ynab-mcp.test.mjs` — mock unit tests, dependency-free, run
+  by `scripts/test.sh` in the no-`node_modules` lane.
+- `assets/test/e2e-write-back.test.js` — the end-to-end proposal → dry-run →
+  approval → apply test driving the **real** executor and the **real** audit
+  writer against the mock. It needs the assets deps (Ajv), so it runs in the
+  assets lane: `npm --prefix assets ci && npm --prefix assets test`.
 
 ## How to: update golden snapshots
 
@@ -209,6 +266,7 @@ So later issues plug in without inventing their own layout:
 | M2-12 review snapshot | golden-snapshot of review output | `tests/snapshot/*.test.mjs` + `__snapshots__/` |
 | M3 / M4 unit tests | pure-function coverage | `tests/unit/*.test.sh` or `*.test.mjs` |
 | M4 change-set validator (#52) | reject-path regression guard | iterate `tests/fixtures/hostile/malformed-changeset.json` |
+| M4-12 mock harness (#55) | in-process mock YNAB MCP + E2E write-back test | `tests/lib/mock-ynab-mcp.cjs`, `tests/fixtures/mock-budget.json`, `tests/unit/mock-ynab-mcp.test.mjs`, `assets/test/e2e-write-back.test.js` |
 
 > **Naming note.** Issue #14 loosely refers to `test/offline-boot.sh` (singular).
 > The canonical location is `tests/integration/offline-boot.test.sh` (plural

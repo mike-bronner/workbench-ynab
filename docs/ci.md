@@ -29,14 +29,14 @@ Workflow hygiene, common to all jobs:
 - Actions are pinned to exact majors (`actions/checkout@v4`,
   `actions/setup-node@v5`, `lycheeverse/lychee-action@v2`) — no `@latest`, no
   floating tags.
-- One current LTS Node (`lts/*`) — deliberately no multi-version matrix for v1.
+- The `test` job runs a two-lane Node matrix: the pinned floor (`24`, canonical value in `vendor/ynab-mcp/NODE_VERSION` — by policy the latest Node LTS major at the last bundle bump, issue #3 / PR #205) and current LTS (`lts/*`). The floor lane boots the vendored bundle on the oldest supported major, so a re-vendor that raises the requirement fails CI before it ships; `tests/unit/node-floor.test.sh` fails if the matrix entry drifts from the canonical floor file. The lanes diverge exactly when a new LTS ships — the cue to bump the floor. Every other job stays single-version.
 
 ### The jobs
 
 | Job | Runner | What it checks | A failure means |
 |---|---|---|---|
 | `lint` | ubuntu | `shellcheck` at **default severity** over every repo-authored `.sh` (`bin/`, `hooks/`, `scripts/`, `tests/` — helpers included), then `jq empty` over every git-tracked `.json` | A script has a shellcheck finding (any severity fails), or a JSON file doesn't parse |
-| `test` | ubuntu | First the swap-ready tool-name guard (`bin/check-tool-name-sources.sh`, issues #87/#131) as an explicit fail-fast step, then the full bash + Node suite via `scripts/test.sh`, including the offline-boot proof (#14) against `node vendor/ynab-mcp/index.cjs` | A concrete YNAB tool name appeared outside the documented allowlist, or a test failed — the runner prints which file; the offline-boot proof failing usually means a bad re-vendor |
+| `test` | ubuntu (Node floor + `lts/*` matrix) | First the swap-ready tool-name guard (`bin/check-tool-name-sources.sh`, issues #87/#131) as an explicit fail-fast step, then the full bash + Node suite via `scripts/test.sh`, including the offline-boot proof (#14) against `node vendor/ynab-mcp/index.cjs` | A concrete YNAB tool name appeared outside the documented allowlist, or a test failed — the runner prints which file; the offline-boot proof failing usually means a bad re-vendor |
 | `bash-3-2` | macOS | The persona footer-escaping suites (`tests/persona-loader.test.sh`, `tests/unit/html-escape.test.sh`) under the runner's **bash 3.2** | The escaping regressed on macOS's default bash while staying green on bash ≥5 (issue #126 AC-3) — or the runner image no longer ships bash 3.2 on PATH (the lane fails loudly rather than test the wrong interpreter) |
 | `assets-tests` | ubuntu | `npm --prefix assets ci && npm --prefix assets test` — the `assets/test/*.test.js` integration suites (apply executor, write-safety guardrail, handlers) against real installed deps | An assets integration test failed, or `package-lock.json` no longer reproduces an install |
 | `docs-links` | ubuntu | `lychee --offline --include-fragments` over `assets/*.md` and `docs/*.md` | A relative link or `#fragment` cross-reference in the docs points at nothing |

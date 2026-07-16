@@ -22,8 +22,18 @@
  *   3. STRONG CONFIRMATION GATE. requiresStrongConfirmation / destructiveOps mark
  *      every destructive op so M4-5 can route it through a separate AskUserQuestion
  *      affirmation, distinct from ordinary batch approval (see skills/delete-duplicate.md).
- *   4. DRIFT = ABORT FOR THAT OP. The executor re-reads live state and skips any op
- *      whose victim drifted from its `before` snapshot — it is never forced through.
+ *   4. DRIFT = ABORT FOR THAT OP, ON BOTH SIDES OF THE PAIR. The executor re-reads
+ *      live state and skips any op whose victim drifted from its `before` snapshot —
+ *      it is never forced through. And the SURVIVING TWIN is re-read live too (#151):
+ *      a twin that no longer exists or has materially changed since generation aborts
+ *      the op before dispatch, closing the EXTERNAL-PROCESS staleness window (a twin
+ *      deleted or edited outside this batch during generate → approve → apply). The
+ *      live gate cannot see a BATCH-MATE's pending delete — every op's liveness read
+ *      runs in the executor's prepare phase, before ANY delete dispatches — so that
+ *      vector is closed statically instead: the pre-flight rejects a change-set where
+ *      one op's victim is another op's surviving twin (findBatchTwinCollisions,
+ *      twin_batch_collision). Together the two guards keep twin-side staleness from
+ *      turning the delete into removing the only remaining copy.
  *   5. AUDIT BEFORE DELETE. makeAuditingDeleteApplyOp writes the full before-snapshot
  *      to the M4-3 audit log BEFORE the irreversible delete, so a crash mid-delete
  *      still leaves a record of exactly what was removed.
@@ -49,13 +59,38 @@ const { isTransferLeg } = require('./transaction-shape');
 const OP_TYPE = 'delete_duplicate';
 
 /**
+ * Resolve the single namespaced delete tool from an allow-list by suffix,
+ * asserting UNIQUENESS (issue #151). A `.find()` would silently take the first
+ * match, so a future allow-list entry sharing the `_delete_transaction` suffix
+ * could route irreversible deletes to the wrong tool without a whisper — on the
+ * one path where that must never happen. Fail-closed: zero or multiple matches
+ * throw instead of resolving.
+ * @param {readonly string[]} allowedTools the guardrail's exported allow-list.
+ * @returns {string} the one matching tool name.
+ * @throws {Error} when the suffix matches no tool or more than one.
+ */
+function resolveDeleteTool(allowedTools) {
+  const matches = (Array.isArray(allowedTools) ? allowedTools : [])
+    .filter((t) => typeof t === 'string' && t.endsWith('_delete_transaction'));
+  if (matches.length !== 1) {
+    throw new Error(
+      `delete-duplicate: expected exactly ONE *_delete_transaction tool on the guardrail allow-list, found ${matches.length}`
+      + `${matches.length > 0 ? ` (${matches.join(', ')})` : ''} — refusing to resolve the destructive delete tool (fail-closed).`,
+    );
+  }
+  return matches[0];
+}
+
+/**
  * The single namespaced delete tool, resolved from the guardrail's ledger-only
  * allow-list by suffix so no literal tool name is hard-coded here (issue #87
  * guard). The guardrail is the single source of truth; an MCP swap that renames
- * the suffix is a one-file edit there and this keeps resolving.
- * @type {string|undefined}
+ * the suffix is a one-file edit there and this keeps resolving. Uniqueness is
+ * asserted at resolution (resolveDeleteTool, issue #151) — an ambiguous or empty
+ * match throws at load time rather than silently picking a tool.
+ * @type {string}
  */
-const DELETE_TOOL = ALLOWED_TOOLS.find((t) => t.endsWith('_delete_transaction'));
+const DELETE_TOOL = resolveDeleteTool(ALLOWED_TOOLS);
 
 /** The surviving-twin evidence fields a delete op MUST carry (AC twin-evidence). */
 const TWIN_REQUIRED_FIELDS = Object.freeze(['id', 'payee_name', 'amount', 'date']);
@@ -180,6 +215,49 @@ function validateNotTransferLeg(op) {
       transfer_leg: legs,
     },
   };
+}
+
+/**
+ * Batch-level analogue of the per-op twin_is_victim guard (#151): within a single
+ * change-set, one delete op's SURVIVING TWIN must never be another delete op's
+ * VICTIM. Every op's twin-liveness read runs during the executor's prepare phase —
+ * applyChangeset prepares EVERY op before dispatching ANY mutation — so in a
+ * reciprocal pair (op1: victim=A/twin=B, op2: victim=B/twin=A) each op reads the
+ * other side as still alive, both pass the live twin gate, and both deletes
+ * dispatch: BOTH copies are removed. An overlapping chain (op1: victim=B/twin=A,
+ * op2: victim=C/twin=B) likewise deletes C's intended survivor B. The live gate
+ * cannot see a batch-mate's pending delete, so the collision is rejected
+ * statically here, before the executor runs. Same-op collisions
+ * (op.transaction_id === op.twin.id) are the per-op twin_is_victim guard's domain
+ * and are not re-reported; ops with malformed twin/victim ids are
+ * validateTwinEvidence's domain and are skipped.
+ * @param {readonly object[]} ops the change-set's operations (non-delete ops ignored).
+ * @returns {Array<{op_id:string|null, rule:string, reason:string, twin_id:string, victim_op_ids:(string|null)[]}>}
+ *   one entry per delete op whose surviving twin a batch-mate deletes; empty = clean.
+ */
+function findBatchTwinCollisions(ops) {
+  const deletes = (Array.isArray(ops) ? ops : [])
+    .filter((op) => op !== null && typeof op === 'object' && !Array.isArray(op) && op.type === OP_TYPE);
+  const collisions = [];
+  for (const op of deletes) {
+    const twinId = op.twin !== null && typeof op.twin === 'object' && !Array.isArray(op.twin)
+      && typeof op.twin.id === 'string' && op.twin.id.length > 0 ? op.twin.id : null;
+    if (twinId === null) continue;
+    const victimOps = deletes.filter((other) => other !== op && other.transaction_id === twinId);
+    if (victimOps.length === 0) continue;
+    const victimOpIds = victimOps.map((o) => (typeof o.id === 'string' ? o.id : null));
+    collisions.push({
+      op_id: typeof op.id === 'string' ? op.id : null,
+      rule: 'twin_batch_collision',
+      reason: `delete_duplicate op names surviving twin ${twinId}, but batch-mate op(s) `
+        + `${victimOpIds.map((id) => (id != null ? id : '(no id)')).join(', ')} name that same transaction as their VICTIM; `
+        + 'applying this change-set would delete the survivor this op\'s delete depends on, removing the only remaining copy. '
+        + 'The per-op live twin gate reads pre-dispatch state and cannot see a batch-mate\'s pending delete — rejected before any read or delete.',
+      twin_id: twinId,
+      victim_op_ids: victimOpIds,
+    });
+  }
+  return collisions;
 }
 
 /**
@@ -344,7 +422,11 @@ function makeAuditingDeleteApplyOp({ applyOp, audit, changeset, dryRun = false }
  *   1. Pre-validate twin evidence on EVERY delete_duplicate op. If any op lacks it,
  *      abort BEFORE the executor runs — no read, no delete, no port touched — and
  *      return { ok:false, reason:'twin_evidence_missing', twinErrors }. A destructive
- *      op without provable pairing must never reach an MCP call.
+ *      op without provable pairing must never reach an MCP call. The pre-flight also
+ *      rejects BATCH twin↔victim collisions (findBatchTwinCollisions): a change-set
+ *      whose ops delete each other's survivors aborts with
+ *      { ok:false, reason:'twin_batch_collision', batchCollisions } — the per-op live
+ *      twin gate reads pre-dispatch state and cannot catch a batch-mate.
  *   2. Delegate to applyChangeset with this path's toolMap. Dry-run by default; real
  *      apply requires dryRun:false and wraps applyOp to audit the before-snapshot
  *      before the delete.
@@ -388,12 +470,21 @@ async function applyDeleteDuplicates(changeset, options = {}) {
   if (twinErrors.length > 0) {
     return { ok: false, dry_run: dryRun, aborted: true, reason: 'twin_evidence_missing', twinErrors, results: [] };
   }
+  // BATCH TWIN↔VICTIM COLLISION (#151): one op's victim must not be another op's
+  // surviving twin. The live twin gate below runs during the executor's prepare
+  // phase — before ANY delete dispatches — so a reciprocal/overlapping pair passes
+  // it and then deletes both copies. Statically rejected here instead, dry-run
+  // included: no read, no delete, no executor.
+  const batchCollisions = findBatchTwinCollisions(ops);
+  if (batchCollisions.length > 0) {
+    return { ok: false, dry_run: dryRun, aborted: true, reason: 'twin_batch_collision', batchCollisions, results: [] };
+  }
 
   // Lazy-require the executor so importing this module's pure safety helpers does
   // NOT transitively pull in the Ajv-backed validator — keeping tests/unit/*.test.mjs
   // (CI, run with no node_modules) able to exercise twin validation / preview without
   // an install, faithful to the offline-boot constraint.
-  const { applyChangeset } = require('./apply-executor');
+  const { applyChangeset, isStale } = require('./apply-executor');
 
   // LIVE SHAPE RE-DERIVATION (GAP-19 / #49, fail-open fix). The snapshot check above
   // trusts the caller-supplied `op.before` / `op.twin`; the schema leaves the transfer
@@ -409,6 +500,8 @@ async function applyDeleteDuplicates(changeset, options = {}) {
   //     needed; see skills/delete-duplicate.md). A live transfer-leg twin proves the
   //     "duplicate pair" is really a legitimate transfer pair, so deleting the victim
   //     would be a wrong, irreversible delete even though the victim itself is clean.
+  // The same live twin read also feeds the twin LIVENESS + DRIFT gate (#151, below
+  // inline): a twin that is gone or materially changed aborts the op the same way.
   // Either live leg throws, which the executor records as a terminal per-op `error`
   // (never dispatched — the delete tool is unreachable for it) while the rest of the
   // batch proceeds under normal per-op semantics. Structurally fail-closed: the ONLY
@@ -431,15 +524,58 @@ async function applyDeleteDuplicates(changeset, options = {}) {
           throw err;
         }
         const twinId = op.twin && typeof op.twin.id === 'string' && op.twin.id.length > 0 ? op.twin.id : null;
-        if (twinId !== null && isTransferLeg(await readLiveState({ ...op, transaction_id: twinId }))) {
-          const err = new Error(
-            `transfer_leg_hard_block: delete_duplicate op ${op.id != null ? op.id : '(no id)'} pairs with a LIVE transfer-leg `
-            + 'TWIN (the live read of the surviving twin carries a non-null transfer_account_id / transfer_transaction_id); '
-            + 'the pair is a legitimate transfer, never duplicates — the victim delete is hard-blocked from the live state, '
-            + 'regardless of the op\'s snapshot evidence.',
-          );
-          err.rule = 'transfer_leg_hard_block';
-          throw err;
+        if (twinId !== null) {
+          const liveTwin = await readLiveState({ ...op, transaction_id: twinId });
+          if (isTransferLeg(liveTwin)) {
+            const err = new Error(
+              `transfer_leg_hard_block: delete_duplicate op ${op.id != null ? op.id : '(no id)'} pairs with a LIVE transfer-leg `
+              + 'TWIN (the live read of the surviving twin carries a non-null transfer_account_id / transfer_transaction_id); '
+              + 'the pair is a legitimate transfer, never duplicates — the victim delete is hard-blocked from the live state, '
+              + 'regardless of the op\'s snapshot evidence.',
+            );
+            err.rule = 'transfer_leg_hard_block';
+            throw err;
+          }
+          // SURVIVING-TWIN LIVENESS + DRIFT GATE (#151). AC6 (#62) drift-checks only
+          // the VICTIM; if the TWIN is deleted or materially changed by another
+          // process during the generate → approve → apply window, the victim's own
+          // `before` snapshot is unchanged — the op is NOT stale — and the delete
+          // would remove what is now the ONLY remaining copy: the exact outcome the
+          // twin_is_victim guard exists to prevent, reached via twin-side staleness.
+          // EXTERNAL processes only: this read runs in the executor's prepare phase,
+          // before ANY delete in the batch dispatches, so a batch-mate's pending
+          // delete of this twin is invisible here — that vector is rejected
+          // statically in the pre-flight (findBatchTwinCollisions, above).
+          // So before the victim can be dispatched, the twin must be proven ALIVE
+          // (a comparable live read) and UNCHANGED on the evidence fields the human
+          // approved (payee_name / amount / date — TWIN_REQUIRED_FIELDS minus the id
+          // the read itself resolved). Either failure throws, which the executor
+          // records as a terminal per-op `error` — the delete tool is unreachable.
+          // Decisive only when the victim itself is NOT stale: a stale victim is
+          // already skipped by the executor's own drift check (richer skip detail,
+          // pinned behavior), and a skipped op never deletes anything.
+          if (!isStale(op.before, live)) {
+            if (liveTwin === null || typeof liveTwin !== 'object' || Array.isArray(liveTwin)) {
+              const err = new Error(
+                `twin_missing: delete_duplicate op ${op.id != null ? op.id : '(no id)'} names a surviving twin (${twinId}) `
+                + 'whose live read resolved to nothing — the twin no longer exists, so deleting the victim would remove the '
+                + 'ONLY remaining copy of the transaction. Aborted before dispatch (fail-closed).',
+              );
+              err.rule = 'twin_missing';
+              throw err;
+            }
+            const drifted = TWIN_REQUIRED_FIELDS.filter((f) => f !== 'id' && liveTwin[f] !== op.twin[f]);
+            if (drifted.length > 0) {
+              const err = new Error(
+                `twin_drifted: delete_duplicate op ${op.id != null ? op.id : '(no id)'} carries surviving-twin evidence that no `
+                + `longer matches the live twin (${twinId}) on: ${drifted.join(', ')}. The twin the human approved as the `
+                + 'surviving copy has materially changed since the change-set was generated — the pairing is unproven, so the '
+                + 'victim delete is aborted before dispatch (fail-closed).',
+              );
+              err.rule = 'twin_drifted';
+              throw err;
+            }
+          }
         }
       }
       return live;
@@ -464,11 +600,13 @@ async function applyDeleteDuplicates(changeset, options = {}) {
 module.exports = {
   OP_TYPE,
   DELETE_TOOL,
+  resolveDeleteTool,
   TWIN_REQUIRED_FIELDS,
   VICTIM_SNAPSHOT_FIELDS,
   formatDollars,
   validateTwinEvidence,
   validateNotTransferLeg,
+  findBatchTwinCollisions,
   shapeVictimSnapshot,
   renderDeletePreview,
   requiresStrongConfirmation,
