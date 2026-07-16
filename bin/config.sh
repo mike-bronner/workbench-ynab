@@ -106,10 +106,13 @@ _cfg_budgets() {
 #   Echo one field of the budgets entry whose `label` equals LABEL, or nothing
 #   when the entry or field is absent. Unlike _cfg's `// empty` idiom this is
 #   null-aware, so a boolean `false` (e.g. write_back_enabled) reads back as
-#   the string "false" instead of vanishing.
+#   the string "false" instead of vanishing. Labels are documented-unique;
+#   should a config carry duplicates anyway, the FIRST matching entry wins
+#   outright — one value always comes back, never one line per duplicate —
+#   mirroring _cfg_default_budget's `.[0]` collapse below.
 _cfg_budget_field() {
   _migrate_config | jq -r --arg label "$1" --arg field "$2" \
-    '.budgets[]? | select(.label == $label) | .[$field] | if . == null then empty else . end' 2>/dev/null
+    'first(.budgets[]? | select(.label == $label)) | .[$field] | if . == null then empty else . end' 2>/dev/null
 }
 
 # _cfg_default_budget

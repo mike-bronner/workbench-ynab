@@ -64,6 +64,21 @@ jq 'del(.default_budget)' "$MULTI" > "$NODEFAULT"
 BADDEFAULT="$SANDBOX/baddefault.json"
 jq '.default_budget = "No Such Label"' "$MULTI" > "$BADDEFAULT"
 
+# Duplicate labels — documented-unique in the schema (prose only; JSON Schema
+# cannot enforce cross-item uniqueness), so the loader must collapse to the
+# FIRST match rather than emit one line per duplicate. The entries disagree on
+# write_back_enabled so a missing collapse would surface as "true\nfalse".
+DUPLABEL="$SANDBOX/duplabel.json"
+cat > "$DUPLABEL" <<'JSON'
+{
+  "schema_version": 2,
+  "budgets": [
+    { "label": "Twin", "role": "personal", "budget_name": "First Twin",  "write_back_enabled": true },
+    { "label": "Twin", "role": "business", "budget_name": "Second Twin", "write_back_enabled": false }
+  ]
+}
+JSON
+
 # Legacy schema-v1 fixture: singular `budget`, no `budgets` key.
 LEGACY="$SANDBOX/legacy.json"
 cat > "$LEGACY" <<'JSON'
@@ -110,6 +125,15 @@ test_budget_field_per_label() {
   assert_eq "true"  "$(YNAB_CONFIG_FILE="$MULTI" _cfg_budget_field 'Sandbox Personal' 'write_back_enabled')" "boolean true reads back"
   assert_eq "false" "$(YNAB_CONFIG_FILE="$MULTI" _cfg_budget_field 'Sandbox Business' 'write_back_enabled')" "boolean false reads back as 'false', not empty"
   assert_eq "" "$(YNAB_CONFIG_FILE="$MULTI" _cfg_budget_field 'No Such Label' 'role')" "unknown label emits nothing"
+}
+
+# duplicate labels collapse to the FIRST matching entry — one value comes back,
+# never one line per duplicate (a "true\nfalse" result would fail a naive
+# [ "$x" = "false" ] guard). Mirrors _cfg_default_budget's .[0] collapse.
+test_budget_field_duplicate_label_first_match_wins() {
+  assert_eq "First Twin" "$(YNAB_CONFIG_FILE="$DUPLABEL" _cfg_budget_field 'Twin' 'budget_name')" "first matching entry wins on a duplicate label"
+  assert_eq "true" "$(YNAB_CONFIG_FILE="$DUPLABEL" _cfg_budget_field 'Twin' 'write_back_enabled')" "boolean from the first entry only — never multi-line"
+  assert_eq "1" "$(YNAB_CONFIG_FILE="$DUPLABEL" _cfg_budget_field 'Twin' 'budget_name' | wc -l | tr -d ' ')" "exactly one output line"
 }
 
 # (c) a legacy-only config (`budget` singular, no `budgets`) synthesizes a

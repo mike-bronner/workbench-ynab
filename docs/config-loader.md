@@ -94,7 +94,7 @@ is ever hardcoded in the loader.
 | Helper | Emits |
 |---|---|
 | `_cfg_budgets` | The full `budgets` array as JSON. |
-| `_cfg_budget_field LABEL FIELD` | One field of the entry whose `label` equals `LABEL`. **Null-aware**, unlike `_cfg`'s `// empty` idiom: a boolean `false` (e.g. `write_back_enabled`) reads back as `false` instead of vanishing. |
+| `_cfg_budget_field LABEL FIELD` | One field of the entry whose `label` equals `LABEL`. **Null-aware**, unlike `_cfg`'s `// empty` idiom: a boolean `false` (e.g. `write_back_enabled`) reads back as `false` instead of vanishing. **First-match**: labels are documented-unique, but should duplicates exist the first matching entry wins outright — one value always comes back, never one line per duplicate. |
 | `_cfg_default_budget` | The entry whose `label` matches `default_budget`, or the **first** entry when `default_budget` is absent. A `default_budget` matching no label emits nothing — a typo surfaces as empty, never as a silently different budget. |
 
 ```bash
