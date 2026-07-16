@@ -718,6 +718,169 @@ test('(#151) a STALE victim with a missing twin is skipped-stale, not errored �
   assert.equal(apply.calls.length, 0, 'the delete tool must NEVER be invoked for a stale victim');
 });
 
+// --- (#151) batch twin↔victim collisions — multi-op, REAL mutating store ----
+//
+// Every other #151 test is single-op against a fixed-response stub, which cannot
+// exhibit the batch hole: the executor prepares EVERY op (all liveness reads)
+// before dispatching ANY delete, so two ops that delete each other's survivors
+// both read pre-dispatch state, both pass the live twin gate, and both dispatch.
+// These tests run a real in-memory store whose applyOp genuinely REMOVES rows,
+// so "both copies survive" is observed on actual state, not inferred from spies.
+
+/** A REAL mutating in-memory store: reads resolve current rows, applies DELETE them. */
+function makeStatefulStore(rows) {
+  const store = new Map(rows.map((r) => [r.id, clone(r)]));
+  const read = spy(async (op) => {
+    const row = store.get(op.transaction_id);
+    return row ? clone(row) : null;
+  });
+  const apply = spy(async (toolName, op) => {
+    store.delete(op.transaction_id);
+    return { ok: true };
+  });
+  return { store, read, apply };
+}
+
+/** Clone the fixture's delete op with the given op / victim / twin ids swapped in. */
+function makeDeleteOp(base, { opId, victimId, twinId }) {
+  const op = clone(base.operations[0]);
+  op.id = opId;
+  op.transaction_id = victimId;
+  op.twin = { ...op.twin, id: twinId };
+  return op;
+}
+
+/** A live row for the given id, shaped like the fixture victim (duplicates share fields). */
+const makeRow = (base, id) => ({ id, ...clone(base.operations[0].before) });
+
+test('(#151) a RECIPROCAL twin↔victim pair aborts the change-set — a batch can never delete both copies', async () => {
+  // op1: victim=A/twin=B, op2: victim=B/twin=A. Both ops' liveness reads would run
+  // pre-dispatch and see the other side alive — without the batch guard, BOTH
+  // deletes dispatch and the store is emptied. The pre-flight must reject instead.
+  const base = loadFixture('delete-duplicate.example.json');
+  const [idA, idB] = ['t0000000-0000-4000-8000-00000000d00a', 't0000000-0000-4000-8000-00000000d00b'];
+  const cs = {
+    ...base,
+    operations: [
+      makeDeleteOp(base, { opId: 'op-delete-duplicate-0001', victimId: idA, twinId: idB }),
+      makeDeleteOp(base, { opId: 'op-delete-duplicate-0002', victimId: idB, twinId: idA }),
+    ],
+  };
+  const { store, read, apply } = makeStatefulStore([makeRow(base, idA), makeRow(base, idB)]);
+  const audit = auditSpy();
+
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: read,
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit,
+  });
+
+  assert.equal(out.ok, false);
+  assert.equal(out.aborted, true);
+  assert.equal(out.reason, 'twin_batch_collision');
+  assert.deepEqual(out.results, []);
+  // BOTH sides of the reciprocal pair are reported.
+  assert.equal(out.batchCollisions.length, 2);
+  assert.deepEqual(out.batchCollisions.map((c) => c.rule), ['twin_batch_collision', 'twin_batch_collision']);
+  assert.deepEqual(out.batchCollisions[0], {
+    op_id: 'op-delete-duplicate-0001',
+    rule: 'twin_batch_collision',
+    reason: out.batchCollisions[0].reason,
+    twin_id: idB,
+    victim_op_ids: ['op-delete-duplicate-0002'],
+  });
+  // No port was touched — not the read, not the delete, not the audit.
+  assert.equal(read.calls.length, 0);
+  assert.equal(apply.calls.length, 0);
+  assert.equal(audit.calls.length, 0);
+  // The real store still holds BOTH copies — the outcome the guard exists for.
+  assert.deepEqual([...store.keys()].sort(), [idA, idB]);
+});
+
+test('(#151) an OVERLAPPING chain aborts too — a victim\'s intended survivor is a batch-mate\'s victim', async () => {
+  // op1: victim=B/twin=A, op2: victim=C/twin=B. Without the batch guard the batch
+  // deletes C AND its intended survivor B, leaving only A. The pre-flight must
+  // reject, naming op2 (whose survivor a batch-mate deletes) and op1 (the deleter).
+  const base = loadFixture('delete-duplicate.example.json');
+  const [idA, idB, idC] = [
+    't0000000-0000-4000-8000-00000000d00a',
+    't0000000-0000-4000-8000-00000000d00b',
+    't0000000-0000-4000-8000-00000000d00c',
+  ];
+  const cs = {
+    ...base,
+    operations: [
+      makeDeleteOp(base, { opId: 'op-delete-duplicate-0001', victimId: idB, twinId: idA }),
+      makeDeleteOp(base, { opId: 'op-delete-duplicate-0002', victimId: idC, twinId: idB }),
+    ],
+  };
+  const { store, read, apply } = makeStatefulStore([makeRow(base, idA), makeRow(base, idB), makeRow(base, idC)]);
+  const audit = auditSpy();
+
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: read,
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit,
+  });
+
+  assert.equal(out.ok, false);
+  assert.equal(out.aborted, true);
+  assert.equal(out.reason, 'twin_batch_collision');
+  assert.equal(out.batchCollisions.length, 1);
+  assert.equal(out.batchCollisions[0].op_id, 'op-delete-duplicate-0002');
+  assert.equal(out.batchCollisions[0].twin_id, idB);
+  assert.deepEqual(out.batchCollisions[0].victim_op_ids, ['op-delete-duplicate-0001']);
+  assert.equal(read.calls.length, 0);
+  assert.equal(apply.calls.length, 0);
+  assert.equal(audit.calls.length, 0);
+  // Nothing was deleted — all three rows survive.
+  assert.deepEqual([...store.keys()].sort(), [idA, idB, idC]);
+});
+
+test('(#151) DISTINCT duplicate pairs in one batch proceed — the batch guard adds no false positives, and the store proves the harness mutates', async () => {
+  // op1: victim=A/twin=B, op2: victim=C/twin=D — no cross-op collision. Both apply
+  // for real against the mutating store: exactly the victims vanish, both survivors
+  // remain. This also proves makeStatefulStore genuinely deletes, so the two abort
+  // tests above assert "store unchanged" against a harness that COULD have emptied it.
+  const base = loadFixture('delete-duplicate.example.json');
+  const [idA, idB, idC, idD] = [
+    't0000000-0000-4000-8000-00000000d00a',
+    't0000000-0000-4000-8000-00000000d00b',
+    't0000000-0000-4000-8000-00000000d00c',
+    't0000000-0000-4000-8000-00000000d00d',
+  ];
+  const cs = {
+    ...base,
+    operations: [
+      makeDeleteOp(base, { opId: 'op-delete-duplicate-0001', victimId: idA, twinId: idB }),
+      makeDeleteOp(base, { opId: 'op-delete-duplicate-0002', victimId: idC, twinId: idD }),
+    ],
+  };
+  const { store, read, apply } = makeStatefulStore([idA, idB, idC, idD].map((id) => makeRow(base, id)));
+
+  const out = await applyDeleteDuplicates(cs, {
+    activeBudgetId: cs.budget_id,
+    dryRun: false,
+    readLiveState: read,
+    applyOp: apply,
+    authPreflight: okPreflight(),
+    audit: auditSpy(),
+  });
+
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.results.map((r) => r.status), [STATUS.APPLIED, STATUS.APPLIED]);
+  assert.equal(apply.calls.length, 2);
+  assert.ok(apply.calls.every((c) => c[0] === DELETE_TOOL));
+  // Exactly the victims were removed; both survivors remain.
+  assert.deepEqual([...store.keys()].sort(), [idB, idD]);
+});
+
 test('(#151) an unchanged live twin lets a clean delete proceed — the gate adds no false positives', async () => {
   const cs = loadFixture('delete-duplicate.example.json');
   const twinId = cs.operations[0].twin.id;

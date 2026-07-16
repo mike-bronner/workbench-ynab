@@ -25,6 +25,7 @@ const {
   formatDollars,
   validateTwinEvidence,
   validateNotTransferLeg,
+  findBatchTwinCollisions,
   shapeVictimSnapshot,
   renderDeletePreview,
   requiresStrongConfirmation,
@@ -173,6 +174,71 @@ test('a twin amount of 0 is accepted (a real $0.00 transaction is valid evidence
   const op = validOp();
   op.twin.amount = 0;
   assert.equal(validateTwinEvidence(op).valid, true);
+});
+
+// --- findBatchTwinCollisions (#151: batch twin↔victim collisions) ------------
+
+/** A second schema-shaped delete op, a distinct pair from validOp's. */
+const validOp2 = () => {
+  const op = validOp();
+  op.id = 'op-delete-duplicate-0002';
+  op.transaction_id = 't-victim-2';
+  op.twin = { ...op.twin, id: 't-survivor-2' };
+  return op;
+};
+
+test('a RECIPROCAL twin↔victim pair is flagged on both ops (each deletes the other\'s survivor)', () => {
+  const op1 = validOp(); // victim=t-victim, twin=t-survivor
+  const op2 = validOp2();
+  op2.transaction_id = op1.twin.id; // victim=t-survivor …
+  op2.twin = { ...op2.twin, id: op1.transaction_id }; // … twin=t-victim
+  const collisions = findBatchTwinCollisions([op1, op2]);
+  assert.equal(collisions.length, 2, 'BOTH sides of a reciprocal pair are collisions');
+  assert.deepEqual(collisions.map((c) => c.rule), ['twin_batch_collision', 'twin_batch_collision']);
+  assert.deepEqual(collisions.map((c) => c.op_id), [op1.id, op2.id]);
+  assert.deepEqual(collisions[0], {
+    op_id: op1.id,
+    rule: 'twin_batch_collision',
+    reason: collisions[0].reason,
+    twin_id: op1.twin.id,
+    victim_op_ids: [op2.id],
+  });
+  assert.match(collisions[0].reason, /only remaining copy/i);
+});
+
+test('an OVERLAPPING chain is flagged on the op whose survivor a batch-mate deletes', () => {
+  // op1: victim=B/twin=A, op2: victim=C/twin=B — op2's survivor B is op1's victim.
+  const op1 = validOp();
+  op1.transaction_id = 't-B';
+  op1.twin = { ...op1.twin, id: 't-A' };
+  const op2 = validOp2();
+  op2.transaction_id = 't-C';
+  op2.twin = { ...op2.twin, id: 't-B' };
+  const collisions = findBatchTwinCollisions([op1, op2]);
+  assert.equal(collisions.length, 1, 'only the op whose survivor is a batch victim collides');
+  assert.equal(collisions[0].op_id, op2.id);
+  assert.equal(collisions[0].twin_id, 't-B');
+  assert.deepEqual(collisions[0].victim_op_ids, [op1.id]);
+});
+
+test('distinct duplicate pairs in one change-set are clean — no false positives', () => {
+  assert.deepEqual(findBatchTwinCollisions([validOp(), validOp2()]), []);
+});
+
+test('a SAME-op victim===twin collision is NOT re-reported — that is twin_is_victim\'s domain', () => {
+  const op = validOp();
+  op.twin.id = op.transaction_id;
+  assert.deepEqual(findBatchTwinCollisions([op]), []);
+  assert.equal(validateTwinEvidence(op).error.rule, 'twin_is_victim'); // the per-op guard owns it
+});
+
+test('non-delete ops, malformed twins, and non-array input never throw and never collide', () => {
+  const op1 = validOp();
+  // A NON-delete op targeting the twin's id must not count as a batch victim.
+  const nonDelete = { id: 'x', type: 'categorize', transaction_id: op1.twin.id };
+  const noTwin = { ...validOp2(), twin: null }; // validateTwinEvidence's domain
+  assert.deepEqual(findBatchTwinCollisions([op1, nonDelete, noTwin, null, []]), []);
+  assert.deepEqual(findBatchTwinCollisions(undefined), []);
 });
 
 // --- requiresStrongConfirmation / destructiveOps ----------------------------

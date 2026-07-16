@@ -121,6 +121,19 @@ during the generate → approve → apply window would leave the victim's own
 the **only remaining copy**: the exact outcome the `twin_is_victim` guard
 prevents, reached via twin-side staleness instead of a malformed op.
 
+The live gate is decisive for **external-process** staleness only. Every op's
+liveness reads run during the executor's **prepare phase** — `applyChangeset`
+prepares every op before dispatching **any** mutation — so a **batch-mate's**
+pending delete of the twin is invisible to it: in a reciprocal pair (op1:
+victim=A/twin=B, op2: victim=B/twin=A) each op reads the other side as still
+alive, both pass, and both copies are deleted. That vector is closed
+**statically** in the pre-flight instead: `findBatchTwinCollisions` rejects any
+change-set where one delete op's victim (`transaction_id`) is another delete
+op's surviving twin (`twin.id`) — reciprocal pairs and overlapping chains alike
+— returning `{ ok: false, reason: 'twin_batch_collision', batchCollisions }`
+**before the executor runs** (dry-run included; no read, no delete, no port
+touched), so batch-mates can never delete each other's survivors.
+
 ### 5. Audit the full before-snapshot, before the delete
 
 YNAB deletes are effectively irreversible from the API surface, so the M4-3 audit
