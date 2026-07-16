@@ -26,20 +26,22 @@ Workflow hygiene, common to all jobs:
 - A `concurrency` group keyed on workflow name + ref with
   `cancel-in-progress: true` — a new push to the same PR supersedes the stale
   run instead of stacking runners.
-- Actions are pinned to exact majors (`actions/checkout@v4`,
-  `actions/setup-node@v5`, `lycheeverse/lychee-action@v2`) — no `@latest`, no
-  floating tags.
+- First-party `actions/*` actions are pinned to exact majors
+  (`actions/checkout@v4`, `actions/setup-node@v5`) — no `@latest`, no floating
+  tags. Third-party actions are pinned harder: to a full commit SHA with a
+  trailing version comment (`lycheeverse/lychee-action@<sha> # v2.9.0`) — see
+  the design decisions below.
 - One current LTS Node (`lts/*`) — deliberately no multi-version matrix for v1.
 
 ### The jobs
 
 | Job | Runner | What it checks | A failure means |
 |---|---|---|---|
-| `lint` | ubuntu | `shellcheck` at **default severity** over every repo-authored `.sh` (`bin/`, `hooks/`, `scripts/`, `tests/` — helpers included), then `jq empty` over every git-tracked `.json` | A script has a shellcheck finding (any severity fails), or a JSON file doesn't parse |
+| `lint` | ubuntu | `shellcheck` at **default severity** over every repo-authored `.sh` (`bin/`, `hooks/`, `scripts/`, `tests/` — helpers included), then `jq empty` over every git-tracked `.json` (an empty file list fails closed — the gate never reports success having validated nothing) | A script has a shellcheck finding (any severity fails), a JSON file doesn't parse, or `git ls-files` found no JSON at all |
 | `test` | ubuntu | First the swap-ready tool-name guard (`bin/check-tool-name-sources.sh`, issues #87/#131) as an explicit fail-fast step, then the full bash + Node suite via `scripts/test.sh`, including the offline-boot proof (#14) against `node vendor/ynab-mcp/index.cjs` | A concrete YNAB tool name appeared outside the documented allowlist, or a test failed — the runner prints which file; the offline-boot proof failing usually means a bad re-vendor |
 | `bash-3-2` | macOS | The persona footer-escaping suites (`tests/persona-loader.test.sh`, `tests/unit/html-escape.test.sh`) under the runner's **bash 3.2** | The escaping regressed on macOS's default bash while staying green on bash ≥5 (issue #126 AC-3) — or the runner image no longer ships bash 3.2 on PATH (the lane fails loudly rather than test the wrong interpreter) |
 | `assets-tests` | ubuntu | `npm --prefix assets ci && npm --prefix assets test` — the `assets/test/*.test.js` integration suites (apply executor, write-safety guardrail, handlers) against real installed deps | An assets integration test failed, or `package-lock.json` no longer reproduces an install |
-| `docs-links` | ubuntu | `lychee --offline --include-fragments` over `assets/*.md` and `docs/*.md` | A relative link or `#fragment` cross-reference in the docs points at nothing |
+| `docs-links` | ubuntu | `lychee --offline --include-fragments` over `assets/**/*.md` and `docs/**/*.md` — recursive, so nested docs (`assets/tax/README.md`, `assets/persona/*.md`, `docs/decisions/*.md`, …) are covered alongside the top-level files | A relative link or `#fragment` cross-reference anywhere in the docs tree points at nothing |
 
 ### Design decisions
 
@@ -65,10 +67,21 @@ suppressed at the finding site with `# shellcheck disable=<SC>` plus a
 one-line justification comment. Never re-silence a finding by lowering the
 severity flag or ignoring a rule globally.
 
-**The link check is offline.** Remote URLs are excluded (`--offline`), so the
-job is hermetic and can't flake on someone else's server. What it does enforce
-is exactly what human review kept catching by hand: relative links and
-internal `#fragment` references across the docs set must resolve.
+**The link check is offline and recursive.** Remote URLs are excluded
+(`--offline`), so the job is hermetic and can't flake on someone else's
+server. What it does enforce is exactly what human review kept catching by
+hand: relative links and internal `#fragment` references across the docs set
+must resolve. The globs are recursive (`assets/**/*.md`, `docs/**/*.md` —
+issue #191): `**` matches zero or more path components, so top-level files
+stay covered while nested markdown gates too.
+
+**Third-party actions are pinned to a full commit SHA.** First-party
+`actions/*` actions ride exact major tags, but a major tag is mutable — the
+publisher can repoint it at new code. For actions GitHub itself doesn't
+publish, that's a supply-chain surface, so the policy (set with the repo's
+first third-party action, `lycheeverse/lychee-action`, issue #191) is: pin to
+a full commit SHA with a trailing `# vX.Y.Z` comment naming the release the
+SHA corresponds to. To bump, update both the SHA and the comment.
 
 ### Reproducing locally
 
@@ -90,7 +103,7 @@ bash scripts/test.sh
 npm --prefix assets ci && npm --prefix assets test
 
 # docs-links (brew install lychee)
-lychee --offline --include-fragments --no-progress 'assets/*.md' 'docs/*.md'
+lychee --offline --include-fragments --no-progress 'assets/**/*.md' 'docs/**/*.md'
 ```
 
 ## Cutting a release

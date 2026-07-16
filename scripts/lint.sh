@@ -15,7 +15,9 @@
 #     a blanket flag.
 #
 #   * `jq empty` over every git-tracked *.json file — a malformed JSON file
-#     (plugin.json, hooks.json, schemas, fixtures, …) fails the run.
+#     (plugin.json, hooks.json, schemas, fixtures, …) fails the run. An empty
+#     file list also fails: like scripts/test.sh's run-nothing guard, this gate
+#     never reports success having validated nothing (issue #191).
 #
 # Requirements: shellcheck, jq, git — nothing else, matching the repo's
 # no-install test posture (docs/testing.md).
@@ -54,6 +56,12 @@ fi
 json_files=()
 while IFS= read -r f; do json_files+=("$f"); done < <(git ls-files -- '*.json')
 echo "▶ jq empty: ${#json_files[@]} JSON file(s)"
+# Fail closed on an empty list — mirrors scripts/test.sh's "refusing to exit 0
+# having run nothing" guard: zero-validated must never read as "all parse".
+if [ "${#json_files[@]}" -eq 0 ]; then
+  echo "✗ no tracked JSON files found — refusing to report success having validated nothing" >&2
+  fail=1
+fi
 for f in "${json_files[@]}"; do
   if ! jq empty "$f"; then
     echo "✗ invalid JSON: $f" >&2
