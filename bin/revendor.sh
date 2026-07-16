@@ -273,6 +273,26 @@ else
   log "  ✓ registry signature verified against npm's published keys"
 fi
 
+# --- Node floor (issue #3) ---------------------------------------------------
+# vendor/ynab-mcp/NODE_VERSION pins the minimum Node major the plugin supports.
+# POLICY (decided on PR #205): the floor IS the latest Node LTS major at the
+# time the bundle was last (re)vendored — a support policy set by a human, not
+# a value derived from upstream metadata. An earlier revision re-derived the
+# floor here from the incoming package's engines.node; a shell
+# re-implementation of node-semver's operator grammar kept sprouting corner
+# cases (three review rounds' worth), and an npm tarball carries no
+# node_modules, so transitive constraints were invisible to that read anyway.
+# The floor therefore never changes automatically: adopting new bundle bytes is
+# simply the moment the operator re-checks the LTS line (see the next steps
+# printed below). tests/unit/node-floor.test.sh keeps README + the ci.yml
+# matrix in sync with the pinned value, and the CI floor lane boots the bundle
+# on exactly that major — the boot proof, not metadata, is what validates the
+# floor against the new bundle. See docs/vendoring.md ("The Node floor").
+FLOOR_FILE="$VENDOR_DIR/NODE_VERSION"
+CUR_FLOOR=""
+[ -f "$FLOOR_FILE" ] && CUR_FLOOR="$(tr -d '[:space:]' < "$FLOOR_FILE")"
+FLOOR_NOTE="${CUR_FLOOR:-unset} (policy: latest Node LTS at vendor time — re-check on every bump; see next steps)"
+
 # --- Write the new bundle + rewrite the marker ------------------------------
 log "Bundle changed — updating $VENDORED_PATH and the marker…"
 cp "$SRC_BUNDLE" "$BUNDLE"
@@ -323,9 +343,14 @@ printf '  version:   %s → %s\n' "$PINNED_VERSION" "$VERSION"
 printf '  bundle:    %s → %s\n' "$(short "${OLD_BUNDLE_SHA:-none}")" "$(short "$NEW_BUNDLE_SHA")"
 printf '  tarball:   %s\n' "$(short "$TARBALL_SHA")"
 printf '  provenance: integrity ✓ (SHA-512 SRI + SHA-1 match registry); signature %s\n' "$SIG_STATUS"
+printf '  node floor: %s\n' "$FLOOR_NOTE"
 printf '  marker:    %s\n' "$VENDORED_PATH (vendored.json updated)"
 printf '\n'
 printf 'Next steps (NOT done for you):\n'
 printf '  1. Run the offline-boot verification before committing:\n'
 printf '       scripts/test.sh tests/integration/offline-boot.test.sh\n'
-printf '  2. Review the diff, then commit manually (no auto-commit).\n'
+printf '     (CI also boots the bundle on the pinned Node floor — vendor/ynab-mcp/NODE_VERSION.)\n'
+printf '  2. The floor policy is the LATEST Node LTS: if a newer LTS has shipped since\n'
+printf '     the last bump, update vendor/ynab-mcp/NODE_VERSION — and the README bullet\n'
+printf '     + ci.yml matrix with it (tests/unit/node-floor.test.sh enforces the sync).\n'
+printf '  3. Review the diff, then commit manually (no auto-commit).\n'

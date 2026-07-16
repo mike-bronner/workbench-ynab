@@ -49,6 +49,7 @@ source "$ROOT/tests/lib/assert.sh"
 REVENDOR_SRC="$ROOT/bin/revendor.sh"
 MARKER_SRC="$ROOT/vendor/ynab-mcp/vendored.json"
 BUNDLE_SRC="$ROOT/vendor/ynab-mcp/index.cjs"
+FLOOR_SRC="$ROOT/vendor/ynab-mcp/NODE_VERSION"
 BASH_BIN="$(command -v bash)"
 
 # A sandbox repo mirroring the layout revendor.sh resolves against (it derives
@@ -60,6 +61,7 @@ make_sandbox() {
   cp "$REVENDOR_SRC" "$sb/bin/revendor.sh"
   cp "$MARKER_SRC" "$sb/vendor/ynab-mcp/vendored.json"
   cp "$BUNDLE_SRC" "$sb/vendor/ynab-mcp/index.cjs"
+  cp "$FLOOR_SRC" "$sb/vendor/ynab-mcp/NODE_VERSION"
   printf '%s' "$sb"
 }
 
@@ -658,6 +660,46 @@ test_signature_null_shape_aborts_before_write() { assert_sig_shape_aborts nullsh
 # through to "verified" — the unknown-key guard fails closed. (Regression test
 # for the fail-open fix.)
 test_signature_unknown_category_aborts_before_write() { assert_sig_shape_aborts newcategory; }
+
+# --- Node floor policy (issue #3, decided on PR #205) ------------------------
+# The floor is a POLICY value — the latest Node LTS major at (re)vendor time,
+# pinned in vendor/ynab-mcp/NODE_VERSION and bumped by a HUMAN. An earlier
+# revision derived it here from the incoming package's engines.node; the
+# shell semver parser kept sprouting operator corner cases (three review
+# rounds' worth), so the derivation was removed in favor of the policy. This
+# test pins both halves of that contract: the script never touches the floor
+# file, and the summary + next steps carry the reminder that replaced the
+# automation.
+test_floor_never_modified_by_revendor() {
+  local sb mockbin marker name newsrc floor_before out rc
+  sb="$(make_sandbox)"
+  mockbin="$(make_mockbin "$sb")"
+  marker="$sb/vendor/ynab-mcp/vendored.json"
+  name="$(jq -r '.name' "$marker")"
+  newsrc="$sb/new-index.cjs"
+  printf 'changed-bundle-bytes %s\n' "$(date +%s)-$RANDOM" > "$newsrc"
+  floor_before="$(cat "$sb/vendor/ynab-mcp/NODE_VERSION")"
+
+  set +e
+  out="$(env PATH="$mockbin:$PATH" MOCK_BUNDLE_SRC="$newsrc" \
+    EXPECTED_SPEC="$name@9.9.9-test" MOCK_PKG_NAME="$name" \
+    "$BASH_BIN" "$sb/bin/revendor.sh" "9.9.9-test" 2>/dev/null)"
+  rc=$?
+  set -e
+
+  assert_eq 0 "$rc" "changed-bundle re-vendor should exit 0"
+  # The write path ran (new bytes adopted) yet the floor file is byte-identical:
+  # no derivation, no auto-raise, regardless of upstream metadata.
+  assert_eq "$floor_before" "$(cat "$sb/vendor/ynab-mcp/NODE_VERSION")" \
+    "NODE_VERSION must be byte-identical after a re-vendor (the floor is policy, not derived)"
+  assert_contains "$out" "node floor:" \
+    "the summary must still report the pinned floor"
+  assert_contains "$out" "latest Node LTS" \
+    "the summary must name the latest-LTS policy"
+  assert_contains "$out" "update vendor/ynab-mcp/NODE_VERSION" \
+    "the next steps must carry the manual-bump reminder that replaced the automation"
+  rm -rf "$sb"
+}
 
 # Signature-audit BINDING: the audited install's lockfile-recorded integrity
 # must equal the packed tarball's computed SRI, or the run dies without writing
