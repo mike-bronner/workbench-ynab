@@ -411,6 +411,19 @@ overlaid **by `id`**:
 Users never edit repo files to customize classification — the repo's defaults
 stay generic and shareable.
 
+> **`overrides.mappingRules` vs. `config.json`'s `mapping_rules` — two layers,
+> not a conflict.** The rules documented here are the tax engine's implemented
+> shape: they live in the **tax profile**
+> (`tax-profile.json`, `overrides.mappingRules`), use the camelCase fields above
+> (`payeeKeywords` / `taxLineId` / `businessEntityId` / `priority` / …), and are
+> validated by [`assets/tax/mapping-rules.schema.json`](../assets/tax/mapping-rules.schema.json).
+> The separate top-level **`mapping_rules`** key documented in
+> [`docs/config-schema.md`](./config-schema.md#mapping_rules) belongs to a
+> different file — the plugin **`config.json`** loader envelope — and is the
+> thin `match`/`schedule`/`tax_line` shape the config loader exposes. When you
+> author tax classification rules, this doc's `overrides.mappingRules` in the
+> tax profile is the authoritative surface.
+
 ## 5. Customizing your profile
 
 All customization happens in **your profile instance** in the data dir — never
