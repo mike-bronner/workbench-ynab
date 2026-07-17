@@ -190,6 +190,10 @@ Every command is namespaced under `/workbench-ynab:`. The plugin is mid-build; t
 |---|---|---|
 | `/workbench-ynab:setup` | First-run setup: seed the YNAB token into the Keychain, write config, pre-approve the read-tool glob, offer legacy migration. | Sprint 1 |
 | `/workbench-ynab:ynab-review` | Run a tax-aware review for a tier (weekly / monthly / quarterly-tax / annual); produces the report and the proposed change-set. | Sprint 3 |
+| `/workbench-ynab:ynab-weekly-review` | Run the weekly review ad-hoc — plans via the orchestrator, then forces the weekly tier only. | Sprint 3 |
+| `/workbench-ynab:ynab-monthly-review` | Run the monthly review ad-hoc — plans via the orchestrator, then forces the monthly tier only. | Sprint 3 |
+| `/workbench-ynab:ynab-quarterly-tax-review` | Run the quarterly estimated-tax review ad-hoc — plans via the orchestrator, then forces the quarterly-tax tier only. | Sprint 3 |
+| `/workbench-ynab:ynab-annual-review` | Run the annual review ad-hoc — plans via the orchestrator, then forces the annual tier only. | Sprint 3 |
 | `/workbench-ynab:ynab-apply` | Review a proposed change-set and, on explicit approval, apply the ledger-only writes (dry-run by default). | Sprint 4 |
 | `/workbench-ynab:ynab-migrate` | Retire the legacy hand-run prototype: the old Desktop connector, its token, and the prototype scheduled tasks/directories. | Sprint 5 |
 | `/workbench-ynab:ynab-monitor` | Run one proactive between-run monitoring pass: advance the monitor state store from fresh YNAB data, exit silently when nothing changed. Scaffold only — no alerts/detectors yet. | Sprint 6 (v-Next) |
