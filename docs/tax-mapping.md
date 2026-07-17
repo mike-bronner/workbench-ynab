@@ -418,7 +418,7 @@ stay generic and shareable.
 > (`payeeKeywords` / `taxLineId` / `businessEntityId` / `priority` / …), and are
 > validated by [`assets/tax/mapping-rules.schema.json`](../assets/tax/mapping-rules.schema.json).
 > The separate top-level **`mapping_rules`** key documented in
-> [`docs/config-schema.md`](./config-schema.md#mapping_rules) belongs to a
+> [`docs/config-schema.md`](./config-schema.md#mapping_rules-array-optional) belongs to a
 > different file — the plugin **`config.json`** loader envelope — and is the
 > thin `match`/`schedule`/`tax_line` shape the config loader exposes. When you
 > author tax classification rules, this doc's `overrides.mappingRules` in the
