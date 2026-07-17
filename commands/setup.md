@@ -463,6 +463,15 @@ Print a clean summary block:
   Re-run /workbench-ynab:setup any time — it is idempotent and the
   recommended step after a plugin update.
 
+  🔒 Privacy — generated reports (~/Documents/Claude/Reports) and your data dir
+     (~/.claude/plugins/data/workbench-ynab-claude-workbench) are UNENCRYPTED
+     plaintext financial records — full transaction history, balances, and tax
+     detail. They are created owner-only (mode 0600). ⚠️ ~/Documents/Claude may
+     sync to iCloud Drive on macOS: keep these on local, FileVault-encrypted
+     storage and don't point .report.output_dir at a shared or cloud-synced
+     folder. Prune old reports with /workbench-ynab:ynab-prune. Full inventory:
+     SECURITY.md → Generated Artifacts.
+
   ⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.
 ═══════════════════════════════════════════
 ```
@@ -474,6 +483,11 @@ actual budget names from Step 6 (or note the MCP wasn't reachable
 if Step 6 failed), and the monitor line from Step 7 (`cron "<MON_CRON>"` when
 deployed, `disabled` when `schedules.monitor.enabled: false`, or `skipped` when
 the scheduled-tasks MCP was unreachable).
+
+Print the **🔒 Privacy notice verbatim** too — it identifies the report and data
+directories as unencrypted financial records and warns about the iCloud sync risk
+(issue #65). It is the user's first notice that these artifacts exist and where
+they live; do not abbreviate or drop it.
 
 ## Notes — idempotency & boundaries
 

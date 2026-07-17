@@ -472,10 +472,29 @@ html="$assembled"
 # file in the destination dir, then mv it into place — an atomic swap, so a
 # failed same-day rerun (same tier+date → same path) can never destroy a prior
 # good report, and a partially-written file is never observable at the final path.
-mkdir -p "$out_dir" || { err "could not create output directory: $out_dir"; exit 1; }
+#
+# PRIVACY — the report is an UNENCRYPTED financial record (full transaction
+# history, balances, payees, tax detail), so it is created owner-only from the
+# first byte (issue #65, GAP-21):
+#   * The output directory is created under `umask 077`, so any component this
+#     writer makes is 0700 with no world-readable window — the caller's umask is
+#     untouched (the subshell scopes it). We do NOT force-chmod an ALREADY-EXISTING
+#     directory: the configured output_dir may be a location the user shares
+#     deliberately, and (like the .mjs state writers) we don't overreach on a
+#     parent we didn't create. The file itself is hardened unconditionally below.
+#   * The report file is 0600. `mktemp` already creates the temp file 0600 (so it
+#     is never world-readable, even briefly), and the explicit chmod ENFORCES that
+#     BEFORE the atomic swap — the file at its final path is never observable with
+#     looser permissions, and the guarantee no longer depends on mktemp's umask.
+if ! ( umask 077; mkdir -p "$out_dir" ); then err "could not create output directory: $out_dir"; exit 1; fi
 tmp="$(mktemp "${out_dir}/.report-writer.XXXXXX")" || { err "could not create a temp file in: $out_dir"; exit 1; }
 if ! printf '%s\n' "$html" > "$tmp"; then
   err "could not write report: $out_path"
+  rm -f "$tmp"
+  exit 1
+fi
+if ! chmod 600 "$tmp"; then
+  err "could not restrict report permissions: $out_path"
   rm -f "$tmp"
   exit 1
 fi

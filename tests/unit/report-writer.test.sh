@@ -859,4 +859,36 @@ JSON
     || fail "writer wrote a report to a literal mid-string ~ directory"
 }
 
+# Privacy hardening (issue #65, GAP-21): a report is an UNENCRYPTED financial
+# record, so the WRITTEN file must be owner-only (0600) and a directory the writer
+# CREATES must be owner-only (0700) — with no world-readable window at creation.
+# Portable octal-perms read, GNU-first (see the note in tests/unit/audit-log.test.sh).
+mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+
+# A report written into a freshly-created (nested) output dir: file 0600, and
+# every directory component the writer created is 0700.
+test_written_report_and_created_dir_are_owner_only() {
+  local dir="$SANDBOX/perms/nested" out
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" \
+          run_writer_fixture --tier Weekly --date 2026-06-22 --output-dir "$dir" )"
+  assert_file_exists "$out"
+  assert_eq "600" "$(mode_of "$out")"      "written report file is mode 0600"
+  assert_eq "700" "$(mode_of "$dir")"      "created leaf output dir is mode 0700"
+  assert_eq "700" "$(mode_of "$SANDBOX/perms")" "created parent dir is mode 0700 (umask 077, no world-readable window)"
+}
+
+# An ALREADY-EXISTING output dir is deliberately NOT force-chmod'd (the user may
+# share it on purpose), but the FILE is hardened to 0600 unconditionally — its
+# content is what's sensitive. Seed a loose 0755 dir + drop a report into it.
+test_file_is_hardened_even_in_a_preexisting_loose_dir() {
+  local dir="$SANDBOX/preexisting-loose" out
+  mkdir -p "$dir"; chmod 755 "$dir"
+  assert_eq "755" "$(mode_of "$dir")" "pre-existing dir starts at 0755"
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" \
+          run_writer_fixture --tier Monthly --date 2026-02-28 --output-dir "$dir" )"
+  assert_file_exists "$out"
+  assert_eq "600" "$(mode_of "$out")" "report file is 0600 even inside a pre-existing loose dir"
+  assert_eq "755" "$(mode_of "$dir")" "a pre-existing dir the writer did not create is left untouched"
+}
+
 run_tests

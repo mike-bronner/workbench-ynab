@@ -56,7 +56,8 @@
   },
   "report": {
     "output_dir": "~/Documents/Claude/Reports",
-    "template_path": null
+    "template_path": null,
+    "retention_days": 30
   },
   "schedules": {
     "monitor": {
