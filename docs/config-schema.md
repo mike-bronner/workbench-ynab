@@ -46,6 +46,7 @@ loader, the JSON Schema, or any default.
 | `persona` | object | **required** | The financial-review persona (configurable name). |
 | `report` | object | **required** | Report output directory + template path. |
 | `schedules` | object | optional | Scheduled-task cadences for background tasks (e.g. the monitoring poll). |
+| `alerts` | object | optional | Alert rules + delivery channel for proactive monitoring (M6). |
 | `classification` | object | optional | Confidence-band thresholds for the human-review routing policy (issue #19). |
 
 ---
@@ -275,6 +276,44 @@ disturbs the weekly-review task (`ynab-review`).
 
 ```json
 "schedules": { "monitor": { "cron": "0 8 * * *", "enabled": true } }
+```
+
+---
+
+### `alerts` *(object, optional)*
+
+Alert rules and the delivery channel for proactive between-run monitoring (M6).
+Thresholds are user-tunable data read **exclusively by the monitoring skill** —
+never injected into the YNAB MCP launcher environment. Dollar amounts are
+entered in **whole dollars** and converted to YNAB milliunits at load time
+(`loadAlertsConfig()` in [`lib/monitor/alerts.mjs`](../lib/monitor/alerts.mjs) —
+**not** `bin/config.sh`). Omit the whole block to accept the defaults —
+monitoring works with no configuration. Invalid values fall back per field.
+
+The full contract — field semantics, the structured finding shape, the
+`dedupe_key` format, channel values, and the alert log — lives in
+[`docs/alerts-config.md`](alerts-config.md).
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `enabled` | boolean | optional | `true` | Master switch for alert dispatch. |
+| `large_transaction_amount` | number | optional | `500` | Single-transaction alert threshold, in **whole dollars**. |
+| `unusual_multiplier` | number | optional | `3` | Multiple of a category's typical spend that counts as unusual. |
+| `budget_overrun_pct` | number | optional | `100` | Percentage of budgeted amount at/beyond which a category is overrun. |
+| `bill_due_lookahead_days` | integer | optional | `3` | Days ahead an upcoming scheduled bill is flagged. |
+| `overdrawn` | boolean | optional | `true` | Whether a negative account balance is alert-worthy. |
+| `channel` | string (enum) | optional | `"macos-notification"` | Delivery channel: `macos-notification` or `log-only`. Every dispatch also appends to the audit log. |
+
+```json
+"alerts": {
+  "enabled": true,
+  "large_transaction_amount": 500,
+  "unusual_multiplier": 3,
+  "budget_overrun_pct": 100,
+  "bill_due_lookahead_days": 3,
+  "overdrawn": true,
+  "channel": "macos-notification"
+}
 ```
 
 ---

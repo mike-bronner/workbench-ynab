@@ -215,8 +215,12 @@ Which sections run, and over what window, is set by the [tier matrix](#7-tier-ma
    `transfer_transaction_id` is one half of a linked inflow/outflow pair — a
    legitimate pair, never duplicates, no matter how exactly amount/date/payee
    match — and deleting one leg would corrupt the linked account's ledger (the
-   M4-8 handler hard-blocks it). List the remaining candidates for a later dedup
-   proposal; this skill only surfaces, never fixes. → `SLOT:section-10-anomalies`.
+   M4-8 handler hard-blocks it). The matching + exclusion rule is implemented in
+   [`../../assets/duplicate-candidates.js`](../../assets/duplicate-candidates.js)
+   (E2E-proven never to surface a transfer leg:
+   `assets/test/e2e-duplicate-surfacing.test.js`). List the remaining candidates
+   for a later dedup proposal; this skill only surfaces, never fixes.
+   → `SLOT:section-10-anomalies`.
 3. **Cost-Cutting.** Surface recurring/subscription and high-frequency spend
    where a cut is plausible; quantify the monthly/annual saving. → feeds
    `SLOT:section-3-spending` and the action list in `SLOT:section-11-recommendations`.

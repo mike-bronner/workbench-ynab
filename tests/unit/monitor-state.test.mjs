@@ -15,9 +15,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -44,7 +44,7 @@ const REQUIRED_FIELDS = ['lastPollTimestamp', 'accounts', 'serverKnowledge', 'fi
 
 test('(a) first run: absent file → existed:false and the default shape', () => {
   const statePath = freshPath();
-  const { state, existed } = readState({ statePath });
+  const { state, existed } = readState({ statePath, dataDir: TMP });
   assert.equal(existed, false);
   assert.deepEqual(Object.keys(state).sort(), [...REQUIRED_FIELDS].sort());
   assert.equal(state.lastPollTimestamp, null);
@@ -55,7 +55,7 @@ test('(a) first run: absent file → existed:false and the default shape', () =>
 
 test('(a) first run: writeState creates the file with every required top-level field', () => {
   const statePath = freshPath();
-  const { state } = readState({ statePath });
+  const { state } = readState({ statePath, dataDir: TMP });
   const obs = {
     timestamp: '2026-06-21T08:00:00Z',
     accounts: { 'acct-1': { cleared: 150000, uncleared: -2500 } },
@@ -63,7 +63,7 @@ test('(a) first run: writeState creates the file with every required top-level f
     recentTransactionCount: 3,
   };
   const { state: next } = computeNextState(state, obs);
-  const written = writeState(next, { statePath });
+  const written = writeState(next, { statePath, dataDir: TMP });
 
   assert.equal(written, statePath);
   assert.ok(existsSync(statePath), 'monitor-state.json was created');
@@ -82,7 +82,7 @@ test('readState heals forward on a corrupt file: unparseable → existed:false +
   // rewrites a clean file rather than the poll throwing on a JSON.parse.
   const statePath = freshPath();
   writeFileSync(statePath, '{ this is not valid json', 'utf8');
-  const { state, existed } = readState({ statePath });
+  const { state, existed } = readState({ statePath, dataDir: TMP });
   assert.equal(existed, false, 'a corrupt file heals forward as a first run');
   assert.deepEqual(state, defaultState(), 'corrupt file yields the default shape, not a throw');
   for (const f of REQUIRED_FIELDS) {
@@ -98,7 +98,7 @@ test('readState normalizes a valid-JSON-but-partial/legacy file to the full requ
   // (AC #15b). A legacy stringified cursor coerces back to the null default.
   const statePath = freshPath();
   writeFileSync(statePath, JSON.stringify({ serverKnowledge: '7', accounts: { 'acct-1': { cleared: 5, uncleared: 0 } } }), 'utf8');
-  const { state, existed } = readState({ statePath });
+  const { state, existed } = readState({ statePath, dataDir: TMP });
   assert.equal(existed, true, 'a valid partial file is a real prior run, not a first run');
   assert.deepEqual(Object.keys(state).sort(), [...REQUIRED_FIELDS].sort(), 'normalized to exactly the required fields');
   assert.equal(state.lastPollTimestamp, null, 'missing field falls back to default');
@@ -113,17 +113,17 @@ test('(b) second run: reads existing state, updates in place, no duplicated fiel
   const statePath = freshPath();
   // First pass.
   writeState(
-    computeNextState(readState({ statePath }).state, {
+    computeNextState(readState({ statePath, dataDir: TMP }).state, {
       timestamp: '2026-06-20T08:00:00Z',
       accounts: { 'acct-1': { cleared: 100000, uncleared: 0 } },
       serverKnowledge: 10,
       recentTransactionCount: 1,
     }).state,
-    { statePath },
+    { statePath, dataDir: TMP },
   );
 
   // Second pass — balances move, new cursor, new transactions.
-  const { state: prior, existed } = readState({ statePath });
+  const { state: prior, existed } = readState({ statePath, dataDir: TMP });
   assert.equal(existed, true);
   const { state: next, changed } = computeNextState(prior, {
     timestamp: '2026-06-21T08:00:00Z',
@@ -132,7 +132,7 @@ test('(b) second run: reads existing state, updates in place, no duplicated fiel
     recentTransactionCount: 2,
   });
   assert.equal(changed, true);
-  writeState(next, { statePath });
+  writeState(next, { statePath, dataDir: TMP });
 
   const onDisk = JSON.parse(readFileSync(statePath, 'utf8'));
   // Exactly the required keys — no field was duplicated or orphaned.
@@ -145,15 +145,15 @@ test('(b) second run: reads existing state, updates in place, no duplicated fiel
 test('(b) firedAlerts ledger survives a state update untouched (scaffold fires nothing)', () => {
   const statePath = freshPath();
   const seeded = { ...defaultState(), firedAlerts: { 'overdrawn:acct-1': { at: '2026-06-19T00:00:00Z' } } };
-  writeState(seeded, { statePath });
+  writeState(seeded, { statePath, dataDir: TMP });
 
-  const { state: prior } = readState({ statePath });
+  const { state: prior } = readState({ statePath, dataDir: TMP });
   const { state: next } = computeNextState(prior, {
     timestamp: '2026-06-21T08:00:00Z',
     accounts: { 'acct-1': { cleared: 1, uncleared: 0 } },
     recentTransactionCount: 0,
   });
-  writeState(next, { statePath });
+  writeState(next, { statePath, dataDir: TMP });
 
   const onDisk = JSON.parse(readFileSync(statePath, 'utf8'));
   assert.deepEqual(onDisk.firedAlerts, { 'overdrawn:acct-1': { at: '2026-06-19T00:00:00Z' } });
@@ -177,16 +177,16 @@ test('(c) no-op pass: balances unchanged + no new transactions → changed:false
 test('(c) no-op pass: lastPollTimestamp advances on disk', () => {
   const statePath = freshPath();
   const accounts = { 'acct-1': { cleared: 100000, uncleared: -500 } };
-  writeState({ ...defaultState(), lastPollTimestamp: '2026-06-20T08:00:00Z', accounts }, { statePath });
+  writeState({ ...defaultState(), lastPollTimestamp: '2026-06-20T08:00:00Z', accounts }, { statePath, dataDir: TMP });
 
-  const { state: prior } = readState({ statePath });
+  const { state: prior } = readState({ statePath, dataDir: TMP });
   const { state: next, changed } = computeNextState(prior, {
     timestamp: '2026-06-21T08:00:00Z',
     accounts,
     recentTransactionCount: 0,
   });
   assert.equal(changed, false);
-  writeState(next, { statePath });
+  writeState(next, { statePath, dataDir: TMP });
 
   assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).lastPollTimestamp, '2026-06-21T08:00:00Z');
 });
@@ -262,7 +262,7 @@ test('writeState writes owner-only: the state file is 0600 and its leaf data dir
   // drops them then fails loudly instead of silently world-exposing balances.
   const dir = join(TMP, `secure-${seq++}`);
   const statePath = join(dir, 'monitor-state.json');
-  writeState(defaultState(), { statePath });
+  writeState(defaultState(), { statePath, dataDir: TMP });
   assert.equal(statSync(statePath).mode & 0o777, 0o600);
   assert.equal(statSync(dir).mode & 0o777, 0o700);
 });
@@ -274,8 +274,9 @@ test('writeState unlinks the orphaned temp file when the rename fails', () => {
   // balance data is never left lying around after a failed write.
   const statePath = join(TMP, `rename-fails-${seq++}`);
   mkdirSync(statePath, { recursive: true });
-  assert.throws(() => writeState(defaultState(), { statePath }));
-  assert.equal(existsSync(`${statePath}.tmp`), false, 'orphaned temp file was removed');
+  assert.throws(() => writeState(defaultState(), { statePath, dataDir: TMP }));
+  // The temp name is unpredictable (#206 review), so scan for ANY temp sibling.
+  assert.deepEqual(readdirSync(TMP).filter((n) => n.startsWith(`${basename(statePath)}.`) && n.endsWith('.tmp')), [], 'orphaned temp file was removed');
 });
 
 // --- path resolution seam ---------------------------------------------------
@@ -293,10 +294,10 @@ test('the module writes nothing to stdout', () => {
   const tmpState = freshPath();
   const script = `
     import(${JSON.stringify(url)}).then((m) => {
-      const { state } = m.readState({ statePath: ${JSON.stringify(tmpState)} });
+      const { state } = m.readState({ statePath: ${JSON.stringify(tmpState)}, dataDir: ${JSON.stringify(TMP)} });
       const { state: next } = m.computeNextState(state, { timestamp: 't', accounts: { a: { cleared: 1, uncleared: 0 } }, recentTransactionCount: 0 });
       m.recordFiredAlert(next, 'k', 1);
-      m.writeState(next, { statePath: ${JSON.stringify(tmpState)} });
+      m.writeState(next, { statePath: ${JSON.stringify(tmpState)}, dataDir: ${JSON.stringify(TMP)} });
       m.milliunitsToDollars(1000);
       process.stderr.write('ok');                                      // proof it ran
     });

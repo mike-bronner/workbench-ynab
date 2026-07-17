@@ -124,50 +124,50 @@ test('assignBand: invalid or contradictory thresholds fall back to defaults', ()
 
 test('loadThresholds: reads classification overrides from config.json', (t) => {
   const configFile = tempConfig(t, { classification: { highThreshold: 0.9, mediumThreshold: 0.4 } });
-  assert.deepEqual(loadThresholds({ configFile }), { highThreshold: 0.9, mediumThreshold: 0.4 });
+  assert.deepEqual(loadThresholds({ configFile, dataDir: dirname(configFile) }), { highThreshold: 0.9, mediumThreshold: 0.4 });
 });
 
 test('loadThresholds: honours the YNAB_CONFIG_FILE env seam', (t) => {
   const configFile = tempConfig(t, { classification: { highThreshold: 0.7, mediumThreshold: 0.2 } });
-  const got = loadThresholds({}, { YNAB_CONFIG_FILE: configFile });
+  const got = loadThresholds({}, { YNAB_CONFIG_FILE: configFile, YNAB_DATA_DIR: dirname(configFile) });
   assert.deepEqual(got, { highThreshold: 0.7, mediumThreshold: 0.2 });
 });
 
 test('loadThresholds: options.configFile wins over the env seam', (t) => {
   const fromOptions = tempConfig(t, { classification: { highThreshold: 0.9, mediumThreshold: 0.1 } });
   const fromEnv = tempConfig(t, { classification: { highThreshold: 0.8, mediumThreshold: 0.2 } });
-  const got = loadThresholds({ configFile: fromOptions }, { YNAB_CONFIG_FILE: fromEnv });
+  const got = loadThresholds({ configFile: fromOptions, dataDir: dirname(fromOptions) }, { YNAB_CONFIG_FILE: fromEnv });
   assert.equal(got.highThreshold, 0.9);
 });
 
 test('loadThresholds: missing file → defaults', () => {
-  const got = loadThresholds({ configFile: join(tmpdir(), 'confidence-test-definitely-absent.json') });
+  const got = loadThresholds({ configFile: join(tmpdir(), "confidence-test-definitely-absent.json"), dataDir: tmpdir() });
   assert.deepEqual(got, DEFAULT_THRESHOLDS);
 });
 
 test('loadThresholds: malformed JSON → defaults, never a throw', (t) => {
   const configFile = tempConfig(t, '{ not json');
-  assert.deepEqual(loadThresholds({ configFile }), DEFAULT_THRESHOLDS);
+  assert.deepEqual(loadThresholds({ configFile, dataDir: dirname(configFile) }), DEFAULT_THRESHOLDS);
 });
 
 test('loadThresholds: absent classification block → defaults', (t) => {
   const configFile = tempConfig(t, { schema_version: 1 });
-  assert.deepEqual(loadThresholds({ configFile }), DEFAULT_THRESHOLDS);
+  assert.deepEqual(loadThresholds({ configFile, dataDir: dirname(configFile) }), DEFAULT_THRESHOLDS);
 });
 
 test('loadThresholds: partial override keeps the other default', (t) => {
   const configFile = tempConfig(t, { classification: { highThreshold: 0.95 } });
-  assert.deepEqual(loadThresholds({ configFile }), { highThreshold: 0.95, mediumThreshold: MEDIUM_THRESHOLD });
+  assert.deepEqual(loadThresholds({ configFile, dataDir: dirname(configFile) }), { highThreshold: 0.95, mediumThreshold: MEDIUM_THRESHOLD });
 });
 
 test('loadThresholds: out-of-range values fall back per key', (t) => {
   const configFile = tempConfig(t, { classification: { highThreshold: 1.5, mediumThreshold: 0.4 } });
-  assert.deepEqual(loadThresholds({ configFile }), { highThreshold: HIGH_THRESHOLD, mediumThreshold: 0.4 });
+  assert.deepEqual(loadThresholds({ configFile, dataDir: dirname(configFile) }), { highThreshold: HIGH_THRESHOLD, mediumThreshold: 0.4 });
 });
 
 test('loadThresholds: contradictory pair (medium ≥ high) → defaults wholesale', (t) => {
   const configFile = tempConfig(t, { classification: { highThreshold: 0.3, mediumThreshold: 0.7 } });
-  assert.deepEqual(loadThresholds({ configFile }), DEFAULT_THRESHOLDS);
+  assert.deepEqual(loadThresholds({ configFile, dataDir: dirname(configFile) }), DEFAULT_THRESHOLDS);
 });
 
 // --- classify() wiring: every result carries { confidence, band } -------------

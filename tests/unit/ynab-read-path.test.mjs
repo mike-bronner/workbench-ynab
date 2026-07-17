@@ -290,6 +290,24 @@ test('createReadCache shares one in-flight pull across concurrent same-key gets 
   assert.deepEqual(first.items, [{ id: 'a' }]);
 });
 
+test('createReadCache stats().resources counts an in-flight pull before it settles', async () => {
+  // Pins the documented semantic (#199): `resources` is cache.size, and get()
+  // memoizes the in-flight promise synchronously — so under concurrent access
+  // a pull is counted from the moment it starts, not only once it settles.
+  // Sequential callers never observe this (every get() is awaited first).
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const call = async () => { await gate; return { transactions: [{ id: 'a' }], has_more: false }; };
+  const cache = createReadCache(call);
+
+  const pending = cache.get('transactions');
+  assert.equal(cache.stats().resources, 1, 'the still-in-flight pull is already counted');
+
+  release();
+  await pending;
+  assert.equal(cache.stats().resources, 1, 'settling does not add a second entry');
+});
+
 test('ANNOTATION is pinned to the verbatim acceptance-criteria literal', () => {
   // The degraded-partial tests assert annotationFor(...) === ANNOTATION, but
   // both sides come from the module under test — a typo edited into the

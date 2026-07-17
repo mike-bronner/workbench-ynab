@@ -6,7 +6,8 @@
 #   * the docs-links job's lychee globs stay RECURSIVE ('assets/**/*.md'
 #     'docs/**/*.md') — the non-recursive originals let a broken link in
 #     nested markdown (assets/tax/README.md, docs/decisions/*.md, …) pass
-#     silently;
+#     silently — and keep covering the root README.md (issue #71), whose
+#     links to the docs/ set would otherwise sit in a link-check blind spot;
 #   * lycheeverse/lychee-action — the repo's first third-party action — stays
 #     pinned to a full commit SHA with a trailing version comment, never a
 #     mutable tag a publisher could repoint;
@@ -36,8 +37,8 @@ ci_doc=$(cat "$CI_DOC")
 
 test_docs_links_globs_are_recursive() {
   assert_contains "$ci_yml" \
-    "args: --offline --include-fragments --no-progress 'assets/**/*.md' 'docs/**/*.md'" \
-    "docs-links must scan assets/ and docs/ recursively (issue #191)"
+    "args: --offline --include-fragments --no-progress 'assets/**/*.md' 'docs/**/*.md' 'README.md'" \
+    "docs-links must scan assets/ and docs/ recursively (issue #191) plus the root README.md (issue #71)"
 }
 
 test_docs_links_old_nonrecursive_globs_are_gone() {
