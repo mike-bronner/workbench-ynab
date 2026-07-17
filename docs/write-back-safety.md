@@ -124,14 +124,23 @@ allow/deny classification is enforced by `ALLOWED_TOOLS` / `DENIED_TOOLS` in
 | `mcp__plugin_workbench-ynab_ynab__ynab_reconcile_account` | reconcile | ✅ allowed |
 | `mcp__plugin_workbench-ynab_ynab__ynab_create_transaction` | — nothing | ⛔ denied (money movement) |
 | `mcp__plugin_workbench-ynab_ynab__ynab_create_transactions` | — nothing | ⛔ denied (money movement) |
+| `mcp__plugin_workbench-ynab_ynab__ynab_create_receipt_split_transaction` | — nothing | ⛔ denied (money movement) |
+| `mcp__plugin_workbench-ynab_ynab__ynab_create_account` | — nothing | ⛔ denied (account mutation) |
+| `mcp__plugin_workbench-ynab_ynab__ynab_set_default_budget` | — nothing | ⛔ denied (budget mutation) |
 
 > **Intentional divergence from the issue #71 wording, called out here:** the
-> design brief listed the create tools among "write tools used." They are part
-> of the MCP's write *surface*, but no write path in this plugin uses them —
-> they can fabricate money-shaped records, so the guardrail **deny-lists** them
+> design brief listed the two create tools among "write tools used." They are
+> part of the MCP's write *surface*, but no write path in this plugin uses them
+> — they can fabricate money-shaped records, so the guardrail **deny-lists** them
 > (`denied_tool_money_movement`) and they appear in no pre-approval list.
 > Documenting them as "used" would be wrong; documenting them as denied is the
-> truth the code enforces.
+> truth the code enforces. The three rows below the pair — `ynab_create_receipt_split_transaction`,
+> `ynab_create_account`, and `ynab_set_default_budget` — are the remaining
+> `DENIED_TOOLS` entries the guardrail blocks, listed so this write-surface
+> reference matches
+> [`assets/write-safety-guardrail.js`](../assets/write-safety-guardrail.js)'s
+> full deny-list rather than understating it, even though issue #71's AC named
+> only the seven-tool subset above them.
 
 **Pre-approval is not approval.** Setup pre-approves the **read** tools only —
 write pre-approval is a manual opt-in: setup never seeds a write verb. To
