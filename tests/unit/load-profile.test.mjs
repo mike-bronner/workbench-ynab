@@ -173,7 +173,11 @@ test('(#207) parse failure on a contained secret-shaped file leaks none of its b
   }
 });
 
-test("(#207) io failure reports the errno code, never Node's composed err.message", () => {
+// chmod 0o000 does not block reads for root (Docker/CI-as-root) or on Windows,
+// so every chmod-based io test skips there (shared by the follow-up io test below).
+const canChmod = process.platform !== 'win32' && (typeof process.getuid !== 'function' || process.getuid() !== 0);
+
+test("(#207) io failure reports the errno code, never Node's composed err.message", { skip: !canChmod }, () => {
   const p = join(TMP, 'unreadable-207.json');
   writeFileSync(p, JSON.stringify(validBase()));
   chmodSync(p, 0o000);
@@ -640,8 +644,7 @@ test('(follow-up) schemaVersion matching neither oneOf arm is rejected', () => {
 });
 
 // --- follow-up: io / packaging-invariant / deep-freeze branches -------------
-
-const canChmod = process.platform !== 'win32' && (typeof process.getuid !== 'function' || process.getuid() !== 0);
+// (canChmod guard declared above the #207 io test — first use.)
 
 test('(follow-up) an unreadable profile returns a structured io failure', { skip: !canChmod }, () => {
   const p = join(TMP, 'unreadable.json');
@@ -848,8 +851,10 @@ test('(#169) the containment failure stays redacted when $HOME itself resolves t
 
 test('(#169) the io failure envelope is redacted under a symlinked $HOME (message + sources)', () => {
   // An unreadable profile INSIDE the allowlist exercises the pre-existing
-  // io path: both the composed message (Node's err.message embeds the raw
-  // path) and the echoed sources must mask every home spelling.
+  // io path: both the composed message (which embeds the raw path directly
+  // via its `${profilePath}` template plus the errno code — since #207,
+  // Node's err.message never rides the envelope) and the echoed sources
+  // must mask every home spelling.
   const dataDir = join(REAL_HOME, '.claude', 'plugins', 'data', 'workbench-ynab-claude-workbench');
   mkdirSync(dataDir, { recursive: true });
   const unreadable = join(dataDir, 'tax-profile.json');
