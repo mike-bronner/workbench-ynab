@@ -26,6 +26,15 @@
 #                                     this gate regardless — so, like the
 #                                     orchestrator frontmatter, it is a deliberate,
 #                                     documented swap consumer, not scatter.
+#   - docs/write-back-safety.md       the user-facing write-back safety
+#                                     reference (issue #71): its AC requires the
+#                                     exact namespaced write tools be listed so
+#                                     a reader can audit precisely what may run.
+#                                     Like the guardrail skill doc, it documents
+#                                     the safety gate itself, and a namespace
+#                                     swap must force a review of the safety
+#                                     docs anyway — a deliberate, documented
+#                                     swap consumer, not scatter.
 #
 # Every OTHER surface — any skill, agent, command, hook, bin script, asset,
 # doc, README, or JSON config — is scanned. If a concrete name is hard-coded
@@ -56,6 +65,7 @@ ALLOWLIST=(
   "assets/write-safety-guardrail.js"             # money-gate denylist (must name write verbs)
   "assets/test/write-safety-guardrail.test.js"   # pins the denylist classification
   "skills/write-safety-guardrail.md"             # human-readable gate contract
+  "docs/write-back-safety.md"                    # user-facing safety reference (#71 AC: exact tool names)
 )
 
 # Scan the whole tree — skills, agents, commands, hooks, bin, assets, docs,

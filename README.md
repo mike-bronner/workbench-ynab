@@ -6,7 +6,7 @@ Tax-aware YNAB budget review and **approval-gated** write-back for Claude Code. 
 
 ## What this is
 
-A productized weekly financial review for [YNAB](https://www.ynab.com/). It speaks as **your own Claude agent** by default — or as **Hobbes**, the shipped default persona, when no agent is configured (the name is configurable). Each run reads your budget, categorizes transactions, flags duplicates, surfaces tax-aware insights, and proposes ledger-only fixes *inside* YNAB for your approval.
+A productized weekly financial review for [YNAB](https://www.ynab.com/). It speaks as **your own Claude agent** by default — or as **Hobbes**, the shipped default persona, when no agent is configured (the name is configurable — see [`docs/persona.md`](docs/persona.md)). Each run reads your budget, categorizes transactions, flags duplicates, surfaces tax-aware insights, and proposes ledger-only fixes *inside* YNAB for your approval.
 
 It productizes a proven prototype: a hand-run, deeply tax-aware review that has run as an ad-hoc scheduled task **since April 2026**. This plugin turns that into a first-class, shareable tool — a formalized persona, a reusable tax-aware methodology, a frozen HTML report template, and approval-gated write-back.
 
@@ -123,20 +123,20 @@ Each review reads your budget (read-only) and produces a tax-aware report organi
 
 | # | Section | Surfaces |
 |---|---|---|
-| 1 | **Cashflow summary** | Inflow vs. outflow; net movement for the period. |
-| 2 | **Category health** | Overspent / negative-balance categories; funding gaps. |
-| 3 | **Ready-to-Assign** | Unallocated money waiting for a job. |
-| 4 | **Needs attention** | Uncategorized, unapproved, and unusual transactions. |
-| 5 | **Duplicate detection** | Likely double-entered transactions. |
-| 6 | **Reconciliation status** | Cleared-vs-reconciled drift per account. |
-| 7 | **Accounts & balances** | On/off-budget balances; net snapshot. |
-| 8 | **Business expenses (Schedule C)** | Deductible business spend, mapped to Schedule C lines. |
-| 9 | **Medical & dental (Schedule A)** | Spend tracked against the AGI medical threshold. |
-| 10 | **Self-employment tax (Schedule SE)** | SE-tax exposure from business net income. |
-| 11 | **Quarterly estimated taxes** | Estimated-tax due-date tracking and set-aside. |
-| 12 | **Trends & recommendations** | Period-over-period movement and the prioritized action list. |
+| 1 | **Transaction Classification (tax-aware)** | Every transaction mapped to a category and a Schedule C/A/SE/1 tax line. |
+| 2 | **Duplicate Detection** | Likely double-entered transactions (transfer legs excluded). |
+| 3 | **Cost-Cutting** | Recurring/subscription spend where a cut is plausible, with the saving quantified. |
+| 4 | **Uncategorized** | Transactions with no category, including carryover from before the window. |
+| 5 | **Stale Uncleared** | Uncleared transactions older than the staleness window. |
+| 6 | **Budget Health** | Overspent categories, funding gaps, Ready-to-Assign, goal progress. |
+| 7 | **Unusual / Large** | Outliers for their category or payee. |
+| 8 | **Reconciliation Status** | Cleared-vs-reconciled drift per account. |
+| 9 | **Financial Health Score** | Six auditable 1–10 sub-scores rolled into one overall score. |
+| 10 | **Forecast** | Projected period-end balances and near-term cash flow. |
+| 11 | **Recommended Actions** | The prioritized action list, highest-impact first. |
+| 12 | **Tax Summary (YTD)** | Schedule C P&L, itemized-vs-standard, medical AGI threshold, SE tax, quarterly estimates. |
 
-The tax-aware sections are driven entirely by a **data-driven, shareable tax profile** — never hard-coded owner detail. For the full methodology, see [`docs/methodology.md`](docs/methodology.md); for the tax-profile schema, see [`assets/tax/README.md`](assets/tax/README.md).
+The tax-aware sections are driven entirely by a **data-driven, shareable tax profile** — never hard-coded owner detail. For the full methodology, see [`docs/methodology.md`](docs/methodology.md); for the tax model and profile schema, see [`docs/tax-mapping.md`](docs/tax-mapping.md) and [`assets/tax/README.md`](assets/tax/README.md).
 
 ## The read / propose / approve loop
 
@@ -154,7 +154,7 @@ This is the core safety story. Write-back never happens silently.
 - **Fix duplicates** — delete a double-entered transaction.
 - **Reconcile** — bring an account's cleared/reconciled balance into line.
 
-**The plugin NEVER moves real money.** It initiates no transfers and no payments to the outside world — no money ever leaves or moves between your real accounts. This is enforced structurally: every change-set carries a `money_movement: false` invariant that cannot be set otherwise, and a runtime guardrail hard-blocks any apply that maps to a money-moving operation. See [`assets/changeset-contract.md`](assets/changeset-contract.md) for the full contract.
+**The plugin NEVER moves real money.** It initiates no transfers and no payments to the outside world — no money ever leaves or moves between your real accounts. This is enforced structurally: every change-set carries a `money_movement: false` invariant that cannot be set otherwise, and a runtime guardrail hard-blocks any apply that maps to a money-moving operation. The full safety model — allowed vs. forbidden operations, the batch-approval gate, and the exact write tools — is [`docs/write-back-safety.md`](docs/write-back-safety.md); the machine contract is [`assets/changeset-contract.md`](assets/changeset-contract.md).
 
 ## Privacy / where the token lives
 
