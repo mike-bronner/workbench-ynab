@@ -41,6 +41,8 @@ PREFIX='mcp__plugin_workbench-ynab_ynab__'   # bare prefix — guard-safe
 echo "docs-set.test.sh — the issue #71 docs/ set invariants"
 
 # --- every doc in the set exists and carries the canonical disclaimer ---------
+# The AC says "prominent", not merely present: the tag must open the doc as a
+# top-of-file blockquote (all four keep it within the first 10 lines).
 for doc in docs/persona.md docs/methodology.md docs/tax-mapping.md docs/write-back-safety.md; do
   if [ -f "$REPO_ROOT/$doc" ]; then
     ok "$doc exists"
@@ -49,6 +51,11 @@ for doc in docs/persona.md docs/methodology.md docs/tax-mapping.md docs/write-ba
     continue
   fi
   assert_contains "$doc" "$doc carries the canonical not-tax-advice tag" "$TAG"
+  if head -10 "$REPO_ROOT/$doc" | grep -qF -- "> $TAG"; then
+    ok "$doc disclaimer is prominent (top-of-file blockquote)"
+  else
+    no "$doc disclaimer is prominent (top-of-file blockquote)"
+  fi
 done
 
 # --- methodology: the 12 sections as implemented, milliunits, generic ---------
@@ -60,20 +67,38 @@ for section in \
   assert_contains docs/methodology.md "methodology names section: $section" "$section"
 done
 assert_contains docs/methodology.md "methodology states the milliunits rule" "milliunits — divide by"
+# Pin the worked example, not just the prose — it fixes the ÷1000 relationship
+# (a mutated divisor can't survive this string).
+# shellcheck disable=SC2016  # a literal needle: no backtick expansion wanted
+assert_contains docs/methodology.md "methodology pins the ÷1000 worked example" '`-12340` is `-12.34`'
 assert_contains docs/methodology.md "methodology defers to the protocol skill" "skills/review/ynab-review.md"
 assert_contains docs/methodology.md "methodology states owner specifics live in config" "config instance"
 
 # --- persona: dispatch-format coverage -----------------------------------------
 assert_contains docs/persona.md "persona covers the top-five dispatch shape" "top five findings"
 assert_contains docs/persona.md "persona covers the severity emoji prefixes" "🔴 action required"
+assert_contains docs/persona.md "persona covers the 🟡 severity tier" "🟡 attention needed"
+assert_contains docs/persona.md "persona covers the 🟢 severity tier" "🟢 good/informational"
 assert_contains docs/persona.md "persona covers the per-finding structure" '**Bold one-line statement.** 1–2 sentence action.'
 
 # --- tax-mapping: the labeled owner example ------------------------------------
 assert_contains docs/tax-mapping.md "tax-mapping labels the owner example" "The owner example — ONE labeled instance"
-assert_contains docs/tax-mapping.md "owner example: MFJ" '"filingStatus": "mfj"'
-assert_contains docs/tax-mapping.md "owner example: SE rate" "0.153"
-assert_contains docs/tax-mapping.md "owner example: medical AGI threshold" "0.075"
-assert_contains docs/tax-mapping.md "owner example: quarterly due dates" "Apr 15 / Jun 15 / Sep 15 / Jan 15"
+# Scope the value checks to the owner-example section (its heading up to the
+# next ## heading): the same literals exist elsewhere in the doc, so a
+# whole-file grep would stay green even if the section were deleted.
+OWNER_EXAMPLE="$(awk '/^### The owner example/{f=1} f && /^## /{exit} f' "$REPO_ROOT/docs/tax-mapping.md")"
+assert_owner() {
+  local desc="$1" needle="$2"
+  if printf '%s\n' "$OWNER_EXAMPLE" | grep -qF -- "$needle"; then
+    ok "$desc"
+  else
+    no "$desc"
+  fi
+}
+assert_owner "owner example: MFJ" '"filingStatus": "mfj"'
+assert_owner "owner example: SE rate" "0.153"
+assert_owner "owner example: medical AGI threshold" "0.075"
+assert_owner "owner example: quarterly due dates" "Apr 15 / Jun 15 / Sep 15 / Jan 15"
 
 # --- write-back safety: model, gate, exact tools --------------------------------
 assert_contains docs/write-back-safety.md "safety doc states the ledger-only promise" "ledger-only"
@@ -83,6 +108,8 @@ for op in Categorize Allocate "Fix duplicates" Reconcile; do
 done
 assert_contains docs/write-back-safety.md "safety doc forbids transfers" "No transfers"
 assert_contains docs/write-back-safety.md "safety doc forbids outbound payments" "No payments out of YNAB"
+assert_contains docs/write-back-safety.md "safety doc forbids transaction creation" "No transaction creation"
+assert_contains docs/write-back-safety.md "safety doc forbids account/default-budget mutation" "No account or default-budget mutation"
 assert_contains docs/write-back-safety.md "safety doc states the batch gate" "One approval covers one batch"
 for suffix in ynab_update_transaction ynab_update_transactions ynab_update_category \
               ynab_create_transaction ynab_create_transactions ynab_delete_transaction \
