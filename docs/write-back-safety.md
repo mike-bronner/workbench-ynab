@@ -133,12 +133,15 @@ allow/deny classification is enforced by `ALLOWED_TOOLS` / `DENIED_TOOLS` in
 > Documenting them as "used" would be wrong; documenting them as denied is the
 > truth the code enforces.
 
-**Pre-approval is not approval.** Setup pre-approves the four non-destructive
-write tools by exact name (never a family glob, never the delete verb) purely
-to remove Claude Code's *per-call* permission dialog, which is redundant once
-the batch gate exists. The human-approval gate for a write batch is the
-`/ynab-apply` flow plus the guardrail — pre-approval never bypasses it. See the
-write-phase notes in
+**Pre-approval is not approval.** Setup pre-approves the **read** tools only —
+write pre-approval is a manual opt-in: setup never seeds a write verb. To
+silence Claude Code's redundant *per-call* permission dialog on the four
+non-destructive write tools, the human hand-adds them to
+`~/.claude/settings.json` by exact name (never a family glob, never the delete
+verb) per the permission notes in
+[`docs/mcp-capability-map.md`](./mcp-capability-map.md). Opted-in or not, the
+human-approval gate for a write batch is the `/ynab-apply` flow plus the
+guardrail — pre-approval never bypasses it. See the write-phase notes in
 [`skills/protocol/ynab-tools.md`](../skills/protocol/ynab-tools.md).
 
 ## What can never override any of this
