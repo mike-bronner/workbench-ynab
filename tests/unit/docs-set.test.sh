@@ -59,13 +59,26 @@ for doc in docs/persona.md docs/methodology.md docs/tax-mapping.md docs/write-ba
 done
 
 # --- methodology: the 12 sections as implemented, milliunits, generic ---------
-for section in \
-  "Transaction Classification" "Duplicate Detection" "Cost-Cutting" \
-  "Uncategorized" "Stale Uncleared" "Budget Health" "Unusual / Large" \
-  "Reconciliation Status" "Financial Health Score" "Forecast" \
-  "Recommended Actions" "Tax Summary (YTD)"; do
-  assert_contains docs/methodology.md "methodology names section: $section" "$section"
-done
+# Pin each section to its TABLE ROW (`| N | **Name** |`), not a whole-file
+# substring: "Financial Health Score" and "Tax Summary (YTD)" also appear in the
+# naming-deviation prose above the table, so a whole-file grep for the bare name
+# stays green even when the real table row is renamed (proven by mutation in
+# review). The `| N | **Name** |` row shape has no decoy anywhere else in the doc.
+methodology_row() {
+  assert_contains docs/methodology.md "methodology table row $1: $2" "| $1 | **$2** |"
+}
+methodology_row 1 "Transaction Classification (tax-aware)"
+methodology_row 2 "Duplicate Detection"
+methodology_row 3 "Cost-Cutting"
+methodology_row 4 "Uncategorized"
+methodology_row 5 "Stale Uncleared"
+methodology_row 6 "Budget Health"
+methodology_row 7 "Unusual / Large"
+methodology_row 8 "Reconciliation Status"
+methodology_row 9 "Financial Health Score"
+methodology_row 10 "Forecast"
+methodology_row 11 "Recommended Actions"
+methodology_row 12 "Tax Summary (YTD)"
 assert_contains docs/methodology.md "methodology states the milliunits rule" "milliunits — divide by"
 # Pin the worked example, not just the prose — it fixes the ÷1000 relationship
 # (a mutated divisor can't survive this string).
@@ -80,6 +93,15 @@ assert_contains docs/persona.md "persona covers the severity emoji prefixes" "�
 assert_contains docs/persona.md "persona covers the 🟡 severity tier" "🟡 attention needed"
 assert_contains docs/persona.md "persona covers the 🟢 severity tier" "🟢 good/informational"
 assert_contains docs/persona.md "persona covers the per-finding structure" '**Bold one-line statement.** 1–2 sentence action.'
+# The other two persona AC bullets: the Hobbes default is configurable, and the
+# rename config keys. Pin the standalone-default line and both config-key table
+# rows so a future edit can't silently drop them.
+# shellcheck disable=SC2016  # literal needles: backticks are content, not expansion
+assert_contains docs/persona.md "persona documents the Hobbes standalone default" '**`"Hobbes"`** — the shipped standalone default'
+# shellcheck disable=SC2016
+assert_contains docs/persona.md "persona documents the persona.name config key" '| `persona.name` | string |'
+# shellcheck disable=SC2016
+assert_contains docs/persona.md "persona documents the persona.voice_overrides config key" '| `persona.voice_overrides` | string |'
 
 # --- tax-mapping: the labeled owner example ------------------------------------
 assert_contains docs/tax-mapping.md "tax-mapping labels the owner example" "The owner example — ONE labeled instance"
@@ -121,12 +143,39 @@ assert_contains docs/write-back-safety.md "safety doc forbids outbound payments"
 assert_contains docs/write-back-safety.md "safety doc forbids transaction creation" "No transaction creation"
 assert_contains docs/write-back-safety.md "safety doc forbids account/default-budget mutation" "No account or default-budget mutation"
 assert_contains docs/write-back-safety.md "safety doc states the batch gate" "One approval covers one batch"
+# Pin each write tool to its VERDICT ROW, not a whole-file substring. Two traps
+# the old whole-file grep fell into, both proven by mutation in review:
+#   * substring overlap — `ynab_update_transaction` is a substring of
+#     `…transactions`, so deleting the singular row still matched the plural;
+#   * verdict drift — a lone "denied (money movement)" check stayed green even
+#     when a create verb's row was flipped to ✅ allowed.
+# assert_tool_row locates the UNIQUE table row by the backtick-bounded tool name
+# (the trailing "` |" defeats the singular/plural overlap) and asserts that row
+# carries the expected verdict, so a removed row OR a flipped verdict fails.
+SAFETY_DOC="docs/write-back-safety.md"
+BT='`'   # a literal backtick, kept out of command position
+assert_tool_row() {
+  local desc="$1" suffix="$2" verdict="$3" row
+  row="$(grep -F -- "${BT}${PREFIX}${suffix}${BT} |" "$REPO_ROOT/$SAFETY_DOC" 2>/dev/null)"
+  if [ -n "$row" ] && [ "$(printf '%s\n' "$row" | wc -l)" -eq 1 ] \
+     && printf '%s' "$row" | grep -qF -- "$verdict"; then
+    ok "$desc"
+  else
+    no "$desc"
+  fi
+}
+# The five ledger-only ALLOWED write tools (ALLOWED_TOOLS in the guardrail).
 for suffix in ynab_update_transaction ynab_update_transactions ynab_update_category \
-              ynab_create_transaction ynab_create_transactions ynab_delete_transaction \
-              ynab_reconcile_account; do
-  assert_contains docs/write-back-safety.md "safety doc names ${suffix}" "${PREFIX}${suffix}"
+              ynab_delete_transaction ynab_reconcile_account; do
+  assert_tool_row "safety doc marks ${suffix} allowed" "$suffix" "✅ allowed"
 done
-assert_contains docs/write-back-safety.md "safety doc marks the create verbs denied" "denied (money movement)"
+# The five money-movement/mutation DENIED write tools (DENIED_TOOLS in the
+# guardrail) — each pinned to a denied verdict, so flipping one to ✅ allowed fails.
+for suffix in ynab_create_transaction ynab_create_transactions \
+              ynab_create_receipt_split_transaction ynab_create_account \
+              ynab_set_default_budget; do
+  assert_tool_row "safety doc marks ${suffix} denied" "$suffix" "⛔ denied"
+done
 
 # --- README links all four docs --------------------------------------------------
 for doc in docs/persona.md docs/methodology.md docs/tax-mapping.md docs/write-back-safety.md; do
