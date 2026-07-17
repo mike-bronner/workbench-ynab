@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 
@@ -238,7 +238,7 @@ test('loadTracker returns a fresh tracker when absent; saveTracker creates the f
   const trackerPath = join(dir, 'tax-tracker.json');
   assert.equal(existsSync(trackerPath), false);
 
-  const fresh = loadTracker({ trackerPath });
+  const fresh = loadTracker({ trackerPath, dataDir: TMP });
   assert.equal(fresh.schemaVersion, TRACKER_SCHEMA_VERSION);
   assert.deepEqual(fresh.years, {});
 
@@ -247,7 +247,7 @@ test('loadTracker returns a fresh tracker when absent; saveTracker creates the f
     null,
   );
   upsertQuarterEstimate(fresh, { year: 2025, quarter: 1, estimate: est });
-  saveTracker(fresh, { trackerPath });
+  saveTracker(fresh, { trackerPath, dataDir: TMP });
 
   assert.equal(existsSync(trackerPath), true);
   // Personal financial data: the file must be owner-only (0600) and live in an
@@ -387,13 +387,13 @@ test('remaining_due floors at $0 when payments exceed the quarter estimate', () 
 test('a corrupt tracker file throws rather than silently discarding payment history', () => {
   const trackerPath = join(TMP, 'corrupt.json');
   writeFileSync(trackerPath, '{ not valid json', 'utf8');
-  assert.throws(() => loadTracker({ trackerPath }), /invalid JSON/);
+  assert.throws(() => loadTracker({ trackerPath, dataDir: TMP }), /invalid JSON/);
 });
 
 test('a well-formed-but-wrong-shape tracker file throws instead of overwriting it', () => {
   const trackerPath = join(TMP, 'wrong-shape.json');
   writeFileSync(trackerPath, JSON.stringify({ schemaVersion: 1 }), 'utf8'); // valid JSON, no `years`
-  assert.throws(() => loadTracker({ trackerPath }), /unexpected shape/);
+  assert.throws(() => loadTracker({ trackerPath, dataDir: TMP }), /unexpected shape/);
 });
 
 test('saveTracker unlinks the orphaned temp file when the rename fails', () => {
@@ -403,8 +403,9 @@ test('saveTracker unlinks the orphaned temp file when the rename fails', () => {
   // the personal financial data is never left lying around after a failed save.
   const trackerPath = join(TMP, 'rename-fails-here');
   mkdirSync(trackerPath, { recursive: true });
-  assert.throws(() => saveTracker(emptyTracker(), { trackerPath }));
-  assert.equal(existsSync(`${trackerPath}.tmp`), false); // orphaned temp removed
+  assert.throws(() => saveTracker(emptyTracker(), { trackerPath, dataDir: TMP }));
+  // The temp name is unpredictable (#206 review), so scan for ANY temp sibling.
+  assert.deepEqual(readdirSync(TMP).filter((n) => n.startsWith('rename-fails-here.') && n.endsWith('.tmp')), []); // orphaned temp removed
 });
 
 test('upsertQuarterEstimate rejects a raw computeEstimate() (no quarterLiability) loudly', () => {
