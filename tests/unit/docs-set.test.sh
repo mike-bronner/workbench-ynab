@@ -100,6 +100,16 @@ assert_owner "owner example: SE rate" "0.153"
 assert_owner "owner example: medical AGI threshold" "0.075"
 assert_owner "owner example: quarterly due dates" "Apr 15 / Jun 15 / Sep 15 / Jan 15"
 
+# --- tax-mapping: generic schema table (AC 3a) and line catalog (AC 3c) ---------
+# Content-pin one representative row of each table (both literals occur nowhere
+# else in the doc), so gutting a table while leaving its heading can't stay green.
+# shellcheck disable=SC2016  # literal needles: no backtick expansion wanted
+assert_contains docs/tax-mapping.md "tax-mapping schema table pins the filingStatus field row" \
+  '| `filingStatus` | enum | **Required.** `single` \| `mfj` \| `mfs` \| `hoh` \| `qw`. |'
+# shellcheck disable=SC2016
+assert_contains docs/tax-mapping.md "tax-mapping line catalog pins the schedSE row" \
+  '| `schedSE` | SE | Self-employment tax (12.4% Social Security + 2.9% Medicare = 15.3%) |'
+
 # --- write-back safety: model, gate, exact tools --------------------------------
 assert_contains docs/write-back-safety.md "safety doc states the ledger-only promise" "ledger-only"
 assert_contains docs/write-back-safety.md "safety doc states never-moves-money" "NEVER moves real money"
