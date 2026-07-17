@@ -38,10 +38,12 @@ money helper (`assets/format-money.js`).
 ## The twelve sections
 
 As implemented in [`skills/review/ynab-review.md`](../skills/review/ynab-review.md)
-§6 — same order and, with two deliberate exceptions, the same names: rows 9 and
-12 keep the prototype's fuller names — **Financial Health Score** and
-**Tax Summary (YTD)** — where the skill abbreviates them to *Health Score* and
-*Tax Summary YTD*.
+§6 — same order and, with two deliberate exceptions, the same names: row 9
+keeps the prototype's full name — **Financial Health Score** — where the skill
+abbreviates it to *Health Score*, and row 12 renders **Tax Summary (YTD)** —
+fuller than the skill's *Tax Summary YTD*, but itself shortened from the
+prototype's *Tax Summary (Running YTD)* ("Running" is dropped as redundant: a
+YTD roll-up is running by definition).
 
 | # | Section | What it does |
 |---|---|---|
@@ -73,7 +75,7 @@ batch-approval gate, is [`docs/write-back-safety.md`](./write-back-safety.md).
 
 The prototype (`~/Documents/Claude/Scheduled/ynab-financial-review/SKILL.md`)
 defined these twelve analyses; the productized skill keeps their order and
-intent, and — the two abbreviated section names noted above aside — their
+intent, and — the two section-name deviations noted above aside — their
 names. The deliberate divergences:
 
 - **Owner facts became config.** The prototype's inline employment structure,
@@ -88,6 +90,11 @@ names. The deliberate divergences:
   auditable.
 - **Duplicate detection excludes transfer legs** (GAP-19 / issue #49) — the
   prototype had no transfer-leg guard.
+- **Medical mileage lost its auto-rate.** The prototype computed an automatic
+  medical-mileage deduction (67¢/mile) as a Schedule A line item; the tax
+  profile has no per-mile concept — mileage is now tracked as manually-entered
+  dollar amounts in a medical category group
+  (`itemized.medical.categoryGroups[]` in [`docs/tax-mapping.md`](./tax-mapping.md)).
 - **The report chrome is frozen.** The prototype regenerated the entire HTML
   document each run; the skill fills injection slots in the frozen template
   ([`assets/report/SLOTS.md`](../assets/report/SLOTS.md)) and hands assembly to
