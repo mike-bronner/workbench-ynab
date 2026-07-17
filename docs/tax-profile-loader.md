@@ -75,8 +75,7 @@ in-root path.
 The **failure envelope is redacted end-to-end**: every path echoed on an error
 path — the `containment` message (which echoes only the caller's own supplied
 path, with the absolute resolved roots dropped from the human-readable text and
-surviving, redacted, in the structured `params`), the pre-existing `io`/`parse`
-messages (including the OS-level `err.message`, which embeds the raw path), the
+surviving, redacted, in the structured `params`), the `io`/`parse` messages, the
 `sources` field of a failure result, and the packaging-invariant throw messages
 — has the home directory masked to `~`. **Both spellings** of home are masked:
 as reported by `os.homedir()` *and* as the kernel canonicalizes it, so the
@@ -86,6 +85,18 @@ absolute plugin-data path from leaking should the failure cross an MCP/JSON-RPC
 boundary. On a **successful** load, `sources` deliberately carries the real,
 unredacted paths — callers consume those programmatically, and success values
 never ride an error message across that boundary.
+
+**Error messages never echo Node's `err.message`** (issue #207). A `JSON.parse`
+`SyntaxError.message` quotes a snippet of the offending file's raw bytes, so a
+malformed but *contained* profile — even one whose first bytes are secret-shaped
+(`AWS_SECRET_ACCESS_KEY=…`) — would otherwise leak file content into the very
+failure the facade re-throws across the MCP/JSON-RPC boundary. Every
+`io`/`parse`/packaging-invariant message therefore carries only a fixed
+description, the (redacted) path, and the content-free errno `code`
+(`ENOENT`/`EACCES`/…) when one is present — never the free-form `err.message`.
+This is **additive** to the home-directory redaction above: content hygiene
+layered on top of path masking, not a replacement, and it leaves the failure
+`kind` values (`io`/`parse`/`schema`/`depth`) and envelope shape unchanged.
 
 **Residual race (known limitation).** The guard canonicalizes the path, then the
 read reopens that same raw path (the check-then-open shape the AC prescribes). A

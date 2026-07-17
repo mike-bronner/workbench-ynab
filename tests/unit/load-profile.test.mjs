@@ -581,6 +581,64 @@ test('(follow-up) the freeze is deep — nested-beyond-two-levels values are fro
   }, TypeError);
 });
 
+// --- (#207) failure-envelope content hygiene: never echo Node's err.message --
+// V8's JSON.parse SyntaxError.message quotes a snippet of the offending file's
+// raw bytes, so a malformed but *contained* profile would otherwise leak file
+// content into the structured failure the facade (lib/tax/index.mjs) re-throws
+// across an MCP/JSON-RPC boundary. These pin that every failure message carries
+// only a fixed description + the (redacted) path + the content-free errno code —
+// never Node's free-form err.message. SECRET_BYTES is non-JSON, so JSON.parse
+// rejects it; its leading bytes are what a naive `${err.message}` would quote.
+const SECRET_BYTES = 'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+const CONTENT_LEAKS = ['AWS_SECRET', 'wJalr', 'EXAMPLEKEY', 'is not valid JSON', 'Unexpected token'];
+
+test('(#207) a contained non-JSON profile with secret-shaped content → parse failure that leaks no file bytes', () => {
+  const p = join(TMP, 'secret-shaped.json');
+  writeFileSync(p, SECRET_BYTES); // inside TMP → passes containment, then fails JSON.parse
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.kind, 'parse'); // kind unchanged (AC#5)
+  // The whole point: not one byte of the file's content reaches the envelope —
+  // neither the summary message nor the structured errors[0].message.
+  for (const leak of CONTENT_LEAKS) {
+    assert.ok(!r.error.message.includes(leak), `parse message leaked "${leak}": ${r.error.message}`);
+    assert.ok(!r.error.errors[0].message.includes(leak), `parse errors[0] leaked "${leak}"`);
+  }
+  // …and it still says something useful: the fixed, content-free description.
+  assert.match(r.error.message, /^invalid JSON in tax profile at /);
+});
+
+test('(#207) the io failure message carries the errno code, not Node\'s free-form err.message', { skip: !canChmod }, () => {
+  const p = join(TMP, 'unreadable-207.json');
+  writeFileSync(p, JSON.stringify(validBase()));
+  chmodSync(p, 0o000);
+  try {
+    const r = loadProfile({ dataDir: TMP, profilePath: p });
+    assert.equal(r.ok, false);
+    assert.equal(r.error.kind, 'io');
+    // Content-free errno present; Node's free-form message text absent.
+    assert.match(r.error.message, /\(EACCES\)$/);
+    assert.ok(!r.error.message.includes('permission denied'), `io message echoed err.message: ${r.error.message}`);
+  } finally {
+    chmodSync(p, 0o600); // restore so TMP cleanup can remove it
+  }
+});
+
+test('(#207) a non-JSON defaultsPath throws without leaking the file\'s bytes', () => {
+  const bad = join(TMP, 'bad-defaults.json');
+  writeFileSync(bad, SECRET_BYTES); // contained but not JSON → JSON.parse throws inside the packaging try
+  assert.throws(
+    () => loadProfile({ dataDir: TMP, profilePath: ABSENT, defaultsPath: bad }),
+    (err) => {
+      assert.match(err.message, /cannot read bundled default ruleset/);
+      for (const leak of CONTENT_LEAKS) {
+        assert.ok(!err.message.includes(leak), `packaging throw leaked "${leak}": ${err.message}`);
+      }
+      return true;
+    },
+  );
+});
+
 // --- (#169) path containment: reads outside the allowlisted roots refused ---
 // The loader's allowlist is the resolved dataDir (here: the explicit TMP root)
 // plus the bundled assets/tax/ dir. Everything below targets a SECOND temp dir
