@@ -298,9 +298,8 @@ test('E2E block: one-leg transfer delete whose snapshot and twin omit shape evid
   assert.equal(mock.budget.transactions.find((t) => t.id === TXN_HIDDEN_TRANSFER).deleted, false);
 });
 
-// AC (conditional): "once M4-8's duplicate-candidate-surfacing logic is code, an
-// E2E test asserts a legitimate transfer inflow+outflow pair is never surfaced as
-// a duplicate candidate". That surfacing step still lives as prose in
-// skills/review/ynab-review.md §2 — no code generates candidates yet — so the
-// t001/t002 legitimate transfer pair sits ready in the fixture, and the
-// hard-block backstop above already proves the delete path refuses a live leg.
+// AC (conditional, now met — issue #212): the duplicate-candidate SURFACING
+// logic is code (assets/duplicate-candidates.js), and
+// e2e-duplicate-surfacing.test.js asserts the t001/t002 legitimate transfer
+// pair is never surfaced as a duplicate candidate — complementing the
+// delete-path hard-block backstop proven above.
