@@ -207,6 +207,51 @@ test("(#207) packaging-invariant schema throw leaks none of the file's bytes", (
   );
 });
 
+test("(#207) a short file containing 'at position <n>' cannot forge a parse position from its own bytes", () => {
+  // Inputs of ~19 bytes or fewer are embedded VERBATIM in V8's
+  // SyntaxError.message (no `"…"...` truncation), so any position recovered by
+  // scanning err.message can be the FILE'S OWN bytes disguised as digits. The
+  // envelope must emit a fixed message — never a position derived from
+  // err.message.
+  const p = join(TMP, 'position-forgery.json');
+  writeFileSync(p, 'xat position 42');
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.kind, 'parse');
+  for (const msg of [r.error.message, r.error.errors[0].message]) {
+    assert.ok(!msg.includes('position 42'), `file bytes re-emitted as a parse position: ${msg}`);
+    assert.match(msg, /invalid JSON in tax profile at .*: parse error$/, `unexpected message shape: ${msg}`);
+  }
+});
+
+test("(#207) depth failure message never carries the profile's own key path", () => {
+  // tooDeep()'s RangeError can name the offending JSON key path, and the
+  // profile's nested key names are profile-derived content (`overrides` is
+  // schema-open) — the envelope must reduce whatever RangeError it catches to
+  // the content-free fact, like every sibling site. Today stripComments'
+  // path-less guard happens to fire first for this fixture; this test pins the
+  // envelope invariant so a pipeline reorder can't silently start leaking the
+  // path-bearing variants. Direct resolveProfile/deepMerge callers still get
+  // the full RangeError path.
+  let nested = 'true';
+  for (let i = 0; i < 5000; i++) nested = `{"SECRET_KEY_NAME":${nested}}`;
+  const p = join(TMP, 'deep-secret-keys.json');
+  writeFileSync(
+    p,
+    `{"schemaVersion":"1","filingStatus":"single","taxYear":2025,"overrides":{"leak207":${nested}}}`,
+  );
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.kind, 'depth');
+  for (const msg of [r.error.message, r.error.errors[0].message]) {
+    assert.ok(
+      !msg.includes('SECRET_KEY_NAME') && !msg.includes('leak207'),
+      `profile key path leaked into depth message: ${msg}`,
+    );
+    assert.match(msg, /nesting exceeds the maximum supported depth of \d+$/, `unexpected message shape: ${msg}`);
+  }
+});
+
 // --- (e) provenance correctness across all three tiers ----------------------
 
 test('(e) provenance distinguishes defaults / user / overrides per leaf', () => {
