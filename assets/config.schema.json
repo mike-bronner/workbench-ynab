@@ -234,6 +234,53 @@
         }
       }
     },
+    "alerts": {
+      "type": "object",
+      "description": "Alert rules for proactive between-run monitoring (M6, docs/alerts-config.md). Thresholds are user-tunable data read exclusively by the monitoring skill — never injected into the YNAB MCP launcher environment. Dollar amounts are entered in whole dollars and converted to YNAB milliunits (× 1000) at load time. Omit the whole block to accept the defaults — monitoring works with no configuration (zero-config).",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Master switch for alert dispatch. Defaults to true. Set false to silence all alerts; the monitor pass still advances its state snapshot."
+        },
+        "large_transaction_amount": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 500,
+          "description": "A single transaction at or above this amount (WHOLE DOLLARS) is alert-worthy. Converted to milliunits (× 1000) at load time. Defaults to 500."
+        },
+        "unusual_multiplier": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 3,
+          "description": "A transaction this many times the category's typical spend counts as unusual. Defaults to 3."
+        },
+        "budget_overrun_pct": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 100,
+          "description": "A category spent at or beyond this percentage of its budgeted amount is overrun. Defaults to 100 (at/over budget)."
+        },
+        "bill_due_lookahead_days": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 3,
+          "description": "How many days ahead an upcoming scheduled bill is worth flagging. Defaults to 3."
+        },
+        "overdrawn": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether a negative account balance is alert-worthy. Defaults to true."
+        },
+        "channel": {
+          "type": "string",
+          "enum": ["macos-notification", "log-only"],
+          "default": "macos-notification",
+          "description": "Delivery-channel switch (docs/alerts-config.md). 'macos-notification' (default) fires a best-effort macOS desktop notification; 'log-only' stops at the audit log. Every dispatch appends to the alert log regardless of channel."
+        }
+      }
+    },
     "apply": {
       "type": "object",
       "description": "Optional configuration for the /workbench-ynab:ynab-apply approval command (M4-5). Omit entirely to use the shipped defaults.",
