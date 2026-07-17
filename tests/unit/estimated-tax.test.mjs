@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 
@@ -404,7 +404,8 @@ test('saveTracker unlinks the orphaned temp file when the rename fails', () => {
   const trackerPath = join(TMP, 'rename-fails-here');
   mkdirSync(trackerPath, { recursive: true });
   assert.throws(() => saveTracker(emptyTracker(), { trackerPath, dataDir: TMP }));
-  assert.equal(existsSync(`${trackerPath}.tmp`), false); // orphaned temp removed
+  // The temp name is unpredictable (#206 review), so scan for ANY temp sibling.
+  assert.deepEqual(readdirSync(TMP).filter((n) => n.startsWith('rename-fails-here.') && n.endsWith('.tmp')), []); // orphaned temp removed
 });
 
 test('upsertQuarterEstimate rejects a raw computeEstimate() (no quarterLiability) loudly', () => {

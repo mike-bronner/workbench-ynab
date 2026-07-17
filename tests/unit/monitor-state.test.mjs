@@ -15,9 +15,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -275,7 +275,8 @@ test('writeState unlinks the orphaned temp file when the rename fails', () => {
   const statePath = join(TMP, `rename-fails-${seq++}`);
   mkdirSync(statePath, { recursive: true });
   assert.throws(() => writeState(defaultState(), { statePath, dataDir: TMP }));
-  assert.equal(existsSync(`${statePath}.tmp`), false, 'orphaned temp file was removed');
+  // The temp name is unpredictable (#206 review), so scan for ANY temp sibling.
+  assert.deepEqual(readdirSync(TMP).filter((n) => n.startsWith(`${basename(statePath)}.`) && n.endsWith('.tmp')), [], 'orphaned temp file was removed');
 });
 
 // --- path resolution seam ---------------------------------------------------

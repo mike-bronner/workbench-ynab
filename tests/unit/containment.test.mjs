@@ -18,7 +18,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, existsSync, lstatSync, readFileSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 
@@ -78,6 +78,17 @@ test('canonicalize walks up through ENOENT and fails closed on anything else', (
   symlinkSync(b, a);
   symlinkSync(a, b);
   assert.equal(canonicalize(a), null);
+});
+
+test('canonicalize fails closed on an existing-but-dangling symlink leaf — never re-attaches its raw name', () => {
+  // realpath ENOENTs for a dangling symlink, but the entry EXISTS — re-attaching
+  // its raw basename would report the (in-root) symlink spelling as the resolved
+  // path while a direct open of the raw path would FOLLOW the link to its
+  // outside target. The lstat guard must fail closed instead (#206 review).
+  const dangling = join(ROOT_DIR, 'dangling-leaf.json');
+  symlinkSync(join(OUTSIDE, 'dangling-target-absent.json'), dangling); // target never created
+  assert.equal(canonicalize(dangling), null);
+  assert.notEqual(checkContainment('the file', dangling, resolveRoots([ROOT_DIR]), 'write'), null);
 });
 
 test('isWithin is separator-aware: a sibling sharing the root name as a prefix never passes', () => {
@@ -154,6 +165,32 @@ test('(#206) saveTracker refuses a symlink escape on the write path', () => {
   assert.equal(readFileSync(join(OUTSIDE, 'tracker.json'), 'utf8'), before, 'outside tracker was overwritten');
 });
 
+test('(#206 review) saveTracker never writes through a planted `<path>.tmp` symlink — the temp sibling is not a write seam', () => {
+  // The review's live exploit: trackerPath itself is valid and in-root, but a
+  // symlink pre-planted at the PREDICTABLE temp name redirects the temp write
+  // outside every root. The unpredictable temp name + 'wx' (O_CREAT|O_EXCL)
+  // must leave the victim untouched and land the real bytes at trackerPath.
+  const victim = join(OUTSIDE, 'victim-tracker.txt');
+  writeFileSync(victim, 'untouched');
+  const trackerPath = join(ROOT_DIR, 'tmp-attack-tracker.json');
+  symlinkSync(victim, `${trackerPath}.tmp`);
+  const written = saveTracker(emptyTracker(), { dataDir: ROOT_DIR, trackerPath });
+  assert.equal(readFileSync(victim, 'utf8'), 'untouched', 'outside victim was overwritten through the temp symlink');
+  assert.equal(lstatSync(written).isSymbolicLink(), false, 'tracker path ended up a symlink');
+  assert.deepEqual(JSON.parse(readFileSync(written, 'utf8')).years, {});
+  assert.ok(lstatSync(`${trackerPath}.tmp`).isSymbolicLink(), 'planted symlink was consumed by the write');
+});
+
+test('(#206 review) saveTracker refuses a dangling-symlink tracker path — the outside target is never created', () => {
+  // The dangling-leaf shape end-to-end: an in-root symlink to an ABSENT outside
+  // target. A write through it would CREATE the target outside every root.
+  const target = join(OUTSIDE, 'not-yet-created-tracker.json');
+  const link = join(ROOT_DIR, 'dangling-tracker.json');
+  symlinkSync(target, link);
+  assert.throws(() => saveTracker(emptyTracker(), { dataDir: ROOT_DIR, trackerPath: link }), containmentThrow('write'));
+  assert.equal(existsSync(target), false, 'dangling target was created outside the root');
+});
+
 test('(#206) an explicit dataDir names the tracker root — a contained round-trip still works (test seam)', () => {
   const path = saveTracker(emptyTracker(), { dataDir: ROOT_DIR });
   assert.ok(isWithin(canonicalize(ROOT_DIR), canonicalize(path)));
@@ -202,6 +239,27 @@ test('(#206) writeState refuses an escaping write — nothing created, not even 
   assert.throws(() => writeState(defaultState(), { dataDir: ROOT_DIR, statePath: escaping }), containmentThrow('write'));
   assert.equal(existsSync(join(OUTSIDE, 'planted-state.json')), false, 'escaping state was written');
   assert.equal(existsSync(join(OUTSIDE, 'planted-state.json.tmp')), false, 'escaping temp sibling was written');
+});
+
+test('(#206) writeState refuses a symlink escape on the write path', () => {
+  const link = plantLink('sneaky-state-write.json', 'state.json');
+  const before = readFileSync(join(OUTSIDE, 'state.json'), 'utf8');
+  assert.throws(() => writeState(defaultState(), { dataDir: ROOT_DIR, statePath: link }), containmentThrow('write'));
+  assert.equal(readFileSync(join(OUTSIDE, 'state.json'), 'utf8'), before, 'outside state was overwritten');
+});
+
+test('(#206 review) writeState never writes through a planted `<path>.tmp` symlink — the temp sibling is not a write seam', () => {
+  // Same exploit shape as the tracker seam: valid in-root statePath, symlink
+  // pre-planted at the predictable temp name pointing at an outside victim.
+  const victim = join(OUTSIDE, 'victim-state.txt');
+  writeFileSync(victim, 'untouched');
+  const statePath = join(ROOT_DIR, 'tmp-attack-state.json');
+  symlinkSync(victim, `${statePath}.tmp`);
+  const written = writeState(defaultState(), { dataDir: ROOT_DIR, statePath });
+  assert.equal(readFileSync(victim, 'utf8'), 'untouched', 'outside victim was overwritten through the temp symlink');
+  assert.equal(lstatSync(written).isSymbolicLink(), false, 'state path ended up a symlink');
+  assert.equal(typeof JSON.parse(readFileSync(written, 'utf8')).accounts, 'object');
+  assert.ok(lstatSync(`${statePath}.tmp`).isSymbolicLink(), 'planted symlink was consumed by the write');
 });
 
 test('(#206) an explicit dataDir names the state root — a contained round-trip still works (test seam)', () => {
