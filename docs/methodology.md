@@ -1,42 +1,98 @@
 # The review methodology — 12 analysis sections
 
-> **Status: stub.** The full, runnable methodology — exact heuristics, tax math,
-> and the frozen HTML report template — lands in **Sprint 3 (Review Engine, M2)**
-> as a skill. This file is the high-level map of *what* the review covers; it
-> deliberately holds no owner-specific numbers and no implementation detail.
+This is the human-readable map of the tax-aware review methodology: the twelve
+analyses every review runs, what each surfaces, and where its output lands.
 
-> **Not tax advice.** This tool organizes financial data and surfaces
-> tax-relevant signals to help you and your tax professional. It is not a
-> substitute for professional tax advice.
+> ⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.
+> (Canonical wording: [`skills/shared/disclaimer.md`](../skills/shared/disclaimer.md).)
 
-The review is a productization of a proven, hand-run weekly financial review
-that has run since April 2026. It reads a YNAB budget (read-only) and produces a
-tax-aware report organized into twelve sections. The data-pull and analysis plan
-are sized by the read-only [`ynab-orchestrator`](../agents/ynab-orchestrator.md)
-agent; the report itself is composed by the Sprint 3 review skill.
+> **The skill is the source of truth.** The runnable methodology — the exact
+> heuristics, config reads, tier matrix, and slot-fill contract — is the
+> universal protocol skill
+> [`skills/review/ynab-review.md`](../skills/review/ynab-review.md) (issue #40).
+> If anything here diverges from the skill, **the skill wins** and this doc must
+> be corrected to match it.
 
-| # | Section | What it surfaces |
+The methodology productizes a proven, hand-run weekly financial review that ran
+as a scheduled prototype since April 2026. Every tier (weekly / monthly /
+quarterly-tax / annual) runs the **same** protocol skill; thin tier wrappers
+just set the tier. The read-only
+[`ynab-orchestrator`](../agents/ynab-orchestrator.md) plans the data pull; the
+skill runs the analyses and fills the frozen HTML report template; the dispatch
+summary ([`docs/dispatch-format.md`](./dispatch-format.md)) is the TL;DR.
+
+**The methodology is generic.** The skill holds zero owner-specific facts and
+zero hardcoded tax constants — every owner detail (budget, business structure,
+filing status, rates, thresholds, due dates) is a **config instance** read
+through the shared loaders: the persona loader ([`docs/persona.md`](./persona.md)),
+the config loader ([`docs/config-loader.md`](./config-loader.md)), and the tax
+profile ([`docs/tax-mapping.md`](./tax-mapping.md)). The prototype hard-wired
+one user's situation into its text; that is exactly what this productization
+removed.
+
+**Milliunits.** Every YNAB monetary amount arrives in **milliunits — divide by
+1000** before any display or comparison (`-12340` is `-12.34`). The divisor is
+always 1000 regardless of currency; display formatting is owned by the shared
+money helper (`assets/format-money.js`).
+
+## The twelve sections
+
+As implemented in [`skills/review/ynab-review.md`](../skills/review/ynab-review.md)
+§6 — same names, same order:
+
+| # | Section | What it does |
 |---|---|---|
-| 1 | **Cashflow summary** | Inflow vs. outflow for the period; net movement. |
-| 2 | **Category health** | Overspent and negative-balance categories; funding gaps. |
-| 3 | **Ready-to-Assign** | Unallocated money waiting for a job. |
-| 4 | **Needs attention** | Uncategorized, unapproved, and unusual transactions. |
-| 5 | **Duplicate detection** | Likely double-entered transactions, flagged for a dedup fix. |
-| 6 | **Reconciliation status** | Cleared-vs-reconciled drift per account. |
-| 7 | **Accounts & balances** | On/off-budget account balances; net snapshot. |
-| 8 | **Business expenses (Schedule C)** | Deductible business spend, mapped to Schedule C lines. |
-| 9 | **Medical & dental (Schedule A)** | Spend tracked against the AGI medical threshold. |
-| 10 | **Self-employment tax (Schedule SE)** | SE-tax exposure from business net income. |
-| 11 | **Quarterly estimated taxes** | Estimated-tax due-date tracking and set-aside. |
-| 12 | **Trends & recommendations** | Period-over-period movement and the prioritized action list. |
+| 1 | **Transaction Classification (tax-aware)** | Classifies each transaction in the window against the tax profile's mapping rules and Schedule **C / A / SE / 1** line maps; rolls up deductible spend by schedule and tax line. Low-confidence classifications are marked as guesses, never presented as settled. |
+| 2 | **Duplicate Detection** | Flags likely double-entries (same/near amount + payee + date proximity). Transfer legs are excluded from the candidate set — a linked inflow/outflow pair is legitimate, and deleting one leg would corrupt the linked ledger. Surfaces only; fixes are proposed via write-back. |
+| 3 | **Cost-Cutting** | Surfaces recurring/subscription and high-frequency spend where a cut is plausible, quantifying the monthly/annual saving. |
+| 4 | **Uncategorized** | Lists transactions with no category (plus carryover uncategorized from before the window on the weekly tier). |
+| 5 | **Stale Uncleared** | Flags uncleared transactions older than the staleness window — likely missed or duplicated. |
+| 6 | **Budget Health** | Overspent / negative-balance categories, funding gaps, Ready-to-Assign, and goal/target progress. |
+| 7 | **Unusual / Large** | Transactions that are outliers for their category or payee — large vs. the period norm, first-time large payees. |
+| 8 | **Reconciliation Status** | Cleared-vs-reconciled drift per account; flags accounts overdue for reconciliation. |
+| 9 | **Financial Health Score** | Six 1–10 sub-scores rolled into one overall score: Budget Adherence, Cash-Flow Health, Categorization Completeness, Reconciliation Currency, Spending Discipline, Tax Readiness. Each sub-score derives from the sections above, so the score is auditable, not a black box. |
+| 10 | **Forecast** | Projects period-end and near-term cash flow / net worth from the period's run-rate and known scheduled transactions. |
+| 11 | **Recommended Actions** | The prioritized action list — every actionable finding above, highest-impact first (categorize these, fund that, dedup these, reconcile that). |
+| 12 | **Tax Summary (YTD)** | Year-to-date roll-up by schedule: Schedule C P&L, Schedule A itemizables vs. the standard deduction, medical spend against the AGI threshold, SE-tax exposure, and quarterly estimated-tax status — every rate, deduction, and due date read from the tax profile. Tier-dependent (skipped on the weekly tier). |
 
-The tax-aware sections (8–11) are driven entirely by the **tax profile** — a
-data-driven, shareable config instance, never hard-coded owner detail. See
-[`assets/tax/README.md`](../assets/tax/README.md) for the tax-profile schema and
-where the live profile lives.
+Which sections run — and over what lookback window — is set per tier by the
+skill's tier matrix (`skills/review/ynab-review.md` §7): weekly is the fast
+7-day hygiene pass, monthly deepens budget health and forecast, quarterly-tax
+anchors on the estimated-tax due dates, annual runs the full tax year.
 
 Sections 2–6 are also where the review surfaces **write-back candidates**
-(categorizations, Ready-to-Assign allocations, duplicate fixes, reconciliations)
-as a proposed change-set — see the **read / propose / approve loop** in the
-[top-level README](../README.md). The plugin never writes anything without
-explicit human approval, and it never moves real money.
+(categorizations, Ready-to-Assign allocations, duplicate fixes,
+reconciliations) as a proposed change-set. The review itself is strictly
+read-only — it proposes, never applies. The full safety model, including the
+batch-approval gate, is [`docs/write-back-safety.md`](./write-back-safety.md).
+
+## Provenance — divergences from the prototype, called out
+
+The prototype (`~/Documents/Claude/Scheduled/ynab-financial-review/SKILL.md`)
+defined these twelve analyses; the productized skill keeps their names, order,
+and intent. The deliberate divergences:
+
+- **Owner facts became config.** The prototype's inline employment structure,
+  business category groups, filing status, deduction amounts, rates, and due
+  dates are now one tax-profile/config instance
+  ([`docs/tax-mapping.md`](./tax-mapping.md)) — the methodology text carries
+  none of them.
+- **Health-score sub-scores were re-derived.** The prototype scored budgeting
+  discipline, debt management, savings rate, cash flow, emergency preparedness,
+  and tax readiness by judgment; the skill's six sub-scores (section 9 above)
+  are each computed from a named section's output so the overall score is
+  auditable.
+- **Duplicate detection excludes transfer legs** (GAP-19 / issue #49) — the
+  prototype had no transfer-leg guard.
+- **The report chrome is frozen.** The prototype regenerated the entire HTML
+  document each run; the skill fills injection slots in the frozen template
+  ([`assets/report/SLOTS.md`](../assets/report/SLOTS.md)) and hands assembly to
+  the report writer ([`docs/report-writer.md`](./report-writer.md)).
+- **Write-back exists — behind a gate.** The prototype was read-only by
+  instruction; the plugin adds an approval-gated, ledger-only write path as a
+  separate flow ([`docs/write-back-safety.md`](./write-back-safety.md)). The
+  review protocol itself remains read-only.
+
+---
+
+> ⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.

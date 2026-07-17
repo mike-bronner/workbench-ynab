@@ -190,6 +190,31 @@ The committed template
 is the maintained version of this — copy it, don't retype it
 ([section 5](#5-customizing-your-profile)).
 
+### The owner example — ONE labeled instance: W-2 primary + sole-prop side hustle (MFJ)
+
+The full example above is not arbitrary — it is **the owner situation this
+plugin productized, expressed as one example config instance**. The prototype
+hard-coded these facts into its skill text; here every one of them is **data in
+a profile, not code**, and any other user's situation is just a different
+instance of the same schema:
+
+| Fact of the situation | Where it lives in the instance |
+| --- | --- |
+| **W-2 primary employment + a sole-proprietor side hustle** (DBA, not incorporated — its income/expenses go on **Schedule C** of the personal return) | One `businessEntities[]` entry with `schedule: "C"` naming the side hustle's YNAB category group and business checking account. W-2 income needs no entry — only pass-through business activity is declared. |
+| **Married filing jointly** | `"filingStatus": "mfj"` |
+| **Schedule A itemized vs. standard deduction** — tracked all year to see whether itemizing beats the MFJ standard deduction | `itemized.{medical,salt,interest,charitable}` category groups, compared against `standardDeductionByYear.mfj` (bundled per-year dollar table; overridable) |
+| **Schedule SE self-employment tax at 15.3%** on side-hustle net income only | `thresholds.seTaxRate: 0.153` |
+| **7.5%-of-AGI medical threshold** — every medical dollar tracked because combined W-2 + Schedule C AGI raises the floor | `thresholds.medicalAgiPercent: 0.075` |
+| **Schedule 1 adjustments** — half-SE-tax deduction, student-loan interest, IRA contributions | `adjustments.{seTaxHalfDeduction,studentLoanInterest,iraContributions}` |
+| **Quarterly estimated taxes due Apr 15 / Jun 15 / Sep 15 / Jan 15** (Q4 in January of the following year) | the bundled default `quarterlyEstimatedDueDates` ([section 3](#3-the-default-us-ruleset)) — no per-user entry needed unless the dates change |
+
+The Schedule **C / A / 1 / SE** lines this situation maps onto are exactly the
+[line catalog](#the-line-catalog) in section 3 — declarative data the mapping
+engine targets, never code. Per the [privacy posture](#6-privacy), the instance
+above keeps placeholder names (`biz-a`, "Business A"): the *shape* of the
+situation is the example; the real names, accounts, and dollar figures belong
+only in the uncommitted profile in the data dir.
+
 ## 3. The default US ruleset
 
 The bundled default US ruleset lives in

@@ -1,5 +1,8 @@
 # Persona & configuration
 
+> ⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.
+> (Canonical wording: [`skills/shared/disclaimer.md`](../skills/shared/disclaimer.md).)
+
 The financial assistant has a **default voice** that any user can name. By
 default it speaks as **the Claude agent that runs the review** — your
 `workbench-core` agent — and falls back to **Hobbes** when no agent is
@@ -172,6 +175,27 @@ footer template and the sign-off carry **no literal name** — substitution is t
 only path. The Sprint 3 review engine (M2-3) composes these surfaces into the
 full HTML report and dispatch; it calls these subcommands rather than
 re-implementing the substitution.
+
+## The dispatch format — how the persona speaks a review
+
+After each review writes its HTML report, the persona emits a short **dispatch
+summary** to the session in a fixed shape:
+
+- **Exactly the top five findings** — one per line, ranked
+  highest-severity/impact first, never more, never fewer.
+- **An emoji severity prefix** opens each finding: 🔴 action required,
+  🟡 attention needed, 🟢 good/informational — matching the report's badge
+  taxonomy, so dispatch and report always agree.
+- **A bold one-line statement plus a 1–2 sentence action** per finding:
+  `{emoji} **Bold one-line statement.** 1–2 sentence action.`
+- A report-pointer line to the saved HTML report, and the **persona sign-off**
+  (`— {persona}, your financial assistant`, rendered via
+  `bin/persona.sh signoff` — never a hardcoded name).
+
+The frozen rendering contract — including the conditional not-tax-advice tag
+and a worked example per tier — is
+[`docs/dispatch-format.md`](./dispatch-format.md); the findings themselves come
+from the 12-section methodology ([`docs/methodology.md`](./methodology.md)).
 
 ## Voice overrides — data, never instructions
 
