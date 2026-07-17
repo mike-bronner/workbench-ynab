@@ -38,7 +38,10 @@ money helper (`assets/format-money.js`).
 ## The twelve sections
 
 As implemented in [`skills/review/ynab-review.md`](../skills/review/ynab-review.md)
-§6 — same names, same order:
+§6 — same order and, with two deliberate exceptions, the same names: rows 9 and
+12 keep the prototype's fuller names — **Financial Health Score** and
+**Tax Summary (YTD)** — where the skill abbreviates them to *Health Score* and
+*Tax Summary YTD*.
 
 | # | Section | What it does |
 |---|---|---|
@@ -69,8 +72,9 @@ batch-approval gate, is [`docs/write-back-safety.md`](./write-back-safety.md).
 ## Provenance — divergences from the prototype, called out
 
 The prototype (`~/Documents/Claude/Scheduled/ynab-financial-review/SKILL.md`)
-defined these twelve analyses; the productized skill keeps their names, order,
-and intent. The deliberate divergences:
+defined these twelve analyses; the productized skill keeps their order and
+intent, and — the two abbreviated section names noted above aside — their
+names. The deliberate divergences:
 
 - **Owner facts became config.** The prototype's inline employment structure,
   business category groups, filing status, deduction amounts, rates, and due
