@@ -172,15 +172,18 @@ plugin directory. Prove both halves:
 jq -e '[getpath(paths) | strings | test("^[0-9a-f]{64}$")] | any' "$CONFIG" \
   >/dev/null 2>&1 && echo "❌ token-shaped value in config.json" || echo "✅ config.json is token-free"
 
-# b) the token value appears in no file. Feed the secret over STDIN (-f -) so it
-# never lands in argv / ps / shell history, abort on an empty lookup (an empty
-# pattern matches every line → false alarm), and drive the verdict off whether
-# grep produced filenames — never its exit status. Recurse the whole tree (-r .).
+# b) the token value appears in no file, across BOTH trees the promise covers:
+# the repo checkout AND the installed plugin cache under ~/.claude/plugins. Feed
+# the secret over STDIN (-f -) so it never lands in argv / ps / shell history,
+# abort on an empty lookup (an empty pattern matches every line → false alarm),
+# and drive the verdict off whether grep produced filenames — never its exit status.
+SWEEP_ROOTS=( . )                                                            # the repo checkout
+[ -d "$HOME/.claude/plugins" ] && SWEEP_ROOTS+=( "$HOME/.claude/plugins" )   # + the installed plugin tree
 TOKEN="$(security find-generic-password -s ynab-mcp -a access-token -w)"
 if [ -z "$TOKEN" ]; then
   echo "empty token — Keychain lookup failed; aborting sweep"
 else
-  hits="$(printf '%s\n' "$TOKEN" | grep -rIlF -f - . 2>/dev/null)"
+  hits="$(printf '%s\n' "$TOKEN" | grep -rIlF -f - "${SWEEP_ROOTS[@]}" 2>/dev/null)"
   if [ -n "$hits" ]; then echo "❌ LEAK FOUND in:"; printf '%s\n' "$hits"; else echo "✅ no leak — token is Keychain-only"; fi
 fi
 unset TOKEN
@@ -212,30 +215,53 @@ seeding:
 - **Pass when:** it returns your budget names.
 
 **First-connection latency** — the vendored bundle + `node` spawn can lag on a
-cold first launch, and the canonical launcher notes a 30 s first-connection
-timeout class. Measure the spawn-to-first-response time and call out any delay
-approaching 30 s. From a checkout, against a `node_modules`-free sandbox mirroring
-a fresh machine:
+cold first launch. `bin/launcher.sh` itself documents **no** timeout of any kind;
+the real cold-start budget lives in the orchestrator, which grants **20 s** of
+boot patience (`~10 × 2 s`, per
+[`../agents/ynab-orchestrator.md`](../agents/ynab-orchestrator.md) and
+[`ynab-read-path.md`](ynab-read-path.md)). Measure the
+spawn-to-first-response time over a few cold runs and call out any delay
+approaching that **20 s boot-patience budget**. From a checkout, against a
+`node_modules`-free sandbox mirroring a fresh machine:
 
 ```bash
-SB="$(mktemp -d)"; mkdir -p "$SB/bin" "$SB/vendor/ynab-mcp"
-cp bin/ynab-mcp "$SB/bin/"; cp vendor/ynab-mcp/index.cjs "$SB/vendor/ynab-mcp/"
 FAKE_TOKEN='fake-boot-token-not-a-real-pat'   # any non-empty FAKE value — never a real YNAB PAT
-( cd "$SB"; export YNAB_ACCESS_TOKEN="$FAKE_TOKEN"
-  S=$(node -e 'process.stdout.write(String(Date.now()))')
-  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"lat","version":"0"}}}' \
-    | node bin/ynab-mcp 2>/dev/null | grep -m1 '"jsonrpc"' >/dev/null
-  E=$(node -e 'process.stdout.write(String(Date.now()))')
-  echo "spawn→first response ≈ $(( E - S )) ms" )
-rm -rf "$SB"
+for run in 1 2 3; do                          # a few cold runs, not a single shot
+  SB="$(mktemp -d)"; mkdir -p "$SB/bin" "$SB/vendor/ynab-mcp"
+  cp bin/ynab-mcp "$SB/bin/"; cp vendor/ynab-mcp/index.cjs "$SB/vendor/ynab-mcp/"
+  ( cd "$SB"; export YNAB_ACCESS_TOKEN="$FAKE_TOKEN"
+    S=$(node -e 'process.stdout.write(String(Date.now()))')
+    printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"lat","version":"0"}}}' \
+      | node bin/ynab-mcp 2>/dev/null | grep -m1 '"jsonrpc"' >/dev/null
+    E=$(node -e 'process.stdout.write(String(Date.now()))')
+    echo "run $run: spawn→first response ≈ $(( E - S )) ms" )
+  rm -rf "$SB"
+done
 ```
 
 ### Step 9 — Run a read-only review; confirm the report renders
 
-Run the weekly review (read-only path — it pulls budget, accounts, transactions
-and renders a report; it proposes nothing yet). **Pass when** the review
-completes, makes **no** writes to YNAB, and writes a polished HTML report whose
-`<style>` block includes the `@media print` rule:
+This criterion has two halves — one is sandbox-provable now, one is human-run.
+
+**Print-CSS half (sandbox-provable).** The rendered report is built from the
+frozen template
+[`../assets/report/template.html`](../assets/report/template.html), whose
+`<style>` block ships the `@media print` rule. That the template carries the
+print CSS is proven **offline** by
+[`../tests/report-template.test.sh`](../tests/report-template.test.sh) (it
+asserts the `@media print` block and the full print contract), so this half needs
+no live token:
+
+```bash
+grep -c "@media print" assets/report/template.html   # expect ≥ 1 (frozen template)
+bash tests/report-template.test.sh                    # expect "N passed, 0 failed", exit 0
+```
+
+**Live-review half (human-run).** Run the weekly review (read-only path — it
+pulls budget, accounts, transactions and renders a report; it proposes nothing
+yet). **Pass when** the review completes, makes **no** writes to YNAB, and writes
+a polished HTML report whose rendered `<style>` block includes the same
+`@media print` rule:
 
 ```bash
 grep -c "@media print" path/to/report.html   # expect ≥ 1
@@ -255,10 +281,10 @@ bash tests/offline-boot.sh   # expect: "N passed, 0 failed", exit 0
 
 ## Results
 
-**Run recorded:** 2026-07-17 · commit `e5bc5a1` (branch
-`chore/69-run-and-document-a-fresh-machine-clean-room-install`) · macOS darwin ·
-`node v24.18.0` · `jq-1.7.1` · `security(1)` present · `workbench-core` installed
-at `~/.claude/plugins/cache/claude-workbench/workbench-core/`.
+**Run recorded:** 2026-07-17 · branch
+`chore/69-run-and-document-a-fresh-machine-clean-room-install` (at HEAD) · macOS
+darwin · `node v24.18.0` · `jq-1.7.1` · `security(1)` present · `workbench-core`
+installed at `~/.claude/plugins/cache/claude-workbench/workbench-core/`.
 
 Steps split into **sandbox-executed** (run headlessly against a checkout and a
 `node_modules`-free sandbox) and **human-run only** (require a live Claude Code
@@ -276,7 +302,8 @@ session + real token — deferred to
 | 6a | `config.json` token-shaped-value guard | ✅ scan clean (guard logic verified against `setup` Step 4) |
 | 7 | Pre-approval glob is namespaced | ✅ prefix `mcp__plugin_workbench-ynab_ynab__` confirmed against the SSoT [`../skills/protocol/ynab-tools.md`](../skills/protocol/ynab-tools.md) |
 | 8 | MCP handshake + `ynab_list_budgets` registered | ✅ `initialize` + `tools/list` succeed offline; `ynab_list_budgets` present in the returned tool set (mechanical half — the live API call is human-run) |
-| 8 | First-connection latency | ✅ spawn→first response ≈ **365–385 ms** across 3 cold runs — **far** below the 30 s timeout class; no first-run delay observed |
+| 8 | First-connection latency | ✅ spawn→first response ≈ **482–531 ms** across 3 cold runs — **far** below the 20 s boot-patience budget (~40× headroom); no first-run delay observed |
+| 9 | Report template ships the print CSS (`@media print`) — offline proof | ✅ frozen `assets/report/template.html` has 6 `@media print`; `tests/report-template.test.sh` **55 passed, 0 failed** (print-CSS half — the live-review render is human-run) |
 | 10 | Offline-boot proof (`tests/offline-boot.sh`) | ✅ **5 passed, 0 failed**, exit 0, ~1.1 s wall |
 
 ### Human-run only — deferred to the release gate
@@ -291,7 +318,7 @@ YNAB token; they cannot run headlessly and are exercised in
 | 4 | Interactive `setup` — real token seeded to Keychain | verification-checklist §1–2 |
 | 6b | Full-tree token-leak sweep (needs the real token present) | verification-checklist §2 & §8 |
 | 8 | Live `ynab_list_budgets` returns real budget names | verification-checklist §3 |
-| 9 | Read-only review completes + HTML report renders incl. `@media print` | verification-checklist §3–4 |
+| 9 | Read-only review completes + the **live** report renders (behavioral half; the frozen template's `@media print` is sandbox-proven above) | verification-checklist §3–4 |
 
 The sandbox run proves the **mechanical** install/boot path (the part the
 vendoring decision is about) end to end; the behavioral half is proven by the

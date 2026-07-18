@@ -6,13 +6,19 @@
 # Pins the doc's AC-mandated invariants so a future edit can't silently drop
 # them: the canonical not-tax-advice tag (prominent, byte-for-byte, per #18); a
 # prerequisite step that asserts ALL FOUR prereqs (node, jq, security,
-# workbench-core) and fails fast; BOTH install paths (marketplace AND
-# local-checkout); the out-of-repo config path; the token-is-Keychain-only
-# verification; the namespaced pre-approval prefix; the ynab_list_budgets MCP
-# check; the first-connection latency measurement against the 30 s timeout
-# class; a Results section; and a Gaps section that links its follow-up. Style
-# mirrors tests/unit/docs-set.test.sh: raw bash, `set -u`, PASS/FAIL counters,
-# non-zero exit on any failure.
+# workbench-core) AND fails fast with a non-zero exit; BOTH install paths
+# (marketplace AND local-checkout); the out-of-repo config path; the
+# token-is-Keychain-only verification; the namespaced pre-approval prefix (Step 7);
+# the ynab_list_budgets MCP check routed THROUGH that glob (Step 8); the read-only
+# review's print-CSS invariant (Step 9); the first-connection latency measurement
+# against the real 20 s cold-start boot budget (bin/launcher.sh documents no
+# timeout); a Results section; and a Gaps section that links its follow-up.
+#
+# Several needles (the namespaced prefix, "20 s", @media print) recur across
+# steps, so the checks that pin a SPECIFIC step are section-scoped via
+# doc_section() — a whole-file grep stayed green with the whole step deleted.
+# Style mirrors tests/unit/docs-set.test.sh: raw bash, `set -u`, PASS/FAIL
+# counters, non-zero exit on any failure.
 #
 # The bare prefix (mcp__plugin_workbench-ynab_ynab__) and bare op names are used
 # here — never the concrete prefix+op concatenation — so this file stays clean
@@ -41,6 +47,30 @@ assert_contains() {
 TAG='⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.'
 PREFIX='mcp__plugin_workbench-ynab_ynab__'   # bare prefix — guard-safe
 
+# doc_section <step-label> — emit the BODY of a "### <step-label> — …" section, up
+# to (not including) the next "### " heading or a "---" rule. Empty when the step
+# is absent, so every section-scoped assertion below goes red the moment its step
+# is deleted or renamed — the discrimination a whole-file grep can't give, since
+# these needles recur across steps. Mirrors docs-set.test.sh's scoped extraction.
+doc_section() {
+  awk -v h="^### $1 " '
+    $0 ~ h { f = 1; next }
+    f && (/^### / || /^---$/) { exit }
+    f
+  ' "$REPO_ROOT/$DOC"
+}
+
+# assert_in_section <step-label> <desc> <literal> — the named step's body must
+# contain <literal>.
+assert_in_section() {
+  local label="$1" desc="$2" needle="$3"
+  if doc_section "$label" | grep -qF -- "$needle"; then
+    ok "$desc"
+  else
+    no "$desc"
+  fi
+}
+
 echo "fresh-install-test-doc.test.sh — the issue #69 clean-room install-test doc invariants"
 
 # --- the doc exists and carries the canonical disclaimer, prominently ----------
@@ -64,8 +94,17 @@ assert_contains "prereq step confirms all four prereqs" "node, jq, security, wor
 # workbench-core is the prereq setup itself omits — pin its concrete detection so
 # it can't be quietly weakened to a three-tool check.
 assert_contains "prereq step detects workbench-core via the plugins cache" "cache/*/workbench-core"
-# Fail-fast on a miss — mirrors the dev-team setup Step 2 pattern.
-assert_contains "prereq step fails fast on a miss" "Missing prerequisites:"
+# Fail-fast on a miss — mirrors the dev-team setup Step 2 pattern. Pin BOTH the
+# message AND the non-zero exit: the message alone stayed green when `exit 1` was
+# removed (the block would print and fall through). Extract the miss block
+# (Missing prerequisites: → the ✅ all-present confirm) and assert it exits 1.
+assert_contains "prereq step announces the miss" "Missing prerequisites:"
+MISS_BLOCK="$(awk '/Missing prerequisites:/{f=1} f{print} /all present/{exit}' "$REPO_ROOT/$DOC")"
+if printf '%s\n' "$MISS_BLOCK" | grep -qF -- "exit 1"; then
+  ok "prereq miss block fails fast with a non-zero exit"
+else
+  no "prereq miss block fails fast with a non-zero exit"
+fi
 assert_contains "prereq step enforces the pinned Node floor" "meets the Node >= "
 
 # --- both install paths covered (AC #1) ----------------------------------------
@@ -80,18 +119,50 @@ assert_contains "documents the Keychain-only token verification" "security find-
 assert_contains "states the token is Keychain-only" "Keychain-only"
 
 # --- namespaced pre-approval glob (AC #8) --------------------------------------
-assert_contains "documents the namespaced pre-approval prefix" "$PREFIX"
+# Section-scoped to Step 7: the bare $PREFIX recurs 6× across the doc (Steps 3, 7,
+# 8, and the Results table), so a whole-file grep stayed green with all of Step 7
+# deleted. Pin it to Step 7's body so dropping the pre-approval step fails.
+assert_in_section "Step 7" "Step 7 documents the namespaced pre-approval prefix" "$PREFIX"
 
-# --- MCP connection verified via ynab_list_budgets (AC #4) ---------------------
-# Bare op name — the concrete prefix+op concatenation is guard-forbidden here.
-assert_contains "names ynab_list_budgets as the MCP connection check" "ynab_list_budgets"
+# --- MCP connection verified via ynab_list_budgets, THROUGH the glob (AC #4) ----
+# One linked invariant, not two independent greps: Step 8 must name
+# ynab_list_budgets AND route it through the namespaced glob. Checked separately, a
+# Step 8 that called the op "directly" (severing the glob) still passed. Bare op
+# name + bare prefix, never the concrete prefix+op concatenation (guard-forbidden).
+if doc_section "Step 8" | grep -qF -- "ynab_list_budgets" \
+   && doc_section "Step 8" | grep -qF -- "$PREFIX"; then
+  ok "Step 8 calls ynab_list_budgets through the namespaced glob (AC #4, linked)"
+else
+  no "Step 8 calls ynab_list_budgets through the namespaced glob (AC #4, linked)"
+fi
+
+# --- AC #5: Step 9 pins the read-only-review / print-CSS invariant --------------
+# Nothing pinned Step 9 before — deleting the whole step left the suite at 21/21.
+# Section-scoped so a dropped Step 9 fails, and it pins the print-CSS half that IS
+# sandbox-provable: the frozen template's @media print + the offline report-template
+# proof (tests/report-template.test.sh). The live-review half stays human-run.
+if doc_section "Step 9" | grep -qF -- "@media print" \
+   && doc_section "Step 9" | grep -qF -- "tests/report-template.test.sh"; then
+  ok "Step 9 pins the print-CSS invariant + offline report-template proof (AC #5)"
+else
+  no "Step 9 pins the print-CSS invariant + offline report-template proof (AC #5)"
+fi
 
 # --- Results section present (AC #3) -------------------------------------------
 assert_contains "has a Results section" "## Results"
 
-# --- first-connection latency vs the 30 s timeout class (AC #9) ----------------
-assert_contains "measures first-connection latency" "spawn→first response"
-assert_contains "calls out the 30 s timeout class" "30 s timeout class"
+# --- first-connection latency vs the real 20 s boot budget (AC #9) -------------
+# The doc previously mis-attributed a "30 s timeout class" to bin/launcher.sh,
+# which documents no timeout at all; the real cold-start budget is 20 s
+# (agents/ynab-orchestrator.md, docs/ynab-read-path.md). Pin the corrected figure
+# section-scoped to Step 8, AND guard that the false claim never returns.
+assert_in_section "Step 8" "measures first-connection latency" "spawn→first response"
+assert_in_section "Step 8" "cites the real 20 s boot-patience budget" "20 s boot-patience budget"
+if grep -qF -- "30 s timeout class" "$REPO_ROOT/$DOC"; then
+  no "doc no longer ships the false 30 s launcher-timeout claim"
+else
+  ok "doc no longer ships the false 30 s launcher-timeout claim"
+fi
 
 # --- gaps section links the follow-up (AC #10) --------------------------------
 assert_contains "has a Gaps found section" "## Gaps found"
