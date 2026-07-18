@@ -190,8 +190,9 @@ Two guarantees apply to all of them:
 - **Owner-only permissions at creation.** Every artifact is written mode **0600**
   (owner read/write only) and every directory the plugin creates is mode **0700**,
   applied *at creation time* (via `umask`/explicit mode) so there is never a
-  window in which a freshly-written financial file is world-readable. The `.mjs`
-  state writers, `bin/audit-log.sh`, and `bin/report-writer.sh` all enforce this.
+  window in which a freshly-written financial file is world-readable. `commands/setup.md`
+  (the data dir + `config.json`), the `.mjs` state writers, `bin/audit-log.sh`,
+  and `bin/report-writer.sh` all enforce this.
 - **Not for shared or cloud-synced locations.** The default report directory,
   `~/Documents/Claude/Reports`, sits under `~/Documents`, which **macOS may sync
   to iCloud Drive** when Desktop & Documents syncing is enabled — silently
@@ -215,9 +216,12 @@ directory, `~/.claude/plugins/data/workbench-ynab-claude-workbench/`.
 | Estimated-tax tracker | `<data-dir>/tax-tracker.json` | Running estimated-tax totals. | Single live file, overwritten in place. |
 | Tax profile | `<data-dir>/tax-profile.json` | Your tax configuration (filing status, rates, thresholds). | Live config — removed at uninstall. |
 | Config | `<data-dir>/config.json` | Budget ids, business/tax/persona/report settings (never the token — that is Keychain-only). | Live config — removed at uninstall. |
+| Change-set proposals *(future — M4-10)* | `<data-dir>/proposals/changeset-<stamp>.json` (default; override `.apply.proposal_path`) | The pending proposed ledger writes a review emits ([design](assets/changeset-lifecycle.md)). Not written yet — the review write path (**M4-10**) will emit them. | **Not yet swept.** When M4-10 lands it must create these `0600`, add them to this inventory, and give them a retention story (extend `bin/ynab-prune.sh` to `proposals/`), since they accumulate unbounded like reports. |
 
 **Retention & pruning.** Review reports are the one artifact that grows without
-bound, so [`bin/ynab-prune.sh`](bin/ynab-prune.sh) enforces a documented retention
+bound (once the proposal writer lands, its `proposals/` files will be a second —
+see the inventory row above), so [`bin/ynab-prune.sh`](bin/ynab-prune.sh) enforces
+a documented retention
 policy: it removes report files older than a maximum age (default **30 days**,
 overridable per-install via `.report.retention_days` in `config.json` or
 per-invocation via `--days N`). It is **dry-run by default** — it previews exactly

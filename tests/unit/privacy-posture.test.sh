@@ -36,6 +36,17 @@ test_security_md_inventory_enumerates_artifacts_and_references_67() {
   assert_contains "$sec" "issues/67" "inventory references the uninstall issue #67"
 }
 
+# The privacy posture covers PROPOSALS too — the issue title is "reports,
+# proposals, and audit files." No proposal writer exists yet (M4-10), but the
+# committed change-set design specifies separate proposals/ JSON files, so the
+# inventory must acknowledge that future artifact class and state it needs 0600 +
+# a retention story when M4-10 lands — not imply proposals don't exist (AC #1/#3/#8).
+test_security_md_inventory_acknowledges_future_proposals() {
+  local sec; sec="$(cat "$REPO_ROOT/SECURITY.md")"
+  assert_contains "$sec" "proposals/changeset-<stamp>.json" "inventory lists the future proposals path"
+  assert_contains "$sec" "M4-10" "inventory attributes the proposal writer to M4-10"
+}
+
 # README's privacy section mentions the generated artifacts, their location, and
 # the iCloud sync risk (AC #7).
 test_readme_privacy_covers_artifacts_and_icloud() {
@@ -56,6 +67,29 @@ test_setup_summary_prints_privacy_notice() {
   # expand — SC2088 is a false positive.
   # shellcheck disable=SC2088
   assert_contains "$su" "~/Documents/Claude/Reports" "setup notice names the report directory"
+}
+
+# Setup hardens the data dir AND config.json to owner-only at creation (AC #1/#2,
+# blocker: they were world-accessible on the primary install path). Setup is the
+# FIRST creator of the data dir, so a bare `mkdir -p` here left it 0755 and later
+# writers never widened it back. Pin the three hardening commands so a future edit
+# can't silently drop them and re-open the world-readable hole SECURITY.md then
+# claims is closed. `umask 077` gives a fresh dir no world-readable window; the
+# explicit chmods tighten an existing loose dir/config (setup is idempotent).
+test_setup_hardens_data_dir_and_config_at_creation() {
+  local su; su="$(cat "$REPO_ROOT/commands/setup.md")"
+  # The single-quoted needles are LITERAL setup.md text to find (the `$CONFIG_DIR`
+  # / `$CONFIG_FILE` inside them are documented shell, not expansions here) — so
+  # SC2016 is a false positive on all three.
+  # shellcheck disable=SC2016
+  assert_contains "$su" 'umask 077; mkdir -p "$CONFIG_DIR"' \
+    "setup creates the data dir under umask 077 (0700, no world-readable window)"
+  # shellcheck disable=SC2016
+  assert_contains "$su" 'chmod 700 "$CONFIG_DIR"' \
+    "setup tightens an existing data dir to 0700"
+  # shellcheck disable=SC2016
+  assert_contains "$su" 'chmod 600 "$CONFIG_FILE.tmp"' \
+    "setup restricts config.json to 0600 before publishing it"
 }
 
 # The retention constant is documented in the config schema (AC #3).

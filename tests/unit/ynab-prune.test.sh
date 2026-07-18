@@ -112,6 +112,59 @@ test_tilde_output_dir_expands_under_home() {
   return 0
 }
 
+# A `$VAR` in .report.output_dir is resolved to the variable's VALUE (via the
+# shared expand_path), so prune scans exactly the directory the writer wrote to —
+# NOT a literal `$VAR` path that exits 2 or silently finds nothing. Before prune
+# shared the writer's resolver this case silently no-op'd. The heredoc is
+# single-quoted so `$YNAB_PRUNE_DIR` reaches prune UNEXPANDED — the parent shell
+# must not pre-expand it, or expand_path is never exercised.
+test_env_var_in_output_dir_resolves_and_prunes() {
+  local dir="$SANDBOX/env-dir" cfg="$SANDBOX/env-cfg.json" out rc=0
+  seed_reports "$dir"
+  export YNAB_PRUNE_DIR="$dir"
+  # shellcheck disable=SC2016
+  cat > "$cfg" <<'JSON'
+{ "report": { "output_dir": "$YNAB_PRUNE_DIR", "retention_days": 30 } }
+JSON
+  out="$( YNAB_CONFIG_FILE="$cfg" bash "$PRUNE" --apply )" || rc=$?
+  unset YNAB_PRUNE_DIR
+  assert_eq "0" "$rc" "a \$VAR output_dir resolves and exits 0"
+  assert_contains "$out" "removed 2 of 2 report(s)" "old reports in the \$VAR-resolved dir are pruned"
+  [ -e "$dir/YNAB-Weekly-Review-2020-01-01.html" ] && fail "\$VAR output_dir: old report was not deleted (dir did not resolve)"
+  assert_file_exists "$dir/YNAB-Weekly-Review-2099-01-01.html"
+}
+
+# The BRACED `${VAR}` form resolves too — a mutation dropping the `${…}` regex
+# alternative from expand_path would leave the bare-$VAR test green but fail this.
+test_braced_env_var_in_output_dir_resolves() {
+  local dir="$SANDBOX/braced-dir" cfg="$SANDBOX/braced-cfg.json" out rc=0
+  seed_reports "$dir"
+  export YNAB_PRUNE_BRACED="$dir"
+  cat > "$cfg" <<'JSON'
+{ "report": { "output_dir": "${YNAB_PRUNE_BRACED}", "retention_days": 30 } }
+JSON
+  out="$( YNAB_CONFIG_FILE="$cfg" bash "$PRUNE" )" || rc=$?
+  unset YNAB_PRUNE_BRACED
+  assert_eq "0" "$rc" "a \${VAR} output_dir resolves and exits 0"
+  assert_contains "$out" "$dir/YNAB-Weekly-Review-2020-01-01.html" \
+    "\${VAR} expanded to its value — the old report is a listed candidate"
+}
+
+# A SYMLINKED output dir is normalized to its physical target and scanned. On
+# BSD/macOS `find <symlink>` (no -L) does NOT descend a symlink given as the scan
+# root, so without the `pwd -P` normalization prune would report "nothing to
+# prune" while old reports sit in the real directory.
+test_symlinked_output_dir_is_scanned() {
+  local real="$SANDBOX/real-reports" link="$SANDBOX/link-reports" out rc=0
+  seed_reports "$real"
+  ln -s "$real" "$link"
+  out="$( bash "$PRUNE" --output-dir "$link" --days 30 --apply )" || rc=$?
+  assert_eq "0" "$rc" "a symlinked output dir exits 0"
+  assert_contains "$out" "removed 2 of 2 report(s)" "old reports under the symlinked dir are pruned"
+  [ -e "$real/YNAB-Weekly-Review-2020-01-01.html" ] && fail "symlinked dir: old report was not deleted (find did not descend)"
+  assert_file_exists "$real/YNAB-Weekly-Review-2099-01-01.html"  # fresh survives
+}
+
 # A non-numeric --days is a usage error (exit 2), never a silent fallback that
 # could delete more than intended.
 test_non_numeric_days_is_usage_error() {

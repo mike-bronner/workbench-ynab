@@ -204,7 +204,15 @@ user, or fields added by a future schema) are preserved — never a blind
 overwrite:
 
 ```bash
-mkdir -p "$CONFIG_DIR"
+# The data dir holds config.json — your tax profile (filing status, rates,
+# thresholds) and business identity — and every other generated artifact, so it
+# is owner-only (mode 0700) from creation (issue #65, GAP-21). Setup is the FIRST
+# creator of this dir on a fresh install; later writers deliberately never widen a
+# parent they didn't create, so if setup left it 0755 the loose mode would stick.
+# `( umask 077; mkdir -p )` gives a FRESH dir 0700 with no world-readable window;
+# the explicit chmod additionally tightens a dir left 0755 by a pre-privacy
+# install (setup is idempotent and the recommended step after every update).
+( umask 077; mkdir -p "$CONFIG_DIR" ) && chmod 700 "$CONFIG_DIR"
 
 # $NEW_JSON is the object Step 3 assembled (schema_version + budget + optional
 # business + tax_profile + persona + report). Merge it over the existing file so
@@ -263,6 +271,20 @@ if [ "$TOKEN_SCAN" -eq 0 ]; then
 elif [ "$TOKEN_SCAN" -ne 1 ]; then
   rm -f "$CONFIG_FILE.tmp"
   echo "❌ Could not verify the staged config is token-free (jq failed to scan it) — $CONFIG_FILE left untouched." >&2
+  exit 1
+fi
+
+# config.json holds your tax profile and business identity — restrict it to
+# owner-only (mode 0600) BEFORE publishing, so the file at its final path is never
+# world-readable, even briefly (mirrors bin/ynab-migrate.sh:231 and the report
+# writer). The jq `>` redirect created the .tmp under the caller's umask (0644 by
+# default) — the chmod makes the 0600 guarantee independent of that umask, and the
+# atomic mv carries it onto the real path, tightening an existing 0644 config too.
+# Fail CLOSED like every gate above: on a chmod failure drop the staged file and
+# leave the real config untouched rather than publish a world-readable one.
+if ! chmod 600 "$CONFIG_FILE.tmp"; then
+  rm -f "$CONFIG_FILE.tmp"
+  echo "❌ Could not restrict config.json to owner-only (mode 0600) — $CONFIG_FILE left untouched." >&2
   exit 1
 fi
 mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
@@ -466,11 +488,11 @@ Print a clean summary block:
   🔒 Privacy — generated reports (~/Documents/Claude/Reports) and your data dir
      (~/.claude/plugins/data/workbench-ynab-claude-workbench) are UNENCRYPTED
      plaintext financial records — full transaction history, balances, and tax
-     detail. They are created owner-only (mode 0600). ⚠️ ~/Documents/Claude may
-     sync to iCloud Drive on macOS: keep these on local, FileVault-encrypted
-     storage and don't point .report.output_dir at a shared or cloud-synced
-     folder. Prune old reports with /workbench-ynab:ynab-prune. Full inventory:
-     SECURITY.md → Generated Artifacts.
+     detail. They are created owner-only (files mode 0600, directories mode
+     0700). ⚠️ ~/Documents/Claude may sync to iCloud Drive on macOS: keep these
+     on local, FileVault-encrypted storage and don't point .report.output_dir at
+     a shared or cloud-synced folder. Prune old reports with
+     /workbench-ynab:ynab-prune. Full inventory: SECURITY.md → Generated Artifacts.
 
   ⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.
 ═══════════════════════════════════════════
