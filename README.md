@@ -182,6 +182,11 @@ security find-generic-password -s "ynab-mcp" -a "access-token" -w
 
 This path is deliberately outside the installed plugin tree, so **plugin updates never clobber it** — re-installing or upgrading `workbench-ynab` leaves your config and tax profile untouched. The config never holds the token (that's Keychain-only), and it is never committed.
 
+**Generated reports & data are unencrypted, plaintext financial records.** Every review run writes files to your local disk — the HTML report (default `~/Documents/Claude/Reports/`) plus the audit log, monitor state, and estimated-tax tracker under the data directory above. Together they hold your **complete transaction history, balances, payees, and tax detail in cleartext**. The plugin creates them owner-only (mode `0600`, directories `0700`) at write time, but does **not** encrypt them. Two things to know:
+
+- **⚠️ `~/Documents` may sync to iCloud Drive.** With macOS Desktop & Documents syncing enabled, your financial reports can be silently uploaded to iCloud. Keep them on local, disk-encrypted storage (enable **FileVault**) and don't point `.report.output_dir` at a shared or cloud-synced folder unless you intend those records to travel there.
+- **Prune old reports.** Reports accumulate one file per run. [`bin/ynab-prune.sh`](bin/ynab-prune.sh) removes reports older than a retention threshold (default 30 days, dry-run by default). See the [**Generated Artifacts**](SECURITY.md#generated-artifacts) section of `SECURITY.md` for the full artifact inventory, locations, and retention policy.
+
 ## Commands
 
 Every command is namespaced under `/workbench-ynab:`. The plugin is mid-build; the **Ships in** column marks the sprint each command lands in (see [`docs/ROADMAP.md`](docs/ROADMAP.md)).
@@ -196,6 +201,7 @@ Every command is namespaced under `/workbench-ynab:`. The plugin is mid-build; t
 | `/workbench-ynab:ynab-annual-review` | Run the annual review ad-hoc — plans via the orchestrator, then forces the annual tier only. | Sprint 3 |
 | `/workbench-ynab:ynab-apply` | Review a proposed change-set and, on explicit approval, apply the ledger-only writes (dry-run by default). | Sprint 4 |
 | `/workbench-ynab:ynab-migrate` | Retire the legacy hand-run prototype: the old Desktop connector, its token, and the prototype scheduled tasks/directories. | Sprint 5 |
+| `/workbench-ynab:ynab-prune` | Prune old generated reports under the retention policy — previews by default, deletes only with `--apply`. Keeps unencrypted financial history from accumulating unbounded. | Sprint 5 |
 | `/workbench-ynab:ynab-monitor` | Run one proactive between-run monitoring pass: advance the monitor state store from fresh YNAB data, exit silently when nothing changed. Scaffold only — no alerts/detectors yet. | Sprint 6 (v-Next) |
 
 ## Versioning

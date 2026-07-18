@@ -176,6 +176,72 @@ auditable from one file: **registry hash → downloaded tarball → extracted CJ
 committed copy**. The exact commands and pass/fail criteria live in
 [`docs/vendoring.md`](docs/vendoring.md#verifying-upstream-provenance).
 
+## Generated Artifacts
+
+The token and the vendored bundle are not the only sensitive surfaces. Every
+review run writes **unencrypted, plaintext files** to your local disk that
+together contain your **complete financial detail** — transaction history,
+balances, payees, category assignments, and tax figures. They are **not
+encrypted at rest** by this plugin; their only protection is owner-only file
+permissions and the privacy of the machine they live on.
+
+Two guarantees apply to all of them:
+
+- **Owner-only permissions.** Every artifact is written mode **0600** (owner
+  read/write only) and every directory the plugin creates is mode **0700**. The
+  data directory is created *at creation time* under `umask 077` (`commands/setup.md`,
+  `commands/ynab-migrate.md`) so there is never a window in which it is
+  world-traversable; `config.json` is additionally `chmod 600` before it is
+  atomically published, so its final path is never world-readable even though that
+  mode is applied post-write (the 0700 dir already gates it). The report writer
+  creates a `0600` temp file and `chmod`s it before the atomic `mv`, leaving no
+  world-readable window either. `commands/setup.md` and `commands/ynab-migrate.md`
+  (the data dir + `config.json`), the `.mjs` state writers, `bin/audit-log.sh`,
+  and `bin/report-writer.sh` all enforce this.
+- **Not for shared or cloud-synced locations.** The default report directory,
+  `~/Documents/Claude/Reports`, sits under `~/Documents`, which **macOS may sync
+  to iCloud Drive** when Desktop & Documents syncing is enabled — silently
+  uploading your full financial reports to cloud storage. Keep the report and
+  data directories on local, disk-encrypted storage (enable **FileVault**), and
+  do **not** point `.report.output_dir` at a shared drive, a synced folder, or a
+  cloud-backed location unless you intend those records to be copied there.
+
+### Artifact inventory
+
+Every file the plugin generates that contains financial data, where it lives, and
+who is responsible for pruning it. `<data-dir>` is the update-stable plugin data
+directory, `~/.claude/plugins/data/workbench-ynab-claude-workbench/`.
+
+| Artifact | Path pattern | Contains | Pruning |
+|---|---|---|---|
+| Review report | `<report-dir>/YNAB-<Tier>-Review-<YYYY-MM-DD>.html` (default `<report-dir>` = `~/Documents/Claude/Reports/`) | Full review: classifications, income/spending, balances, cash-flow, net worth, tax summary — and the proposed change-set ([#53](https://github.com/mike-bronner/workbench-ynab/issues/53)). Accumulates one file per run. | **`bin/ynab-prune.sh`** — retention policy (see below). |
+| Write-back audit log | `<data-dir>/audit/audit-<YYYY-MM>.jsonl` | Append-only record of every applied ledger write (categorize / allocate / reconcile / delete-duplicate) with tool + result. | Retained deliberately as the write-back trail — user-managed. |
+| Monitor state | `<data-dir>/monitor-state.json` | Latest between-run monitoring snapshot (balances / transaction deltas). | Single live file, overwritten in place — no accumulation. |
+| Alert log | `<data-dir>/alert-log.jsonl` | Append-only monitoring alerts. | User-managed. |
+| Estimated-tax tracker | `<data-dir>/tax-tracker.json` | Running estimated-tax totals. | Single live file, overwritten in place. |
+| Tax profile | `<data-dir>/tax-profile.json` | Your tax configuration (filing status, rates, thresholds). | Live config — removed at uninstall. |
+| Config | `<data-dir>/config.json` | Budget ids, business/tax/persona/report settings (never the token — that is Keychain-only). | Live config — removed at uninstall. |
+| Change-set proposals *(future — M4-10)* | `<data-dir>/proposals/changeset-<stamp>.json` (default; override `.apply.proposal_path`) | The pending proposed ledger writes a review emits ([design](assets/changeset-lifecycle.md)). Not written yet — the review write path (**M4-10**) will emit them. | **Not yet swept.** When M4-10 lands it must create these `0600`, add them to this inventory, and give them a retention story (extend `bin/ynab-prune.sh` to `proposals/`), since they accumulate unbounded like reports. |
+
+**Retention & pruning.** Review reports are the one artifact that grows without
+bound (once the proposal writer lands, its `proposals/` files will be a second —
+see the inventory row above), so [`bin/ynab-prune.sh`](bin/ynab-prune.sh) enforces
+a documented retention
+policy: it removes report files older than a maximum age (default **30 days**,
+overridable per-install via `.report.retention_days` in `config.json` or
+per-invocation via `--days N`). It is **dry-run by default** — it previews exactly
+what would be deleted and removes nothing unless `--apply` is passed:
+
+```bash
+bash bin/ynab-prune.sh              # preview reports older than the threshold
+bash bin/ynab-prune.sh --apply      # actually delete them
+```
+
+**Uninstall.** The uninstall / teardown flow
+([#67](https://github.com/mike-bronner/workbench-ynab/issues/67)) references this
+inventory so it can enumerate the correct paths when prompting you to remove
+residual financial data — the report directory and every `<data-dir>` file above.
+
 ## Reporting a vulnerability
 
 **Do not open a public GitHub issue for a security vulnerability.** Instead, use

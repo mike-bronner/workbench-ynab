@@ -374,6 +374,22 @@ test_seed_config_strips_placeholder_budgets() {
   rm -rf "$sb"
 }
 
+# /ynab-migrate can be the FIRST creator of the plugin data dir on the legacy-
+# prototype path (it seeds config without requiring /setup first), so it must
+# create that dir owner-only (0700) — a bare `mkdir -p` left it world-traversable
+# (0755) under a loose umask, leaking filenames + mtimes of every artifact to
+# other local users (issue #65). Seed into a data dir that does NOT exist yet, run
+# under a LOOSE umask so a regression to bare `mkdir -p` would land 0755, and
+# assert the created dir is exactly 0700.
+test_seed_config_creates_data_dir_owner_only() {
+  local sb dir cfg rc=0
+  sb="$(mktemp -d)"; dir="$sb/data"; cfg="$dir/config.json"   # $dir does not exist yet
+  ( umask 022; bash "$MIGRATE" seed-config "$cfg" ) >/dev/null || rc=$?
+  assert_eq 0 "$rc" "seed-config should exit 0 while creating the data dir"
+  assert_eq "$dir" "$(find "$dir" -maxdepth 0 -perm 700)" "the created data dir must be owner-only (0700)"
+  rm -rf "$sb"
+}
+
 test_seed_config_is_idempotent() {
   local sb cfg before after out rc=0
   sb="$(mktemp -d)"; cfg="$sb/config.json"

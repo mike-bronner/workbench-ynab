@@ -207,6 +207,11 @@
         "template_path": {
           "type": ["string", "null"],
           "description": "Path to the frozen HTML report template. When null, the plugin's bundled template under assets/ is used. The bundled template is frozen in Sprint 3 (issue #42)."
+        },
+        "retention_days": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum age, in days, a generated report is kept before bin/ynab-prune.sh treats it as a pruning candidate. OPTIONAL — when absent the prune tool applies the shipped default of 30 days. Reports are unencrypted plaintext financial records (issue #65), so this bounds how much history accumulates on disk. See SECURITY.md → Generated Artifacts."
         }
       }
     },

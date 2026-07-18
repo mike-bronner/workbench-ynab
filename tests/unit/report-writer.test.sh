@@ -267,16 +267,37 @@ test_invalid_slot_name_rejected_at_parse() {
   assert_contains "$err" "invalid --slot name" "error explains the bad slot name"
 }
 
-# A configured output_dir that expands to empty (e.g. an unset $VAR) is refused
-# rather than silently writing to the filesystem root.
+# A configured output_dir that resolves to EMPTY — a SET-but-empty $VAR — is
+# refused rather than silently writing to the filesystem root. (An UNSET $VAR is
+# refused earlier still, by expand_path itself — see the next test.) The var is
+# exported so the writer subprocess sees it SET-but-empty; expand_path resolves
+# it to "" and the writer's own empty-path guard (line ~213) rejects it.
 test_empty_output_dir_is_rejected() {
   local cfg="$SANDBOX/empty-dir.json" rc=0 err
+  export YNAB_SET_EMPTY_DIR=""
   cat > "$cfg" <<'JSON'
-{ "report": { "output_dir": "$YNAB_NOPE_UNSET_VAR" } }
+{ "report": { "output_dir": "$YNAB_SET_EMPTY_DIR" } }
 JSON
   err="$( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 2>&1 )" || rc=$?
+  unset YNAB_SET_EMPTY_DIR
   assert_eq "2" "$rc" "output dir resolving to empty → usage error (exit 2)"
   assert_contains "$err" "output dir resolved to empty" "error explains the empty output dir"
+}
+
+# An UNSET $VAR — whether it is the whole value or only PART of a longer path — is
+# REFUSED by expand_path, not silently swallowed to "". `$TYPO/reports` with TYPO
+# unset must NOT collapse to `/reports` (a valid-looking absolute path the
+# empty-check never fires on) and send the writer to the filesystem root; the
+# resolver fails so the writer exits 2 "did not fully resolve". The single-quoted
+# heredoc keeps `$YNAB_DEFINITELY_UNSET_VAR` UNEXPANDED so expand_path is exercised.
+test_unset_var_embedded_in_output_dir_is_refused() {
+  local cfg="$SANDBOX/unset-embedded.json" rc=0 err
+  cat > "$cfg" <<'JSON'
+{ "report": { "output_dir": "$YNAB_DEFINITELY_UNSET_VAR/reports" } }
+JSON
+  err="$( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 2>&1 )" || rc=$?
+  assert_eq "2" "$rc" "an unset \$VAR embedded in output_dir → usage error (exit 2)"
+  assert_contains "$err" "did not fully resolve" "error explains the unresolved output dir"
 }
 
 # #28 cost invariant: .report.output_dir is config-sourced and unbounded, and
@@ -857,6 +878,38 @@ JSON
   assert_contains "$err" "did not fully resolve" "the error explains the unresolved mid-string ~ output dir"
   [ -z "$(find "$cwd" -name '*.html')" ] \
     || fail "writer wrote a report to a literal mid-string ~ directory"
+}
+
+# Privacy hardening (issue #65, GAP-21): a report is an UNENCRYPTED financial
+# record, so the WRITTEN file must be owner-only (0600) and a directory the writer
+# CREATES must be owner-only (0700) — with no world-readable window at creation.
+# Portable octal-perms read, GNU-first (see the note in tests/unit/audit-log.test.sh).
+mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+
+# A report written into a freshly-created (nested) output dir: file 0600, and
+# every directory component the writer created is 0700.
+test_written_report_and_created_dir_are_owner_only() {
+  local dir="$SANDBOX/perms/nested" out
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" \
+          run_writer_fixture --tier Weekly --date 2026-06-22 --output-dir "$dir" )"
+  assert_file_exists "$out"
+  assert_eq "600" "$(mode_of "$out")"      "written report file is mode 0600"
+  assert_eq "700" "$(mode_of "$dir")"      "created leaf output dir is mode 0700"
+  assert_eq "700" "$(mode_of "$SANDBOX/perms")" "created parent dir is mode 0700 (umask 077, no world-readable window)"
+}
+
+# An ALREADY-EXISTING output dir is deliberately NOT force-chmod'd (the user may
+# share it on purpose), but the FILE is hardened to 0600 unconditionally — its
+# content is what's sensitive. Seed a loose 0755 dir + drop a report into it.
+test_file_is_hardened_even_in_a_preexisting_loose_dir() {
+  local dir="$SANDBOX/preexisting-loose" out
+  mkdir -p "$dir"; chmod 755 "$dir"
+  assert_eq "755" "$(mode_of "$dir")" "pre-existing dir starts at 0755"
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" \
+          run_writer_fixture --tier Monthly --date 2026-02-28 --output-dir "$dir" )"
+  assert_file_exists "$out"
+  assert_eq "600" "$(mode_of "$out")" "report file is 0600 even inside a pre-existing loose dir"
+  assert_eq "755" "$(mode_of "$dir")" "a pre-existing dir the writer did not create is left untouched"
 }
 
 run_tests

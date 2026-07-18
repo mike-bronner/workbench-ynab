@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -264,6 +264,20 @@ test('writeState writes owner-only: the state file is 0600 and its leaf data dir
   const statePath = join(dir, 'monitor-state.json');
   writeState(defaultState(), { statePath, dataDir: TMP });
   assert.equal(statSync(statePath).mode & 0o777, 0o600);
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+});
+
+test('writeState re-tightens a pre-existing loose data dir to 0700', () => {
+  // mkdirSync's `mode` is a no-op when the dir already exists, so a data dir left
+  // 0755 by an earlier writer would stay world-traversable unless writeState
+  // chmods it. Pre-create the leaf loose, then assert writeState tightens it —
+  // this fails if the unconditional chmodSync(dir, 0o700) is dropped, matching
+  // lib/monitor/alerts.mjs / bin/audit-log.sh which chmod the dir on every write.
+  const dir = join(TMP, `preexisting-loose-${seq++}`);
+  mkdirSync(dir, { recursive: true });
+  chmodSync(dir, 0o755);
+  const statePath = join(dir, 'monitor-state.json');
+  writeState(defaultState(), { statePath, dataDir: TMP });
   assert.equal(statSync(dir).mode & 0o777, 0o700);
 });
 

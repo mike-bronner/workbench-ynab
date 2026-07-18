@@ -31,6 +31,11 @@ source "$REPO_ROOT/tests/lib/assert.sh"
 
 CMD="$REPO_ROOT/commands/setup.md"
 
+# Portable octal-perms read: GNU `stat -c '%a'` probed FIRST (on GNU, `stat -f`
+# misreads `%Lp`), BSD/macOS `stat -f '%Lp'` as the fallback. Same helper the
+# report-writer / audit-log suites use for mode-bit assertions.
+mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+
 # Pull the first ```bash fenced block out of the "## Step 4" section — the
 # config-write code as shipped. Restructuring Step 4 breaks the extraction
 # guard test below, which is the signal to update this test.
@@ -146,6 +151,24 @@ test_token_gate_fails_closed() {
     "the token gate treats any scan outcome other than exit 1 as unsafe"
   assert_contains "$block" "Could not verify the staged config is token-free" \
     "the cannot-verify abort path exists"
+}
+
+# AC1: the plugin data dir is owner-only (0700) — and a PRE-EXISTING loose (0755)
+# dir is TIGHTENED, because Step 4's `chmod 700 "$CONFIG_DIR"` is now a fail-closed
+# gate, not a swallowed afterthought. The dir pre-exists at 0755, so the block's
+# `mkdir -p` is a no-op on its mode — only the explicit chmod tightens it, so
+# dropping that chmod reddens this. Runs under umask 022 so a regression to a bare
+# `mkdir -p` (no umask/chmod) would also leave a FRESH dir 0755 and fail here.
+test_data_dir_tightened_to_0700_when_preexisting_loose() {
+  local dir out
+  dir="$(mktemp -d)"
+  chmod 755 "$dir"
+  assert_eq "755" "$(mode_of "$dir")" "the data dir pre-exists loose (0755)"
+  out="$( umask 022; run_step4 "$dir" '{"schema_version":1,"budget":{"name":"Test"}}' )" \
+    || fail "write over a pre-existing 0755 data dir exited non-zero: $out"
+  assert_contains "$out" "✅ Wrote" "the write still succeeds over a pre-existing loose dir"
+  assert_eq "700" "$(mode_of "$dir")" "the data dir is tightened to owner-only 0700"
+  rm -rf "$dir"
 }
 
 run_tests
