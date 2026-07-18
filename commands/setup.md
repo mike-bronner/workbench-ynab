@@ -212,7 +212,19 @@ overwrite:
 # `( umask 077; mkdir -p )` gives a FRESH dir 0700 with no world-readable window;
 # the explicit chmod additionally tightens a dir left 0755 by a pre-privacy
 # install (setup is idempotent and the recommended step after every update).
-( umask 077; mkdir -p "$CONFIG_DIR" ) && chmod 700 "$CONFIG_DIR"
+# Both steps fail CLOSED like every gate in Step 4 (mirrors bin/ynab-migrate.sh's
+# `|| return 2` and bin/audit-log.sh): a swallowed chmod failure on a pre-existing
+# 0755 dir would print the ✅ banner while $CONFIG_DIR — which also holds audit/,
+# monitor-state.json, and tax-tracker.json — stays world-traversable, letting
+# other local users enumerate every financial artifact's filename and mtime.
+if ! ( umask 077; mkdir -p "$CONFIG_DIR" ); then
+  echo "❌ Could not create the data directory $CONFIG_DIR — aborting setup." >&2
+  exit 1
+fi
+if ! chmod 700 "$CONFIG_DIR"; then
+  echo "❌ Could not restrict $CONFIG_DIR to owner-only (mode 0700) — aborting setup so no financial artifact lands in a world-traversable directory." >&2
+  exit 1
+fi
 
 # $NEW_JSON is the object Step 3 assembled (schema_version + budget + optional
 # business + tax_profile + persona + report). Merge it over the existing file so

@@ -249,4 +249,42 @@ test_default_output_dir_fallback_is_the_shared_constant() {
   assert_file_exists "$dir/YNAB-Weekly-Review-2099-01-01.html"  # fresh survives
 }
 
+# An UNSET $VAR embedded in .report.output_dir is REFUSED (exit 2), not silently
+# swallowed to a bogus path. `$TYPO/Reports` with TYPO unset must not collapse to
+# `/Reports` and make prune scan the wrong dir (reporting "nothing to prune")
+# while old reports pile up untouched; the shared expand_path fails so prune
+# refuses. The single-quoted heredoc keeps `$YNAB_PRUNE_UNSET` UNEXPANDED so the
+# parent shell can't pre-expand it — expand_path must do the resolving.
+test_unset_var_in_output_dir_is_refused() {
+  local cfg="$SANDBOX/unset-embedded-cfg.json" rc=0 err
+  cat > "$cfg" <<'JSON'
+{ "report": { "output_dir": "$YNAB_PRUNE_UNSET/Reports", "retention_days": 30 } }
+JSON
+  err="$( YNAB_CONFIG_FILE="$cfg" bash "$PRUNE" --apply 2>&1 )" || rc=$?
+  assert_eq "2" "$rc" "an unset \$VAR embedded in output_dir → exit 2"
+  assert_contains "$err" "did not fully resolve" "error explains the unresolved output dir"
+}
+
+# A SYMLINK whose target is `/` is refused AFTER normalization. The pre-normalize
+# case guard only rejects the literal strings "/"/"" — a symlink passes it, then
+# `pwd -P` collapses it to `/`. Without the post-normalization re-check, `find /`
+# would run. Assert the refusal so a regression that drops the second guard fails.
+test_symlink_to_root_is_refused_after_normalization() {
+  local link="$SANDBOX/root-link" rc=0 err
+  ln -s / "$link"
+  err="$( bash "$PRUNE" --output-dir "$link" --days 30 2>&1 )" || rc=$?
+  assert_eq "2" "$rc" "a symlink whose target is / → exit 2"
+  assert_contains "$err" "filesystem root" "error explains the root refusal post-normalization"
+}
+
+# A `..`-laden path that RESOLVES to `/` is refused after normalization too. It
+# starts with `/` so the pre-normalize guard's absolute-path branch passes it,
+# and `pwd -P` collapses it to `/`. The post-normalization re-check must catch it.
+test_dotdot_path_resolving_to_root_is_refused() {
+  local rc=0 err
+  err="$( bash "$PRUNE" --output-dir "/../../../../.." --days 30 2>&1 )" || rc=$?
+  assert_eq "2" "$rc" "a ..-path resolving to / → exit 2"
+  assert_contains "$err" "filesystem root" "error explains the root refusal post-normalization"
+}
+
 run_tests

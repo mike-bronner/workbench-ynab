@@ -267,16 +267,37 @@ test_invalid_slot_name_rejected_at_parse() {
   assert_contains "$err" "invalid --slot name" "error explains the bad slot name"
 }
 
-# A configured output_dir that expands to empty (e.g. an unset $VAR) is refused
-# rather than silently writing to the filesystem root.
+# A configured output_dir that resolves to EMPTY — a SET-but-empty $VAR — is
+# refused rather than silently writing to the filesystem root. (An UNSET $VAR is
+# refused earlier still, by expand_path itself — see the next test.) The var is
+# exported so the writer subprocess sees it SET-but-empty; expand_path resolves
+# it to "" and the writer's own empty-path guard (line ~213) rejects it.
 test_empty_output_dir_is_rejected() {
   local cfg="$SANDBOX/empty-dir.json" rc=0 err
+  export YNAB_SET_EMPTY_DIR=""
   cat > "$cfg" <<'JSON'
-{ "report": { "output_dir": "$YNAB_NOPE_UNSET_VAR" } }
+{ "report": { "output_dir": "$YNAB_SET_EMPTY_DIR" } }
 JSON
   err="$( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 2>&1 )" || rc=$?
+  unset YNAB_SET_EMPTY_DIR
   assert_eq "2" "$rc" "output dir resolving to empty → usage error (exit 2)"
   assert_contains "$err" "output dir resolved to empty" "error explains the empty output dir"
+}
+
+# An UNSET $VAR — whether it is the whole value or only PART of a longer path — is
+# REFUSED by expand_path, not silently swallowed to "". `$TYPO/reports` with TYPO
+# unset must NOT collapse to `/reports` (a valid-looking absolute path the
+# empty-check never fires on) and send the writer to the filesystem root; the
+# resolver fails so the writer exits 2 "did not fully resolve". The single-quoted
+# heredoc keeps `$YNAB_DEFINITELY_UNSET_VAR` UNEXPANDED so expand_path is exercised.
+test_unset_var_embedded_in_output_dir_is_refused() {
+  local cfg="$SANDBOX/unset-embedded.json" rc=0 err
+  cat > "$cfg" <<'JSON'
+{ "report": { "output_dir": "$YNAB_DEFINITELY_UNSET_VAR/reports" } }
+JSON
+  err="$( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 2>&1 )" || rc=$?
+  assert_eq "2" "$rc" "an unset \$VAR embedded in output_dir → usage error (exit 2)"
+  assert_contains "$err" "did not fully resolve" "error explains the unresolved output dir"
 }
 
 # #28 cost invariant: .report.output_dir is config-sourced and unbounded, and

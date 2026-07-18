@@ -160,6 +160,18 @@ fi
 output_dir="$(cd "$output_dir" && pwd -P)" \
   || usage_err "could not resolve output directory (unreadable or vanished): $output_dir"
 
+# Re-run the filesystem-root / empty refusal on the NORMALIZED path. The case
+# guard above ran on the PRE-normalization string, so it only caught the literal
+# strings "/" and "". A symlinked --output-dir whose target is `/`, or a
+# `..`-laden path like `/foo/../..` that resolves to `/`, passed that guard and
+# only collapsed to `/` here at `pwd -P`. Without this second check `find /`
+# plus `--apply` could unlink a matching `YNAB-*-Review-*.html` at the real
+# filesystem root — exactly what the guard exists to prevent. Idempotent for
+# every dir that was already absolute and non-root.
+case "$output_dir" in
+  "/"|"") usage_err "refusing to prune the filesystem root or an empty path" ;;
+esac
+
 # Collect the pruning candidates: regular files matching the report writer's
 # frozen `YNAB-*-Review-*.html` pattern, DIRECTLY in the output dir (no
 # recursion), with a modification time older than the threshold. `-mtime +N`

@@ -68,9 +68,14 @@ DEFAULT_OUTPUT_DIR="$HOME/Documents/Claude/Reports"
 # or an unresolved $VAR after the loop settles — a self-referential
 # value like FOO='$FOO/x' that exhausts the guard, or any value the shell cannot
 # fully expand — the function returns 1 WITHOUT printing, and the caller turns
-# that into a usage_err (exit 2, no file). Silently writing to `$PWD/~/…` or a
-# path still holding a literal `$FOO` is exactly the falsely-successful report
-# this helper exists to prevent.
+# that into a usage_err (exit 2, no file). A reference to an UNSET variable is
+# likewise refused, mid-loop, the moment it is seen (see the loop body): an unset
+# `$TYPO` must never be swallowed to empty, because embedded in a longer path
+# (`$TYPO/reports`) that empty substitution yields `/reports` — a valid-looking
+# absolute path the whole-value empty check would sail past. Silently writing to
+# `$PWD/~/…`, a path still holding a literal `$FOO`, or a `/reports` an unset
+# `$TYPO` collapsed to is exactly the falsely-successful report this helper
+# exists to prevent.
 expand_path() {
   local p="$1" guard=0 before match name value
   # Literal ~ in these case patterns is intentional: we MATCH an input that
@@ -89,11 +94,21 @@ expand_path() {
       "~")   p="$HOME" ;;
       "~/"*) p="${HOME}/${p#\~/}" ;;
     esac
-    # Resolve the first $NAME / ${NAME} reference (an unset name → empty).
+    # Resolve the first $NAME / ${NAME} reference. An UNSET variable is REFUSED
+    # (return 1), never silently substituted with "". "Unset" cannot be told from
+    # "set to an empty value" once substituted, and when the reference is only
+    # PART of the path (`$TYPO/reports`, TYPO unset) the empty result `/reports`
+    # is a valid-looking absolute path the whole-value empty check downstream
+    # never fires on — so the writer would write to / and prune would scan / (or a
+    # bogus dir) instead of the real report directory. Fail CLOSED here, symmetric
+    # to the surviving-$VAR refusal after the loop. A SET-but-empty variable is
+    # still resolved to "" — the caller's own empty-path guard rejects that — so
+    # only a genuinely UNSET name is refused here.
     if [[ "$p" =~ (\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)) ]]; then
       match="${BASH_REMATCH[1]}"
       name="${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}"
-      value="${!name:-}"
+      [ -n "${!name+set}" ] || return 1
+      value="${!name}"
       # Replace only the FIRST occurrence (single `/`, not global `//`). A global
       # replace lets a value that names itself TWICE (FOO='$FOO$FOO') DOUBLE the
       # occurrence count every pass — exponential growth that pegs CPU/memory and
