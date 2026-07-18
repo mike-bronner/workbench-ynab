@@ -128,6 +128,9 @@ assert_routing_present() {
   assert_contains     "$ctx: config/token split (YNAB_ACCESS_TOKEN)" "$OUT" "YNAB_ACCESS_TOKEN"
   assert_contains     "$ctx: pointer to /workbench-ynab:ynab-review" "$OUT" "/workbench-ynab:ynab-review"
   assert_contains     "$ctx: trigger-vocabulary table"         "$OUT" "Trigger vocabulary"
+  # A representative row, not just the header — a deleted row would slip past a
+  # header-only check (hardens AC #3's "short trigger-vocabulary table").
+  assert_contains     "$ctx: trigger-vocabulary row present"   "$OUT" "month-to-date spend"
 }
 
 echo "healthy session (token + config present) — routing emitted, no setup block, exit 0:"
@@ -212,6 +215,23 @@ run 0 "$PRESENT_CFG" "$DRIFT_HOME" "$ROOT_NOPLUGIN"
 assert_eq           "exit code is 0"                        "0" "$RC"
 assert_not_contains "missing plugin.json → no drift warning" "$OUT" "version drift"
 assert_routing_present "broken-install"
+
+echo "valid bundle root + HOME unset → drift check silent on STDERR (bare \$HOME hazard), exit 0:"
+# A valid bundle root (ROOT_OLD) passes the `bundle=$(...)` gate, so the drift path
+# reaches _ynab_newest_cached_version and its cache_dir line. With HOME unset, a
+# bare $HOME there raises "HOME: unbound variable" on STDERR under set -u — the
+# script still exits 0 (absorbed by `newest=$(…) || return 0`) and STDOUT stays
+# clean, so exit-code/stdout asserts alone would MISS it. The ${HOME:-} guard makes
+# the path degrade to a guaranteed-absent cache dir → silent. STDERR is captured
+# separately (run() only captures stdout) and asserted empty — the assertion that
+# discriminates the guarded line from a bare $HOME regression.
+HOME_UNSET_ERR="$SANDBOX/home-unset-drift.stderr"
+OUT="$(env -u HOME STUB_SECURITY_RC=0 YNAB_CONFIG_FILE="$PRESENT_CFG" PATH="$STUB_BIN:$PATH" CLAUDE_PLUGIN_ROOT="$ROOT_OLD" bash "$WARMUP" 2>"$HOME_UNSET_ERR")"
+RC=$?
+assert_eq           "exit code is 0 with HOME unset + valid bundle root" "0" "$RC"
+assert_eq           "STDERR empty (no HOME: unbound variable)" "" "$(cat "$HOME_UNSET_ERR")"
+assert_not_contains "unset HOME → drift check silent"       "$OUT" "version drift"
+assert_routing_present "home-unset-drift"
 
 echo "CLAUDE_PLUGIN_ROOT unset → set -u safe, no drift, routing still emitted, exit 0:"
 run 0 "$PRESENT_CFG" "$DRIFT_HOME" UNSET

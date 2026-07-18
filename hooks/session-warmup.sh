@@ -47,8 +47,12 @@ set -u
 # BSD `sort` (no GNU-only `-V`), and stay silent on any missing input. Fires
 # only when the running bundle is STRICTLY behind the newest version in the CLI
 # cache. A Cowork-only setup with no CLI cache has nothing to compare against,
-# so the check no-ops there. Mirrors the workbench-bujo warmup verbatim, swapping
-# workbench-bujo → workbench-ynab.
+# so the check no-ops there. Mirrors the workbench-bujo warmup, swapping
+# workbench-bujo → workbench-ynab, with one deliberate divergence: the cache_dir
+# guards HOME as ${HOME:-} (see _ynab_newest_cached_version) so an unset HOME
+# degrades to a guaranteed-absent path and stays silent, instead of raising
+# "HOME: unbound variable" on stderr under set -u — the same guard already applied
+# to the config path below.
 # ---------------------------------------------------------------------------
 
 _ynab_plugin_version() {
@@ -59,7 +63,11 @@ _ynab_plugin_version() {
 
 _ynab_newest_cached_version() {
   # Echo the highest semver dir name under the CLI plugin cache, or nothing.
-  local cache_dir="$HOME/.claude/plugins/cache/claude-workbench/workbench-ynab"
+  # HOME is expanded as ${HOME:-} (like the config path below): under set -u a
+  # bare $HOME with HOME unset raises "HOME: unbound variable" on stderr, and this
+  # hook must emit nothing outside its STDOUT context block. With HOME unset the
+  # path degrades to a guaranteed-absent dir → the `-d` test fails → silent.
+  local cache_dir="${HOME:-}/.claude/plugins/cache/claude-workbench/workbench-ynab"
   [ -d "$cache_dir" ] || return 1
   # `ls | grep` is safe here: the entries are the CLI's own semver dir names and
   # the grep discards anything that is not a bare X.Y.Z, so no whitespace- or
