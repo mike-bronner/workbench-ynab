@@ -220,7 +220,8 @@ a fresh machine:
 ```bash
 SB="$(mktemp -d)"; mkdir -p "$SB/bin" "$SB/vendor/ynab-mcp"
 cp bin/ynab-mcp "$SB/bin/"; cp vendor/ynab-mcp/index.cjs "$SB/vendor/ynab-mcp/"
-( cd "$SB"; export YNAB_ACCESS_TOKEN="fake-token-for-boot-only"
+FAKE_TOKEN='fake-boot-token-not-a-real-pat'   # any non-empty FAKE value — never a real YNAB PAT
+( cd "$SB"; export YNAB_ACCESS_TOKEN="$FAKE_TOKEN"
   S=$(node -e 'process.stdout.write(String(Date.now()))')
   printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"lat","version":"0"}}}' \
     | node bin/ynab-mcp 2>/dev/null | grep -m1 '"jsonrpc"' >/dev/null
