@@ -171,26 +171,47 @@ assert_contains     "drift: names running bundle version"   "$OUT" "v0.1.0"
 assert_contains     "drift: names newest cached version"    "$OUT" "v0.2.0"
 assert_routing_present "drift"
 
-echo "no drift when bundle equals newest cache:"
+echo "no drift when bundle equals newest cache — routing still emitted, exit 0:"
 ROOT_EQ="$SANDBOX/root-eq"; mk_bundle "$ROOT_EQ" "0.2.0"
 run 0 "$PRESENT_CFG" "$DRIFT_HOME" "$ROOT_EQ"
+assert_eq           "exit code is 0"                        "0" "$RC"
 assert_not_contains "equal versions → no drift warning"     "$OUT" "version drift"
+assert_routing_present "equal-version"
 
-echo "no drift when bundle is newer than cache:"
+echo "no drift when bundle is newer than cache — routing still emitted, exit 0:"
 ROOT_NEW="$SANDBOX/root-new"; mk_bundle "$ROOT_NEW" "0.3.0"
 run 0 "$PRESENT_CFG" "$DRIFT_HOME" "$ROOT_NEW"
+assert_eq           "exit code is 0"                        "0" "$RC"
 assert_not_contains "newer bundle → no drift warning"       "$OUT" "version drift"
+assert_routing_present "newer-version"
 
-echo "newest cache is chosen numerically, not lexically (0.10.0 > 0.9.0):"
+echo "newest cache is chosen numerically, not lexically (0.10.0 > 0.9.0) — routing still emitted, exit 0:"
 NUM_HOME="$SANDBOX/num-home"
 mk_cache "$NUM_HOME" "0.2.0" "0.9.0" "0.10.0"
 ROOT_9="$SANDBOX/root-9"; mk_bundle "$ROOT_9" "0.9.0"
 run 0 "$PRESENT_CFG" "$NUM_HOME" "$ROOT_9"
+assert_eq           "exit code is 0"                        "0" "$RC"
 assert_contains     "numeric sort → drift against v0.10.0"  "$OUT" "v0.10.0"
+assert_routing_present "numeric-sort"
 
-echo "no cache dir → drift check is silent:"
+echo "no cache dir → drift check is silent — routing still emitted, exit 0:"
 run 0 "$PRESENT_CFG" "$CLEAN_HOME" "$ROOT_OLD"
+assert_eq           "exit code is 0"                        "0" "$RC"
 assert_not_contains "no cache dir → no drift warning"       "$OUT" "version drift"
+assert_routing_present "no-cache-dir"
+
+echo "bundle root without plugin.json (broken/partial install) → drift silent, routing still emitted, exit 0:"
+# A CLAUDE_PLUGIN_ROOT that exists but has no .claude-plugin/plugin.json drives
+# `_ynab_plugin_version` non-zero → the `bundle=$(...) || return 0` gate
+# (session-warmup.sh:84). A valid cache is present (DRIFT_HOME, v0.2.0), so the
+# ONLY reason no drift fires is the missing bundle file — isolating this gate
+# from the no-cache gate. A `return 0`→`exit 0` typo here would skip the routing
+# block and trip assert_routing_present.
+ROOT_NOPLUGIN="$SANDBOX/root-noplugin"; mkdir -p "$ROOT_NOPLUGIN"
+run 0 "$PRESENT_CFG" "$DRIFT_HOME" "$ROOT_NOPLUGIN"
+assert_eq           "exit code is 0"                        "0" "$RC"
+assert_not_contains "missing plugin.json → no drift warning" "$OUT" "version drift"
+assert_routing_present "broken-install"
 
 echo "CLAUDE_PLUGIN_ROOT unset → set -u safe, no drift, routing still emitted, exit 0:"
 run 0 "$PRESENT_CFG" "$DRIFT_HOME" UNSET
