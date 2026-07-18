@@ -1,0 +1,10 @@
+YNAB Quarterly Tax Review — 2025-05-01
+
+🔴 **Uncleared transaction is aging past 30 days.** Clear the $260 Professional Services entry so the ledger reconciles before filing.
+🟡 **Professional Services is at 87% of its envelope.** Watch this category or top it up before quarter-end to avoid an overage.
+🟡 **Estimated-tax set-aside is only 62% funded.** Move the remaining reserve before the next quarterly due date.
+🟢 **Consulting income of $9,300 recorded cleanly.** Two deposits classified to Schedule C gross receipts — no action needed.
+🟢 **Itemizing beats the standard deduction this year.** Your $22,000 itemized total exceeds the $15,000 standard deduction; keep the receipts.
+⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.
+📄 Full report: {{output_path}}
+{{signoff}}

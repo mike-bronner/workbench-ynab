@@ -1,0 +1,14 @@
+{
+  "$readme": [
+    "SYNTHETIC tax profile (issue #39 golden-snapshot fixture) — the HIGH-standard-deduction variant.",
+    "Identical to tax-profile-low-deduction.json in EVERY field except standardDeductionByYear (single/2025 = 30000 here, vs 15000 there).",
+    "That single changed value is the whole point: with the fixture's fixed 22000 itemized total, 22000 < 30000 so the verdict flips to 'standard'.",
+    "Because nothing else differs, the flip PROVES the itemize-vs-standard recommendation reads the configured standard deduction rather than any hardcoded number (M2-2 coverage)."
+  ],
+  "schemaVersion": "1",
+  "filingStatus": "single",
+  "taxYear": 2025,
+  "standardDeductionByYear": {
+    "single": { "2025": 30000 }
+  }
+}
