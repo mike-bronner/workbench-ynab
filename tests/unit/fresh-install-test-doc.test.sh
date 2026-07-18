@@ -14,9 +14,10 @@
 # against the real 20 s cold-start boot budget (bin/launcher.sh documents no
 # timeout); a Results section; and a Gaps section that links its follow-up.
 #
-# Several needles (the namespaced prefix, "20 s", @media print) recur across
-# steps, so the checks that pin a SPECIFIC step are section-scoped via
-# doc_section() — a whole-file grep stayed green with the whole step deleted.
+# Several needles (the namespaced prefix, "20 s", @media print, the out-of-repo
+# config path, the Keychain-only token check) recur across steps, so the checks
+# that pin a SPECIFIC step are section-scoped via doc_section() — a whole-file
+# grep stayed green with the whole step deleted.
 # Style mirrors tests/unit/docs-set.test.sh: raw bash, `set -u`, PASS/FAIL
 # counters, non-zero exit on any failure.
 #
@@ -112,11 +113,23 @@ assert_contains "documents the marketplace install path" "workbench-ynab@claude-
 assert_contains "documents the local-checkout install path" "claude plugin install /absolute/path/to/workbench-ynab"
 
 # --- config lands out of repo (AC #6) ------------------------------------------
-assert_contains "documents the out-of-repo config path" "plugins/data/workbench-ynab-claude-workbench/config.json"
+# Section-scoped to Step 5: the config path recurs 3× (Step 0 precondition, Step 5
+# assertion, Results table), so a whole-file grep stayed green with all of Step 5
+# deleted. Pin it to Step 5's body so dropping the out-of-repo assertion fails.
+assert_in_section "Step 5" "documents the out-of-repo config path" "plugins/data/workbench-ynab-claude-workbench/config.json"
 
 # --- token is Keychain-only (AC #7) --------------------------------------------
-assert_contains "documents the Keychain-only token verification" "security find-generic-password -s ynab-mcp -a access-token"
-assert_contains "states the token is Keychain-only" "Keychain-only"
+# Section-scoped to Step 6: the `security find-generic-password` needle recurs in
+# Step 0's blockquote and "Keychain-only" recurs in the Gaps prose, so a whole-file
+# grep stayed green with all of Step 6 (the token-leak-sweep procedure) deleted.
+# Pin both to Step 6's body so dropping the heart of AC #7 fails.
+assert_in_section "Step 6" "documents the Keychain-only token verification" "security find-generic-password -s ynab-mcp -a access-token"
+assert_in_section "Step 6" "states the token is Keychain-only" "Keychain-only"
+# The Step 6a config-scan guard must fail CLOSED like setup's own (commands/setup.md
+# Step 4): a jq scan failure must report "cannot verify", never a silent ✅. Pin the
+# cannot-verify branch so the `&& … || …` collapse — which turns a scan failure
+# (missing/corrupt file → exit 2/5) into a false "token-free" pass — can't return.
+assert_in_section "Step 6" "Step 6a config-scan guard fails closed on a jq scan failure" "could not verify config.json is token-free"
 
 # --- namespaced pre-approval glob (AC #8) --------------------------------------
 # Section-scoped to Step 7: the bare $PREFIX recurs 6× across the doc (Steps 3, 7,

@@ -168,9 +168,21 @@ and **nowhere else** — not in `config.json`, not in any file in the repo or th
 plugin directory. Prove both halves:
 
 ```bash
-# a) config.json carries no token-shaped (64-hex) value — mirrors setup's own guard.
-jq -e '[getpath(paths) | strings | test("^[0-9a-f]{64}$")] | any' "$CONFIG" \
-  >/dev/null 2>&1 && echo "❌ token-shaped value in config.json" || echo "✅ config.json is token-free"
+# a) config.json carries no token-shaped (64-hex) value. Fails CLOSED, porting
+#    setup's own three-way guard (../commands/setup.md Step 4): jq -e's exit code
+#    is 0 = a token was found, 1 = the scan ran clean (the ONLY pass), anything
+#    else = jq could not scan the file → reported as "cannot verify", never a
+#    silent ✅. A bare `&& … || …` idiom would collapse 1 and >1 into one branch,
+#    turning a scan failure (missing/corrupt file → exit 2/5) into a false pass.
+TOKEN_SCAN=0
+jq -e '[getpath(paths) | strings | test("^[0-9a-f]{64}$")] | any' "$CONFIG" >/dev/null 2>&1 || TOKEN_SCAN=$?
+if [ "$TOKEN_SCAN" -eq 0 ]; then
+  echo "❌ token-shaped value in config.json"
+elif [ "$TOKEN_SCAN" -eq 1 ]; then
+  echo "✅ config.json is token-free"
+else
+  echo "❌ could not verify config.json is token-free (jq failed to scan it)"
+fi
 
 # b) the token value appears in no file, across BOTH trees the promise covers:
 # the repo checkout AND the installed plugin cache under ~/.claude/plugins. Feed
@@ -289,17 +301,21 @@ installed at `~/.claude/plugins/cache/claude-workbench/workbench-core/`.
 Steps split into **sandbox-executed** (run headlessly against a checkout and a
 `node_modules`-free sandbox) and **human-run only** (require a live Claude Code
 session + real token — deferred to
-[`verification-checklist.md`](verification-checklist.md)).
+[`verification-checklist.md`](verification-checklist.md)). Step 0 (clean-room
+preconditions) is asserted in the sandbox and recorded below; **Step 3** (restart
+Claude Code) is a human action with no independent pass/fail — it is folded into
+the human-run install line (Step 2 · `+ restart`).
 
 ### Sandbox-executed — actual outcomes
 
 | Step | Check | Result |
 |---|---|---|
+| 0 | Clean-room precondition — no prior plugin config in the sandbox `$HOME` | ✅ fresh sandbox `$HOME` carried no `config.json` (the Keychain is account-scoped — see the Step 0 note) |
 | 1 | Prerequisites present (`node`, `jq`, `security`, `workbench-core`) | ✅ all four present |
 | 1 | Node meets the pinned floor | ✅ `v24.18.0` ≥ floor `24` |
 | 2 | Vendored bundle intact (`verify-bundle.sh`) | ✅ bundle SHA-256 matches `vendored.json`; no `node_modules`, no `npx` |
 | 5 | Config path is the documented out-of-repo location | ✅ path asserted: `~/.claude/plugins/data/workbench-ynab-claude-workbench/config.json` (the exact path `setup` writes, per [`../commands/setup.md`](../commands/setup.md)) |
-| 6a | `config.json` token-shaped-value guard | ✅ scan clean (guard logic verified against `setup` Step 4) |
+| 6a | `config.json` token-shaped-value guard | ✅ scan clean (fail-closed three-way guard ported from `setup` Step 4 — a jq scan failure reports "cannot verify", never a silent pass) |
 | 7 | Pre-approval glob is namespaced | ✅ prefix `mcp__plugin_workbench-ynab_ynab__` confirmed against the SSoT [`../skills/protocol/ynab-tools.md`](../skills/protocol/ynab-tools.md) |
 | 8 | MCP handshake + `ynab_list_budgets` registered | ✅ `initialize` + `tools/list` succeed offline; `ynab_list_budgets` present in the returned tool set (mechanical half — the live API call is human-run) |
 | 8 | First-connection latency | ✅ spawn→first response ≈ **482–531 ms** across 3 cold runs — **far** below the 20 s boot-patience budget (~40× headroom); no first-run delay observed |
