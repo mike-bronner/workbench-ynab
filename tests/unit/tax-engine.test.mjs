@@ -311,6 +311,27 @@ test('a failed profile load is refused consistently across classify/batch/summar
   assert.throws(() => computeTaxSummary(bad, { taxYear: 2025, filingStatus: 'single' }), /failed profile load/);
 });
 
+test('(#225) the facade re-throw carries no offending property name across the boundary', () => {
+  // rawProfile() re-throws a failed load's error.message across the MCP/JSON-RPC
+  // boundary. A schema failure whose only violation is a secret-shaped extra
+  // property must not leak that key here — the boundary the loader's redaction is
+  // ultimately protecting. Exercises the facade, not loadProfile.mjs in isolation.
+  const secretKey = 'AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE';
+  const p = join(TMP, 'secret-key-profile.json');
+  writeFileSync(p, JSON.stringify({ schemaVersion: '1', filingStatus: 'single', taxYear: 2025, [secretKey]: 'x' }));
+  const failed = loadEffectiveProfile({ dataDir: TMP, profilePath: p });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.error.kind, 'schema');
+  assert.throws(
+    () => classifyTransaction(GITHUB_TXN, failed),
+    (err) => {
+      assert.ok(!err.message.includes('AWS_SECRET_ACCESS_KEY'), `secret key crossed the facade boundary: ${err.message}`);
+      assert.match(err.message, /refusing to operate on a failed profile load/);
+      return true;
+    },
+  );
+});
+
 // --- AC #11: the facade writes nothing to stdout -----------------------------
 
 test('AC#11 exercising the whole facade writes zero bytes to stdout', () => {

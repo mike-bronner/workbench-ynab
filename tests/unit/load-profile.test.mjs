@@ -513,6 +513,68 @@ test('(follow-up) propertyNames failure is reported at the container path', () =
   assert.equal(ey.path, '/standardDeductionByYear/single');
 });
 
+// --- #225: redact schema-validation property names from the boundary message -
+//
+// The schema failure's top-level error.message crosses the MCP/JSON-RPC boundary
+// (index.mjs's rawProfile() re-throws it), so it must carry NONE of an
+// attacker-influenced property name's bytes — a JSON key can be secret-shaped —
+// while direct callers that inspect error.errors[] keep the full, unredacted
+// validation detail. Mirrors the #207 depth/tooDeep() carve-out; see the
+// failure() composition in loadProfile.mjs.
+
+test('(#225) a secret-shaped additional property never rides the top-level schema message', () => {
+  // Root schema is additionalProperties:false, so an unexpected top-level key
+  // fires `additionalProperties` at path `/<key>` — which the OLD message echoed
+  // via `first offending path: ${errors[0].path}`, leaking the key verbatim.
+  const secretKey = 'AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE';
+  const p = writeProfile({ ...validBase(), [secretKey]: 'wJalrXUtnFEMI' });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.kind, 'schema');
+  // Boundary-crossing message carries none of the key's bytes, yet still names
+  // the error count + failure kind.
+  assert.ok(!r.error.message.includes(secretKey), `full key leaked into message: ${r.error.message}`);
+  assert.ok(!r.error.message.includes('AWS_SECRET_ACCESS_KEY'), `key fragment leaked into message: ${r.error.message}`);
+  assert.match(r.error.message, /failed schema validation \(\d+ error\(s\)\)/);
+  // Direct callers inspecting errors[] still get the key in full (path + params).
+  const e = r.error.errors.find((x) => x.keyword === 'additionalProperties');
+  assert.ok(e, 'expected an additionalProperties error');
+  assert.equal(e.params.additionalProperty, secretKey, 'errors[] keeps the full key in params for direct callers');
+  assert.ok(e.path.includes(secretKey), 'errors[] keeps the full key in the per-error path for direct callers');
+});
+
+test('(#225) a secret-shaped propertyNames violation stays out of the top-level message; container reporting unchanged', () => {
+  // A bad filing-status key under standardDeductionByYear fires `propertyNames`
+  // at the CONTAINER path (the key rides that error's message + params, per the
+  // follow-up above), so it never reached the top-level message even before #225.
+  // The same reduction covers it for consistency, and — per AC — its container-
+  // path reporting for direct callers is left exactly as it was.
+  const secretKey = 'AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE';
+  const p = writeProfile({ ...validBase(), standardDeductionByYear: { [secretKey]: { 2025: 1 } } });
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.kind, 'schema');
+  assert.ok(!r.error.message.includes('AWS_SECRET_ACCESS_KEY'), `key leaked into message: ${r.error.message}`);
+  const e = r.error.errors.find((x) => x.keyword === 'propertyNames' && x.params.propertyName === secretKey);
+  assert.ok(e, 'errors[] must still name the offending key for direct callers');
+  assert.equal(e.path, '/standardDeductionByYear', 'container-path reporting is unchanged');
+});
+
+test('(#225) an ordinary typo property name still fails as schema with a content-free message', () => {
+  // Regression: a non-secret unexpected key must behave as before in substance —
+  // still kind:'schema', still naming the error count — only the raw key echo is
+  // gone, so a legitimate direct caller/UI loses no non-sensitive signal (it
+  // reads error.errors[], which still names the typo).
+  const p = writeProfile({ ...validBase(), taxYeer: 2025 }); // typo'd `taxYear`
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.kind, 'schema');
+  assert.match(r.error.message, /failed schema validation \(\d+ error\(s\)\)/);
+  assert.ok(!r.error.message.includes('taxYeer'), 'even an ordinary key name is no longer echoed into the message');
+  const e = r.error.errors.find((x) => x.params.additionalProperty === 'taxYeer');
+  assert.ok(e, 'errors[] still names the typo for the direct caller/UI');
+});
+
 // --- follow-up: getStandardDeduction omitted-arg fallback -------------------
 
 test('(follow-up) getStandardDeduction with no args falls back to the profile year + status', () => {
