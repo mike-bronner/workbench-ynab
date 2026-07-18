@@ -187,10 +187,15 @@ permissions and the privacy of the machine they live on.
 
 Two guarantees apply to all of them:
 
-- **Owner-only permissions at creation.** Every artifact is written mode **0600**
-  (owner read/write only) and every directory the plugin creates is mode **0700**,
-  applied *at creation time* (via `umask`/explicit mode) so there is never a
-  window in which a freshly-written financial file is world-readable. `commands/setup.md`
+- **Owner-only permissions.** Every artifact is written mode **0600** (owner
+  read/write only) and every directory the plugin creates is mode **0700**. The
+  data directory is created *at creation time* under `umask 077` (`commands/setup.md`,
+  `commands/ynab-migrate.md`) so there is never a window in which it is
+  world-traversable; `config.json` is additionally `chmod 600` before it is
+  atomically published, so its final path is never world-readable even though that
+  mode is applied post-write (the 0700 dir already gates it). The report writer
+  creates a `0600` temp file and `chmod`s it before the atomic `mv`, leaving no
+  world-readable window either. `commands/setup.md` and `commands/ynab-migrate.md`
   (the data dir + `config.json`), the `.mjs` state writers, `bin/audit-log.sh`,
   and `bin/report-writer.sh` all enforce this.
 - **Not for shared or cloud-synced locations.** The default report directory,

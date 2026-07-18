@@ -73,10 +73,11 @@ shopt -u patsub_replacement 2>/dev/null || true
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Shipped fallback output directory (prototype default, SKILL.md line 143),
-# notated to the user as ~/Documents/Claude/Reports. Resolved eagerly via $HOME
-# so it is already absolute before path handling.
-DEFAULT_OUTPUT_DIR="$HOME/Documents/Claude/Reports"
+# DEFAULT_OUTPUT_DIR (the shipped fallback report dir, ~/Documents/Claude/Reports)
+# is single-sourced in bin/path-expand.sh — the module both this writer and
+# bin/ynab-prune.sh source — so the two can't drift on where reports live. It is
+# in scope by the time it is used (out_dir default, below), after the source line
+# further down.
 DEFAULT_TEMPLATE="${REPO_ROOT}/assets/report/template.html"
 
 # Reuse the shared loader's `_cfg` (jq-read with `// empty`) so the config shape

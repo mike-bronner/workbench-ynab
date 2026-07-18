@@ -57,7 +57,11 @@
 #
 # EXIT CODES
 #   0  success (preview printed, or deletion completed, or nothing to do)
-#   2  usage error (bad flag, non-numeric --days, unsafe output dir)
+#   2  usage error (bad flag, non-numeric --days, unsafe output dir), OR a PARTIAL
+#      --apply deletion — one or more matched reports could not be removed (e.g.
+#      denied by directory permissions); the rest WERE deleted and each failure
+#      was reported on stderr. A caller scripting these codes must not read a 2 as
+#      "nothing was deleted."
 #
 # bash 3.2 compatible (macOS system bash): no associative arrays, no mapfile.
 
@@ -71,9 +75,10 @@ usage_err() { err "$1"; exit 2; }
 # this many days are pruning candidates.
 DEFAULT_RETENTION_DAYS=30
 
-# Shipped fallback report directory — identical to bin/report-writer.sh's default
-# so prune and write agree on where reports live.
-DEFAULT_OUTPUT_DIR="$HOME/Documents/Claude/Reports"
+# DEFAULT_OUTPUT_DIR (the shipped fallback report dir, ~/Documents/Claude/Reports)
+# is single-sourced in bin/path-expand.sh — the same module bin/report-writer.sh
+# sources — so prune and write can't drift on where reports live. It is provided
+# by the source line below, before it is used (output_dir default, further down).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -101,7 +106,7 @@ while [ "$#" -gt 0 ]; do
     --apply)      apply=1 ;;
     --days)       shift; [ "$#" -gt 0 ] || usage_err "--days requires a value"; days="$1" ;;
     --output-dir) shift; [ "$#" -gt 0 ] || usage_err "--output-dir requires a value"; output_dir="$1" ;;
-    -h|--help)    sed -n '2,40p' "$0"; exit 0 ;;
+    -h|--help)    sed -n '2,/^$/p' "$0"; exit 0 ;;   # whole header → first blank line, so a growing header is never truncated (mirrors bin/report-writer.sh)
     *)            usage_err "unknown argument: $1" ;;
   esac
   shift

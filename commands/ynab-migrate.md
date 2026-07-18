@@ -176,7 +176,12 @@ plugin's out-of-repo config so the user doesn't re-enter it.
    ```bash
    CONFIG_DIR="$HOME/.claude/plugins/data/workbench-ynab-claude-workbench"
    CONFIG_FILE="$CONFIG_DIR/config.json"
-   mkdir -p "$CONFIG_DIR"
+   # The data dir holds config.json (tax profile + business identity) and other
+   # generated artifacts, so it is owner-only (mode 0700) from creation (issue
+   # #65). /ynab-migrate seeds config without requiring /setup first, so it may be
+   # the FIRST creator of this dir — harden at creation like commands/setup.md
+   # rather than a bare `mkdir -p` that leaves it world-traversable (0755).
+   ( umask 077; mkdir -p "$CONFIG_DIR" ) && chmod 700 "$CONFIG_DIR"
    # Seed on first run via the tested helper: it copies the shipped example with
    # the placeholder `budgets` array and `default_budget` STRIPPED (so the real
    # migrated budget can land below — migrate-config fills only blank fields, and

@@ -18,9 +18,10 @@
 #   escapers that had drifted apart).
 #
 # WHY IT IS SOURCED, NOT EXECUTED
-#   This file only DEFINES a function (and sets one shell option, below). It runs
-#   no command with side effects at load time and never `set -e`/`set -u`, so
-#   sourcing it cannot alter control flow or abort the caller's shell.
+#   This file only DEFINES a function and one variable (and sets one shell option,
+#   below). It runs no command with side effects at load time and never
+#   `set -e`/`set -u`, so sourcing it cannot alter control flow or abort the
+#   caller's shell.
 #
 # USAGE
 #   . "${REPO_ROOT}/bin/path-expand.sh"
@@ -36,6 +37,21 @@
 # off here so the resolver behaves identically on bash 3.2 (macOS) through 5.2+
 # (Linux CI), independent of whether the sourcing script already disabled it.
 shopt -u patsub_replacement 2>/dev/null || true
+
+# The shipped fallback report output directory — the ONE definition shared by
+# bin/report-writer.sh (where to WRITE reports) and bin/ynab-prune.sh (where to
+# PRUNE them), which both source this module. Single-sourcing the default VALUE
+# here — not just the expand_path resolver — is what stops the two from drifting
+# on where reports live: a copy-pasted literal in each script could be edited in
+# one and not the other, so prune would scan a different dir than the writer
+# wrote. Resolved eagerly via $HOME so it is already absolute. (Prototype default,
+# SKILL.md line 143 — ~/Documents/Claude/Reports.)
+# SC2034: this variable is consumed by the scripts that SOURCE this module
+# (bin/report-writer.sh, bin/ynab-prune.sh), not within this file — that is the
+# whole point of single-sourcing it here, so the "appears unused" heuristic is a
+# false positive.
+# shellcheck disable=SC2034
+DEFAULT_OUTPUT_DIR="$HOME/Documents/Claude/Reports"
 
 # expand_path <path> — resolve a leading ~ and $VAR / ${VAR} references WITHOUT
 # eval (no command/arithmetic substitution is ever executed — a config path is

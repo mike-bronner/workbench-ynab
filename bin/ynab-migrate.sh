@@ -209,7 +209,7 @@ do_remove_task_dir() {
 # budget/business/tax data. Exit 0 ok (seeded or already present), 2 on a
 # missing/unparseable example or a failed write.
 do_seed_config() {
-  local config="${1:-}" tmp
+  local config="${1:-}" tmp dir
   [ -n "$config" ] || die "seed-config requires a CONFIG path"
   if [ -f "$config" ]; then
     printf 'Config already present — not seeding (already done): %s\n' "$config"
@@ -220,7 +220,17 @@ do_seed_config() {
     return 2
   fi
   jq -e . "$CONFIG_EXAMPLE" >/dev/null 2>&1 || { printf '⚠️  Unparseable example — refusing to seed from it: %s\n' "$CONFIG_EXAMPLE" >&2; return 2; }
-  mkdir -p "$(dirname "$config")" || return 2
+  # The data dir holds config.json (tax profile + business identity) and every
+  # other generated artifact, so it is owner-only (mode 0700) from creation (issue
+  # #65, GAP-21). /ynab-migrate seeds config WITHOUT requiring /setup first, so on
+  # the legacy-prototype path it can be the FIRST creator of this dir — a bare
+  # `mkdir -p` left it world-traversable (0755) under a loose umask, leaking
+  # filenames + mtimes of audit/, monitor-state, tax-tracker, and config to other
+  # local users. `( umask 077; mkdir -p )` gives a fresh dir 0700 with no
+  # world-readable window; the explicit chmod additionally tightens a dir left
+  # 0755 by a pre-privacy install. Mirrors commands/setup.md.
+  dir="$(dirname "$config")"
+  ( umask 077; mkdir -p "$dir" ) && chmod 700 "$dir" || return 2
   tmp="$(mktemp)" || return 2
   # Clean the temp copy on EVERY exit, mirroring the other writers, so a failure
   # can never strand a half-built seed (or leave an empty config that a re-run

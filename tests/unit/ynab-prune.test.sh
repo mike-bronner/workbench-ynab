@@ -218,4 +218,35 @@ test_apply_reports_failure_when_a_file_cannot_be_removed() {
   assert_eq "2" "$rc" "an undeletable candidate makes --apply exit non-zero (2)"
 }
 
+# --help prints the WHOLE leading comment block (to the first blank line), not a
+# hardcoded line range. A `sed -n '2,40p'` truncated it mid-header — dropping the
+# OUTPUT DIRECTORY, USAGE, and EXIT CODES sections that live PAST line 40. Assert
+# sections beyond the old cut so a regression to a fixed end-line fails.
+test_help_prints_the_full_header_not_a_truncated_range() {
+  local out rc=0
+  out="$( bash "$PRUNE" --help )" || rc=$?
+  assert_eq "0" "$rc" "--help exits 0"
+  assert_contains "$out" "OUTPUT DIRECTORY" "help includes the OUTPUT DIRECTORY section (past the old 40-line cut)"
+  assert_contains "$out" "EXIT CODES" "help includes the EXIT CODES section (past the old 40-line cut)"
+  # The EXIT CODES doc records that exit 2 also covers a PARTIAL --apply deletion,
+  # not only a usage error, so a caller scripting the codes isn't misled.
+  assert_contains "$out" "PARTIAL" "help documents that exit 2 can mean a partial --apply deletion"
+}
+
+# With NO --output-dir and NO .report.output_dir, prune falls back to the shared
+# default report dir ($HOME/Documents/Claude/Reports). That default is now
+# single-sourced in bin/path-expand.sh so the writer and pruner can't drift on
+# where reports live — exercise the fallback so dropping or renaming the shared
+# constant is caught here (an unbound DEFAULT_OUTPUT_DIR trips `set -u`).
+test_default_output_dir_fallback_is_the_shared_constant() {
+  local dir="$SANDBOX/Documents/Claude/Reports" cfg="$SANDBOX/empty-config.json" out rc=0
+  seed_reports "$dir"
+  printf '{}\n' > "$cfg"                  # no .report.output_dir → resolution hits the default
+  out="$( YNAB_CONFIG_FILE="$cfg" bash "$PRUNE" --days 30 --apply )" || rc=$?
+  assert_eq "0" "$rc" "default-dir prune exits 0"
+  assert_contains "$out" "removed 2 of 2 report(s)" "prune swept the shared default report dir"
+  [ -e "$dir/YNAB-Weekly-Review-2020-01-01.html" ] && fail "default-dir: old report not deleted (shared default not resolved)"
+  assert_file_exists "$dir/YNAB-Weekly-Review-2099-01-01.html"  # fresh survives
+}
+
 run_tests
