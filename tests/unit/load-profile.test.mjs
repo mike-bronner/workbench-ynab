@@ -152,6 +152,110 @@ test('(d) invalid JSON → structured parse error, not a throw', () => {
   assert.equal(r.profile, null);
 });
 
+// --- (#207) failure envelopes never carry the offending file's bytes --------
+// V8's JSON.parse SyntaxError.message quotes ~10 raw bytes of the input
+// ("Unexpected token 'A', \"AWS_SECRET\"... is not valid JSON"). A CONTAINED
+// but non-JSON file must fail with a message that reports at most a parse
+// position — never the file's content, and never V8's phrasing verbatim.
+
+const SECRET_CONTENT = 'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+
+test('(#207) parse failure on a contained secret-shaped file leaks none of its bytes', () => {
+  const p = join(TMP, 'secret-shaped.json');
+  writeFileSync(p, SECRET_CONTENT);
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.kind, 'parse');
+  for (const msg of [r.error.message, r.error.errors[0].message]) {
+    assert.ok(!msg.includes('AWS_SECRET'), `file bytes leaked into parse message: ${msg}`);
+    assert.ok(!msg.includes('Unexpected token'), `V8 err.message echoed verbatim: ${msg}`);
+    assert.match(msg, /invalid JSON in tax profile at .*: parse error/, `unexpected message shape: ${msg}`);
+  }
+});
+
+// chmod 0o000 does not block reads for root (Docker/CI-as-root) or on Windows,
+// so every chmod-based io test skips there (shared by the follow-up io test below).
+const canChmod = process.platform !== 'win32' && (typeof process.getuid !== 'function' || process.getuid() !== 0);
+
+test("(#207) io failure reports the errno code, never Node's composed err.message", { skip: !canChmod }, () => {
+  const p = join(TMP, 'unreadable-207.json');
+  writeFileSync(p, JSON.stringify(validBase()));
+  chmodSync(p, 0o000);
+  try {
+    const r = loadProfile({ dataDir: TMP, profilePath: p });
+    assert.equal(r.ok, false);
+    assert.equal(r.error.kind, 'io');
+    // Node's verbatim fs message reads "EACCES: permission denied, open '<path>'"
+    // — the envelope keeps only the code, so the embed marker may not appear.
+    assert.ok(!r.error.errors[0].message.includes("open '"), `fs err.message echoed verbatim: ${r.error.errors[0].message}`);
+    assert.match(r.error.errors[0].message, /cannot read tax profile at .*: EACCES$/, `unexpected message shape: ${r.error.errors[0].message}`);
+  } finally {
+    chmodSync(p, 0o600);
+  }
+});
+
+test("(#207) packaging-invariant schema throw leaks none of the file's bytes", () => {
+  // options.schemaPath is the documented seam onto the schema read+parse throw;
+  // the file is contained (inside dataDir) so it passes #169 containment.
+  const bad = join(TMP, 'secret-shaped-schema.json');
+  writeFileSync(bad, SECRET_CONTENT);
+  const p = writeProfile(validBase());
+  assert.throws(
+    () => loadProfile({ dataDir: TMP, profilePath: p, schemaPath: bad }),
+    (err) => {
+      assert.ok(!err.message.includes('AWS_SECRET'), `file bytes leaked into packaging throw: ${err.message}`);
+      assert.ok(!err.message.includes('Unexpected token'), `V8 err.message echoed verbatim: ${err.message}`);
+      assert.match(err.message, /cannot read tax-profile schema at .*: parse error/);
+      return true;
+    },
+  );
+});
+
+test("(#207) a short file containing 'at position <n>' cannot forge a parse position from its own bytes", () => {
+  // Inputs of ~19 bytes or fewer are embedded VERBATIM in V8's
+  // SyntaxError.message (no `"…"...` truncation), so any position recovered by
+  // scanning err.message can be the FILE'S OWN bytes disguised as digits. The
+  // envelope must emit a fixed message — never a position derived from
+  // err.message.
+  const p = join(TMP, 'position-forgery.json');
+  writeFileSync(p, 'xat position 42');
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.kind, 'parse');
+  for (const msg of [r.error.message, r.error.errors[0].message]) {
+    assert.ok(!msg.includes('position 42'), `file bytes re-emitted as a parse position: ${msg}`);
+    assert.match(msg, /invalid JSON in tax profile at .*: parse error$/, `unexpected message shape: ${msg}`);
+  }
+});
+
+test("(#207) depth failure message never carries the profile's own key path", () => {
+  // tooDeep()'s RangeError can name the offending JSON key path, and the
+  // profile's nested key names are profile-derived content (`overrides` is
+  // schema-open) — the envelope must reduce whatever RangeError it catches to
+  // the content-free fact, like every sibling site. Today stripComments'
+  // path-less guard happens to fire first for this fixture; this test pins the
+  // envelope invariant so a pipeline reorder can't silently start leaking the
+  // path-bearing variants. Direct resolveProfile/deepMerge callers still get
+  // the full RangeError path.
+  let nested = 'true';
+  for (let i = 0; i < 5000; i++) nested = `{"SECRET_KEY_NAME":${nested}}`;
+  const p = join(TMP, 'deep-secret-keys.json');
+  writeFileSync(
+    p,
+    `{"schemaVersion":"1","filingStatus":"single","taxYear":2025,"overrides":{"leak207":${nested}}}`,
+  );
+  const r = loadProfile({ dataDir: TMP, profilePath: p });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.kind, 'depth');
+  for (const msg of [r.error.message, r.error.errors[0].message]) {
+    assert.ok(
+      !msg.includes('SECRET_KEY_NAME') && !msg.includes('leak207'),
+      `profile key path leaked into depth message: ${msg}`,
+    );
+    assert.match(msg, /nesting exceeds the maximum supported depth of \d+$/, `unexpected message shape: ${msg}`);
+  }
+});
+
 // --- (e) provenance correctness across all three tiers ----------------------
 
 test('(e) provenance distinguishes defaults / user / overrides per leaf', () => {
@@ -540,8 +644,7 @@ test('(follow-up) schemaVersion matching neither oneOf arm is rejected', () => {
 });
 
 // --- follow-up: io / packaging-invariant / deep-freeze branches -------------
-
-const canChmod = process.platform !== 'win32' && (typeof process.getuid !== 'function' || process.getuid() !== 0);
+// (canChmod guard declared above the #207 io test — first use.)
 
 test('(follow-up) an unreadable profile returns a structured io failure', { skip: !canChmod }, () => {
   const p = join(TMP, 'unreadable.json');
@@ -748,8 +851,10 @@ test('(#169) the containment failure stays redacted when $HOME itself resolves t
 
 test('(#169) the io failure envelope is redacted under a symlinked $HOME (message + sources)', () => {
   // An unreadable profile INSIDE the allowlist exercises the pre-existing
-  // io path: both the composed message (Node's err.message embeds the raw
-  // path) and the echoed sources must mask every home spelling.
+  // io path: both the composed message (which embeds the raw path directly
+  // via its `${profilePath}` template plus the errno code — since #207,
+  // Node's err.message never rides the envelope) and the echoed sources
+  // must mask every home spelling.
   const dataDir = join(REAL_HOME, '.claude', 'plugins', 'data', 'workbench-ynab-claude-workbench');
   mkdirSync(dataDir, { recursive: true });
   const unreadable = join(dataDir, 'tax-profile.json');
