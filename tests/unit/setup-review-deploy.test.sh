@@ -181,17 +181,21 @@ test_mcp_reachability_gates_halt() {
 # real gate line and run it: a missing config must exit non-zero, a present one
 # must pass. Proven by execution, not a prose grep.
 test_config_absent_gate_blocks() {
+  # Grep a $-free fixed substring unique to the config gate's bash line (the two
+  # MCP gates end differently), so the pattern needs no $CONFIG_FILE expansion.
   local gate
-  gate="$(grep -E '\[ -f "\$CONFIG_FILE" \].*cannot deploy' "$CMD" | head -1)"
+  gate="$(grep -F 'cannot deploy the ynab-review task. Re-run /workbench-ynab:setup to create it' "$CMD" | head -1)"
   [ -n "$gate" ] || fail "no config-present gate found in the review step of $CMD"
 
+  # Set CONFIG_FILE INSIDE the eval string (not a bare assignment) so the gate
+  # sees it while shellcheck doesn't read it as an unused variable.
   local rc=0
-  ( CONFIG_FILE="/nonexistent/watson-review-$$.json"; eval "$gate" ) >/dev/null 2>&1 || rc=$?
+  ( eval "CONFIG_FILE='/nonexistent/watson-review-$$.json'; $gate" ) >/dev/null 2>&1 || rc=$?
   assert_eq "1" "$rc" "config-absent gate must block deployment (exit 1) when config is missing"
 
   local tmp; tmp="$(mktemp)"
   rc=0
-  ( CONFIG_FILE="$tmp"; eval "$gate" ) >/dev/null 2>&1 || rc=$?
+  ( eval "CONFIG_FILE='$tmp'; $gate" ) >/dev/null 2>&1 || rc=$?
   rm -f "$tmp"
   assert_eq "0" "$rc" "config-present gate must pass (exit 0) when config exists"
 }
