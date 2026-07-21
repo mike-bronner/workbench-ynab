@@ -211,6 +211,26 @@ test("(#207) packaging-invariant schema throw leaks none of the file's bytes", (
   );
 });
 
+test("(#207) packaging-invariant defaults throw leaks none of the file's bytes", () => {
+  // options.defaultsPath is the documented seam onto the bundled-defaults
+  // read+parse throw; the file is contained (inside dataDir) so it passes #169
+  // containment. Symmetric to the schema-packaging test above — the defaults
+  // read fires first, so the profile is never reached, but a valid profile is
+  // passed to mirror that sibling exactly.
+  const bad = join(TMP, 'secret-shaped-defaults.json');
+  writeFileSync(bad, SECRET_CONTENT);
+  const p = writeProfile(validBase());
+  assert.throws(
+    () => loadProfile({ dataDir: TMP, profilePath: p, defaultsPath: bad }),
+    (err) => {
+      assert.ok(!err.message.includes('AWS_SECRET'), `file bytes leaked into packaging throw: ${err.message}`);
+      assert.ok(!err.message.includes('Unexpected token'), `V8 err.message echoed verbatim: ${err.message}`);
+      assert.match(err.message, /cannot read bundled default ruleset at .*: parse error/);
+      return true;
+    },
+  );
+});
+
 test("(#207) a short file containing 'at position <n>' cannot forge a parse position from its own bytes", () => {
   // Inputs of ~19 bytes or fewer are embedded VERBATIM in V8's
   // SyntaxError.message (no `"…"...` truncation), so any position recovered by
