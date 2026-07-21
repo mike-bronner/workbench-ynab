@@ -126,7 +126,11 @@ test_assembled_report_is_complete_and_accessible() {
   assert_contains "$html" 'class="kpi-grid"' "KPI dashboard grid present"
   assert_contains "$html" "Health score"     "KPI health-score card present"
   local kpi_cards
-  kpi_cards="$(grep -oc 'class="kpi__label"' "$out" || true)"
+  # Count occurrences, not matching lines — `grep -c` counts lines even with -o
+  # (GNU grep), so a card duplicated onto an existing line would slip past. Match
+  # the repo idiom in bin/report-writer.sh:330; wrap the grep (not the pipeline)
+  # to stay `set -euo pipefail`-safe when the count is zero.
+  kpi_cards="$({ grep -o 'class="kpi__label"' "$out" || true; } | wc -l | tr -d '[:space:]')"
   assert_eq "4" "$kpi_cards" "exactly four KPI cards populated"
 
   # AC#5 + print CSS: the frozen @media print contract survived assembly.
@@ -148,7 +152,8 @@ test_assembled_report_is_complete_and_accessible() {
   assert_contains "$html" 'role="meter" aria-label="Financial health score"' "health-score gauge is a labelled meter"
   assert_contains "$html" 'aria-valuenow="78" aria-valuemin="0" aria-valuemax="100"' "health-score gauge carries the full aria-value set"
   local meters
-  meters="$(grep -oc 'role="meter"' "$out" || true)"
+  # Occurrence count, not line count (see the KPI-card note above).
+  meters="$({ grep -o 'role="meter"' "$out" || true; } | wc -l | tr -d '[:space:]')"
   assert_eq "2" "$meters" "both gauges (health score + goals) render as meters"
 
   # Chrome invariant: the hardcoded not-tax-advice disclaimer is present.
@@ -157,9 +162,19 @@ test_assembled_report_is_complete_and_accessible() {
 
 # ── AC#8 (visible in output): the flipped verdict renders into the report ───────
 test_verdict_is_visible_in_the_assembled_output() {
-  local out_low out_high html_low html_high
-  out_low="$(assemble_report itemize 15000 "$SANDBOX/vis-low")"
-  out_high="$(assemble_report standard 30000 "$SANDBOX/vis-high")"
+  local out_low out_high html_low html_high low high
+  # Drive the report from the REAL engine output — both the verdict and the
+  # deduction figure come from tax-verdict.mjs, not hardcoded literals — so a
+  # broken engine→render hand-off actually fails this test instead of the join
+  # being asserted by construction.
+  low="$(tax_verdict tax-profile-low-deduction.json)"
+  high="$(tax_verdict tax-profile-high-deduction.json)"
+  out_low="$(assemble_report \
+    "$(printf '%s' "$low"  | jq -r '.recommendation')" \
+    "$(printf '%s' "$low"  | jq -r '.standardDeduction')" "$SANDBOX/vis-low")"
+  out_high="$(assemble_report \
+    "$(printf '%s' "$high" | jq -r '.recommendation')" \
+    "$(printf '%s' "$high" | jq -r '.standardDeduction')" "$SANDBOX/vis-high")"
   html_low="$(cat "$out_low")"; html_high="$(cat "$out_high")"
   assert_contains "$html_low"  "Recommendation: <strong>Itemize</strong>"            "low-deduction report recommends itemizing"
   assert_contains "$html_high" "Recommendation: <strong>Standard deduction</strong>" "high-deduction report recommends the standard deduction"
