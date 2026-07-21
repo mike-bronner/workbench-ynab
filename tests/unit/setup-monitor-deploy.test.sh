@@ -12,7 +12,8 @@
 #   * the task id is the distinct `ynab-monitor` (never the weekly `ynab-review`);
 #   * cadence comes from config (schedules.monitor.cron), never a hardcoded cron;
 #   * enabled:false removes/disables the task (#12);
-#   * NO mutating scheduled-task call ever targets `ynab-review` (#12 safety);
+#   * within the monitor step, NO mutating scheduled-task call targets
+#     `ynab-review` (#12 safety) — Step 8 (issue #38) owns the ynab-review task;
 #   * the deploy is gated on the Step 1b scheduled-tasks-MCP probe;
 #   * the task prompt is sourced from the template, not inlined only.
 #
@@ -103,15 +104,20 @@ test_enabled_gate_resolves_false_when_disabled() {
   assert_eq "true" "$out" "an absent schedules block defaults to enabled"
 }
 
-# AC #12 SAFETY — the weekly-review task is never a target of a mutating
-# scheduled-task call. Every create/update/delete line must carry ONLY the
-# ynab-monitor id, never ynab-review.
+# AC #12 SAFETY — the MONITOR step never targets the weekly-review task in a
+# mutating scheduled-task call. Scoped to the monitor step (Step 7) alone:
+# setup.md's Step 8 (issue #38) legitimately deploys the ynab-review task, so a
+# whole-file grep would be wrong — the invariant is that the monitor step
+# confines every create/update/delete line to ynab-monitor, never ynab-review.
 test_never_mutates_ynab_review() {
+  local monitor_step
+  monitor_step="$(awk '/^## Step 7 /{f=1} f&&/^## Step 8 /{exit} f' "$CMD")"
+  [ -n "$monitor_step" ] || fail "could not extract the monitor step (Step 7) from $CMD"
   local mutating_lines
-  mutating_lines="$(grep -E 'mcp__scheduled-tasks__(create|update|delete)_scheduled_task' "$CMD" || true)"
-  [ -n "$mutating_lines" ] || fail "no scheduled-task mutating call found — the deploy step is missing"
+  mutating_lines="$(printf '%s\n' "$monitor_step" | grep -E 'mcp__scheduled-tasks__(create|update|delete)_scheduled_task' || true)"
+  [ -n "$mutating_lines" ] || fail "no scheduled-task mutating call found in the monitor step — the deploy step is missing"
   if printf '%s\n' "$mutating_lines" | grep -q 'ynab-review'; then
-    fail "a scheduled-task mutating call targets ynab-review — the weekly review must be untouched"
+    fail "the monitor step targets ynab-review in a mutating call — the weekly review must be untouched"
   fi
 }
 

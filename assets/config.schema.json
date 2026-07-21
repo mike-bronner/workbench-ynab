@@ -215,6 +215,23 @@
       "description": "Scheduled-task cadences for the plugin's background tasks. Read by the setup step (or a /workbench-ynab:setup re-run) to deploy and sync tasks via the scheduled-tasks MCP — cadence is config-driven, never hardcoded in a skill or task deployment. Omit the whole block to accept the defaults.",
       "additionalProperties": false,
       "properties": {
+        "review": {
+          "type": "object",
+          "description": "The unified review (Sprint 3). ONE scheduled task (ynab-review) whose cron fires /workbench-ynab:ynab-review; the read-only orchestrator routes every tier (weekly/monthly/quarterly-tax/annual). NOT four per-tier tasks — a single cadence covers them all.",
+          "additionalProperties": false,
+          "properties": {
+            "cron": {
+              "type": "string",
+              "default": "0 7 * * 1",
+              "description": "Cron expression for the unified review. Defaults to Monday 07:00 (\"0 7 * * 1\") — the proven weekly cadence — when the block or field is absent. The orchestrator routes tiers, so this one cadence covers weekly/monthly/quarterly-tax/annual."
+            },
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether the ynab-review scheduled task is deployed. Defaults to true. Set false and re-run setup to remove or disable the task; the ynab-monitor task is unaffected."
+            }
+          }
+        },
         "monitor": {
           "type": "object",
           "description": "Proactive between-run monitoring poll (M6). Runs more frequently than the weekly review and is a distinct scheduled task (ynab-monitor).",

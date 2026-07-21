@@ -45,7 +45,7 @@ loader, the JSON Schema, or any default.
 | `mapping_rules` | array | optional | Payee/category → tax-line rules, expressed as data. |
 | `persona` | object | **required** | The financial-review persona (configurable name). |
 | `report` | object | **required** | Report output directory + template path. |
-| `schedules` | object | optional | Scheduled-task cadences for background tasks (e.g. the monitoring poll). |
+| `schedules` | object | optional | Scheduled-task cadences for background tasks (the unified `ynab-review` task and the `ynab-monitor` poll). |
 | `alerts` | object | optional | Alert rules + delivery channel for proactive monitoring (M6). |
 | `classification` | object | optional | Confidence-band thresholds for the human-review routing policy (issue #19). |
 
@@ -262,6 +262,23 @@ Cadences for the plugin's background scheduled tasks. The **setup step** (or a
 `/workbench-ynab:setup` re-run) reads this block and deploys or syncs each task
 via the scheduled-tasks MCP — cadence is **config-driven, never hardcoded** in a
 skill or in the task deployment. Omit the whole block to accept the defaults.
+
+#### `schedules.review` *(object, optional)*
+
+The unified review (Sprint 3). **ONE** scheduled task (`ynab-review`) whose cron
+fires `/workbench-ynab:ynab-review`; the read-only orchestrator decides which
+tiers run that day (weekly, monthly, quarterly-tax, annual). It is **not** four
+per-tier tasks — a single cadence covers them all, exactly like bujo's one
+`bujo-ritual` task.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `cron` | string | optional | `"0 7 * * 1"` | Cron expression for the unified review. Defaults to Monday 07:00 (the proven weekly cadence) when the block or field is absent. The orchestrator routes tiers, so this one cadence covers weekly/monthly/quarterly-tax/annual. |
+| `enabled` | boolean | optional | `true` | Whether the `ynab-review` scheduled task is deployed. Set `false` and re-run setup to remove/disable the task; `ynab-monitor` is unaffected. |
+
+```json
+"schedules": { "review": { "cron": "0 7 * * 1", "enabled": true } }
+```
 
 #### `schedules.monitor` *(object, optional)*
 
