@@ -108,6 +108,17 @@ test('large txn: below the threshold and not unusual does NOT fire', () => {
   assert.deepEqual(findings, [], '$50 < $500 large threshold and 50000 < 3×50000 mean → nothing');
 });
 
+test('large txn: exactly AT the base threshold fires; one milliunit under is silent (base check is >=)', () => {
+  // Pins the base "large" boundary directly (== threshold and == threshold-1),
+  // so a >=→> regression on the base magnitude check goes red. The base check is
+  // INCLUSIVE: the user-facing config docs (docs/alerts-config.md,
+  // docs/config-schema.md) both define it as "at or above". No history → not
+  // "unusual", so only the base magnitude check is in play. CONFIG large = 500000 mu.
+  const at = detectLargeUnusualTransactions([{ id: 't1', amount: -500000, category_id: 'c1' }], {}, CONFIG);
+  const under = detectLargeUnusualTransactions([{ id: 't2', amount: -499999, category_id: 'c1' }], {}, CONFIG);
+  assert.deepEqual([at.length, under.length], [1, 0], '500000 == threshold fires; 499999 == threshold-1 stays silent');
+});
+
 test('unusual txn: over unusual_multiplier × the trailing mean fires even when small', () => {
   // $90, well under the $500 large threshold, but 4.5× the $20 category mean.
   const findings = detectLargeUnusualTransactions(
@@ -153,6 +164,16 @@ test('large txn: magnitude is compared, so a large OUTFLOW (negative) fires', ()
   assert.equal(findings.length, 1);
 });
 
+test('large txn: a malformed transaction (null / no id / non-numeric amount) is skipped, never thrown', () => {
+  const findings = detectLargeUnusualTransactions([
+    null,
+    { amount: -600000 }, // no id
+    { id: 't1', amount: 'lots' }, // non-numeric amount
+    { id: 't2', amount: -600000 }, // the one real hit
+  ], {}, CONFIG);
+  assert.deepEqual(findings.map((f) => f.dedupe_key), ['large_txn:t2']);
+});
+
 // --- Detector 3: budget overrun -----------------------------------------------
 
 test('budget overrun: a category at/over the pct fires 🟡 with budget_overrun:{id}:{YYYY-MM}', () => {
@@ -191,6 +212,15 @@ test('budget overrun: hidden/deleted categories and pure inflow are excluded', (
 
 test('budget overrun: without a month the detector returns nothing (the dedupe period is required)', () => {
   assert.deepEqual(detectBudgetOverrun([{ id: 'c1', budgeted: 100000, activity: -200000 }], CONFIG, {}), []);
+});
+
+test('budget overrun: a malformed category (null / no id) is skipped, never thrown', () => {
+  const findings = detectBudgetOverrun([
+    null,
+    { budgeted: 100000, activity: -200000 }, // no id
+    { id: 'c1', budgeted: 100000, activity: -200000 }, // the one real hit
+  ], CONFIG, { month: '2026-07' });
+  assert.deepEqual(findings.map((f) => f.dedupe_key), ['budget_overrun:c1:2026-07']);
 });
 
 // --- Detector 4: bill due -----------------------------------------------------
@@ -234,6 +264,32 @@ test('bill due: a malformed date is skipped, never treated as due-now', () => {
   assert.deepEqual(findings.map((f) => f.dedupe_key), ['bill_due:ok:2026-07-22']);
 });
 
+test('bill due: a calendar-invalid or truncated date is skipped, never rolled over into a false fire', () => {
+  // Date.parse silently ROLLS OVER a day-overflow (2026-02-30 → 03-02) and a
+  // truncated string (2026-03 → 03-01) — exactly the GAP-3 "30th/31st" bills
+  // derived in a short month. `now` is anchored to 2026-03-01 so BOTH rolled dates
+  // land INSIDE the 3-day lookahead: without the round-trip guard each would fire
+  // on an impossible/wrong day and bake it into the dedupe key (a 02-30 key vs a
+  // later 03-02 key = double-alert). Only daysUntil's round-trip check stops them,
+  // so this discriminates that guard (not the lookahead window).
+  const findings = detectBillsDue([
+    { id: 'rollover', name: 'Rent', date: '2026-02-30' }, // no February 30th → rolls to 03-02 (1 day out)
+    { id: 'truncated', name: 'Rent', date: '2026-03' }, // truncated YYYY-MM → rolls to 03-01 (0 days out)
+    { id: 'ok', date: '2026-03-02' }, // the one real hit (1 day out)
+  ], CONFIG, { now: '2026-03-01T09:00:00Z' });
+  assert.deepEqual(findings.map((f) => f.dedupe_key), ['bill_due:ok:2026-03-02']);
+});
+
+test('bill due: a malformed bill (null / no id / non-string date) is skipped, never thrown', () => {
+  const findings = detectBillsDue([
+    null,
+    { date: '2026-07-24' }, // no id
+    { id: 'b1', date: 12345 }, // non-string date
+    { id: 'b2', date: '2026-07-24' }, // the one real hit
+  ], CONFIG, { now: NOW });
+  assert.deepEqual(findings.map((f) => f.dedupe_key), ['bill_due:b2:2026-07-24']);
+});
+
 // --- Ledger reconciliation ----------------------------------------------------
 
 test('reconcileFindings: dispatch a NEW condition once, expire a CLEARED one, keep point-events', () => {
@@ -275,6 +331,27 @@ test('reconcileFindings: an empty pass expires nothing that stays active and dis
 test('EXPIRING_TYPES excludes large_txn (point events never auto-expire)', () => {
   assert.ok(!EXPIRING_TYPES.includes('large_txn'));
   assert.deepEqual([...EXPIRING_TYPES].sort(), ['bill_due', 'budget_overrun', 'overdrawn']);
+});
+
+test('reconcileFindings: options.expiringTypes narrows expiry so a skipped detector keeps its keys', () => {
+  // The documented partial-failure seam: a caller that skipped a full-domain
+  // detector (e.g. the accounts fetch failed) narrows expiringTypes to only the
+  // domains it re-evaluated, so it never expires a domain it couldn't attest as
+  // cleared. Both keys are absent from this (empty) pass, so only the difference
+  // in expiringTypes decides which survives.
+  const prior = {
+    ...defaultState(),
+    firedAlerts: {
+      'overdrawn:a1': { at: 'old' }, // NOT re-evaluated this pass
+      'budget_overrun:c1:2026-07': { at: 'old' }, // WAS re-evaluated this pass
+    },
+  };
+  const { state, expired } = reconcileFindings(prior, [], {
+    now: 'NOW', expiringTypes: ['budget_overrun', 'bill_due'],
+  });
+  assert.deepEqual(expired, ['budget_overrun:c1:2026-07'], 'only a domain listed in expiringTypes may expire');
+  assert.deepEqual(state.firedAlerts, { 'overdrawn:a1': { at: 'old' } },
+    'the un-re-evaluated overdrawn key survives because overdrawn is outside expiringTypes');
 });
 
 test('TRAILING_WINDOW caps the unusual mean at the last N same-category transactions', () => {

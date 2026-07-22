@@ -323,7 +323,8 @@ test('the module writes nothing to stdout', () => {
     import(${JSON.stringify(url)}).then((m) => {
       const { state } = m.readState({ statePath: ${JSON.stringify(tmpState)}, dataDir: ${JSON.stringify(TMP)} });
       const { state: next } = m.computeNextState(state, { timestamp: 't', accounts: { a: { cleared: 1, uncleared: 0 } }, recentTransactionCount: 0 });
-      m.recordFiredAlert(next, 'k', 1);
+      const { state: fired } = m.recordFiredAlert(next, 'overdrawn:a', 1);
+      m.expireFiredAlerts(fired, new Set(), { types: ['overdrawn'] });
       m.writeState(next, { statePath: ${JSON.stringify(tmpState)}, dataDir: ${JSON.stringify(TMP)} });
       m.milliunitsToDollars(1000);
       process.stderr.write('ok');                                      // proof it ran

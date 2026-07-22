@@ -75,8 +75,10 @@ a monitor alert, a review dispatch, and a report badge.
 ### `dedupe_key` — the fired-alert ledger key
 
 Format: **`{type}:{account_or_category}:{period}`** — e.g.
-`large_transaction:acct-1:2026-06` or `budget_overrun:Groceries:2026-07`. Build
-it with the exported `dedupeKey(type, accountOrCategory, period)` helper.
+`budget_overrun:Groceries:2026-07` or `bill_due:sched-1:2026-06-15`. Build
+it with the exported `dedupeKey(type, accountOrCategory, period)` helper. (Point-event
+keys such as `large_txn:{transaction_id}` are two-part and built inline, not via
+this three-part helper.)
 
 The key feeds the **M6-1 fired-alert ledger** — the `firedAlerts` field of
 `monitor-state.json` ([`lib/monitor/state.mjs`](../lib/monitor/state.mjs)

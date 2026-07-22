@@ -95,17 +95,27 @@ an **empty** findings list is a complete no-op (no notification, no log append).
    below. Collect all findings into one array.
 
 5. **Reconcile against the ledger and dispatch.** Call
-   `reconcileFindings(nextState, findings)` (`lib/monitor/detectors.mjs`). It
+   `reconcileFindings(prior, findings)` (`lib/monitor/detectors.mjs`) — against the
+   **prior** snapshot read in step 1, *before* `computeNextState` runs in step 6. It
    returns `toDispatch` — the findings whose `dedupe_key` is **not already** in
    the ledger — and the updated `state` (cleared keys expired, active keys
    recorded). Pass `toDispatch` to `dispatchAlerts()`; an empty list dispatches
-   nothing. Persist the reconciled ledger in step 6.
+   nothing. Carry the reconciled `state.firedAlerts` forward into step 6.
+
+   **Partial-failure narrowing.** `reconcileFindings` assumes every full-domain
+   detector ran, so an absent key has genuinely cleared. If a detector's fetch
+   FAILED this pass (e.g. the accounts read errored), pass
+   `reconcileFindings(prior, findings, { expiringTypes })` narrowed to only the
+   domains you actually re-evaluated (`overdrawn` / `budget_overrun` / `bill_due`).
+   Otherwise the un-refetched domain's keys all expire and re-alert next pass. (The
+   point-event `large_txn` type never auto-expires and is never in `expiringTypes`.)
 
 6. **Compute + persist the next snapshot.** Build the observation
    `{ timestamp, accounts, serverKnowledge?, recentTransactionCount }`, call
-   `computeNextState(prior, observation)`, merge in the reconciled `firedAlerts`
-   from step 5, and `writeState(next)` — **always**, even on a no-op, so
-   `lastPollTimestamp` and the cursor advance. The write is atomic (temp + rename).
+   `computeNextState(prior, observation)`, overlay the reconciled `firedAlerts`
+   from step 5 (`computeNextState` passes the prior ledger through unchanged), and
+   `writeState(next)` — **always**, even on a no-op, so `lastPollTimestamp` and the
+   cursor advance. The write is atomic (temp + rename).
 
 7. **Decide output:**
    - No finding was new (`toDispatch` empty) → **no notification, no log append**;
