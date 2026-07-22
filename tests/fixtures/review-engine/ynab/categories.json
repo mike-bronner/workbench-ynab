@@ -1,0 +1,33 @@
+{
+  "$comment": "SYNTHETIC YNAB list_categories response (issue #39 golden-snapshot fixture). Budgeted/activity/balance are YNAB MILLIUNITS (divide by 1000 for dollars). All group and category names are placeholders — no real budget data. Committed for deterministic review-engine snapshot tests.",
+  "data": {
+    "category_groups": [
+      {
+        "id": "grp-income",
+        "name": "Business A Income",
+        "hidden": false,
+        "categories": [
+          { "id": "cat-consulting", "name": "Consulting Income", "budgeted": 0, "activity": 9300000, "balance": 0, "hidden": false }
+        ]
+      },
+      {
+        "id": "grp-expenses",
+        "name": "Business A Expenses",
+        "hidden": false,
+        "categories": [
+          { "id": "cat-office", "name": "Office Expense", "budgeted": 500000, "activity": -420000, "balance": 80000, "hidden": false },
+          { "id": "cat-software", "name": "Software", "budgeted": 200000, "activity": -180000, "balance": 20000, "hidden": false },
+          { "id": "cat-prof", "name": "Professional Services", "budgeted": 300000, "activity": -260000, "balance": 40000, "hidden": false }
+        ]
+      },
+      {
+        "id": "grp-itemized",
+        "name": "Itemized Deductions Placeholder",
+        "hidden": false,
+        "categories": [
+          { "id": "cat-charity", "name": "Charitable Giving", "budgeted": 2000000, "activity": -2000000, "balance": 0, "hidden": false }
+        ]
+      }
+    ]
+  }
+}
