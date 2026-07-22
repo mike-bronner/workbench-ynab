@@ -59,6 +59,10 @@
     "template_path": null
   },
   "schedules": {
+    "review": {
+      "cron": "0 7 * * 1",
+      "enabled": true
+    },
     "monitor": {
       "cron": "0 8 * * *",
       "enabled": true
