@@ -112,6 +112,19 @@ structured failure that names the offending JSON path (`error.errors[].path`) �
 **never** silently proceeds with a half-valid profile, because a wrong standard
 deduction used downstream would corrupt every tax number.
 
+**Boundary content hygiene (#225).** The offending property is named in full in
+the per-violation `error.errors[]` (`path`, `message`, `params.additionalProperty` /
+`params.propertyName`) for direct/programmatic callers — but the **top-level**
+`error.message`, the string `lib/tax/index.mjs`'s `rawProfile()` re-throws across an
+MCP/JSON-RPC boundary, is reduced to a content-free fact (error count + failure
+kind) and carries **none** of the property name's bytes. A JSON key can itself be
+secret-shaped (a `AWS_SECRET_ACCESS_KEY=…` top-level key, or one under the
+schema-open `overrides` layer), so echoing it verbatim into the boundary-crossing
+message — as the old `first offending path: …` form did via `errors[0].path` — was
+a content-disclosure channel. Direct callers keep the full validation detail; the
+boundary does not. This is a distinct content class from the home-directory path
+masking above (`redact()`), which is left untouched.
+
 Validation is **dependency-free**: a compact, purpose-built JSON-Schema-subset
 validator built on `node:` built-ins only — no `ajv`, no `node_modules`. This keeps
 the loader faithful to the plugin's "nothing to install" premise and the recorded
@@ -236,7 +249,8 @@ stderr only.
 
 `tests/unit/load-profile.test.mjs` runs under the built-in `node:test` runner with
 **no `node_modules`** and covers: defaults-only fallback, user-over-defaults,
-overrides-over-user, schema-invalid failure (with the offending path), provenance
+overrides-over-user, schema-invalid failure (offending path named in `errors[]` but
+kept out of the boundary-crossing top-level `error.message` — #225), provenance
 across all three tiers, array-merge-by-id + object deep-merge, the accessors, and
 the no-stdout guarantee (asserted by spawning a child process). It also covers the
 security and robustness edges: prototype-pollution via a `__proto__` override and
