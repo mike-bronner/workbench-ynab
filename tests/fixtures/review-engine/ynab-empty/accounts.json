@@ -1,0 +1,6 @@
+{
+  "$comment": "SYNTHETIC YNAB list_accounts response for the EMPTY / new-budget golden-snapshot fixture (issue #33, GAP-4). A brand-new budget has no accounts yet. Committed for the deterministic empty-budget review-engine snapshot test.",
+  "data": {
+    "accounts": []
+  }
+}

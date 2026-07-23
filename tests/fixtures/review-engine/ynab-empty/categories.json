@@ -1,0 +1,23 @@
+{
+  "$comment": "SYNTHETIC YNAB list_categories response for the EMPTY / new-budget golden-snapshot fixture (issue #33, GAP-4). The default category structure exists but has zero activity and — critically for this fixture — NO business category group, so the business-tax sections are omitted with a one-line note. All names are placeholders; amounts are integer milliunits.",
+  "data": {
+    "category_groups": [
+      {
+        "id": "grp-immediate",
+        "name": "Immediate Obligations",
+        "hidden": false,
+        "categories": [
+          { "id": "cat-rent", "name": "Rent/Mortgage", "budgeted": 0, "activity": 0, "balance": 0, "hidden": false }
+        ]
+      },
+      {
+        "id": "grp-true-expenses",
+        "name": "True Expenses",
+        "hidden": false,
+        "categories": [
+          { "id": "cat-auto", "name": "Auto Maintenance", "budgeted": 0, "activity": 0, "balance": 0, "hidden": false }
+        ]
+      }
+    ]
+  }
+}

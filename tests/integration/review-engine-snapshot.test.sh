@@ -27,6 +27,11 @@ source "$REPO_ROOT/tests/lib/assert.sh"
 
 FIX="$REPO_ROOT/tests/fixtures/review-engine"
 FRAGS="$FIX/fragments"
+# The EMPTY / new-budget fixture set (issue #33, GAP-4): zero-transaction,
+# no-business-group, no-prior-month YNAB data and the matching empty-state
+# fragments. The snapshot test exercises BOTH this and the populated set above.
+FIX_EMPTY="$FIX/ynab-empty"
+FRAGS_EMPTY="$FIX/fragments-empty"
 WRITER="$REPO_ROOT/bin/report-writer.sh"
 PERSONA="$REPO_ROOT/bin/persona.sh"
 TEMPLATE="$REPO_ROOT/assets/report/template.html"
@@ -77,6 +82,33 @@ assemble_report() {
     --slot "section-10-anomalies=$(cat "$FRAGS/section-10-anomalies.html")" \
     --slot "section-11-recommendations=$(cat "$FRAGS/section-11-recommendations.html")" \
     --slot "section-12-tax-summary=$sec12" \
+    --slot "footer-persona=$persona"
+}
+
+# Assemble a full EMPTY / new-budget report (issue #33) from the empty-state
+# fragments through the SAME real report writer + persona resolver. The tax
+# section-12 fragment is the "no business entity configured" omit-note (this
+# fixture has no business group), and every other section is an explicit
+# empty-state slot. $1 = output dir; echoes the absolute path the writer wrote.
+assemble_empty_report() {
+  local outdir="$1"
+  local persona
+  persona="$(YNAB_CONFIG_FILE="$CFG" bash "$PERSONA" html-name)"
+  YNAB_CONFIG_FILE="$CFG" bash "$WRITER" --template "$TEMPLATE" --output-dir "$outdir" \
+    --tier Quarterly-Tax --date 2025-05-01 \
+    --slot "kpi-dashboard=$(cat "$FRAGS_EMPTY/kpi-dashboard.html")" \
+    --slot "section-1-classification=$(cat "$FRAGS_EMPTY/section-1-classification.html")" \
+    --slot "section-2-income=$(cat "$FRAGS_EMPTY/section-2-income.html")" \
+    --slot "section-3-spending=$(cat "$FRAGS_EMPTY/section-3-spending.html")" \
+    --slot "section-4-budget-adherence=$(cat "$FRAGS_EMPTY/section-4-budget-adherence.html")" \
+    --slot "section-5-cash-flow=$(cat "$FRAGS_EMPTY/section-5-cash-flow.html")" \
+    --slot "section-6-categories=$(cat "$FRAGS_EMPTY/section-6-categories.html")" \
+    --slot "section-7-accounts=$(cat "$FRAGS_EMPTY/section-7-accounts.html")" \
+    --slot "section-8-goals=$(cat "$FRAGS_EMPTY/section-8-goals.html")" \
+    --slot "section-9-net-worth=$(cat "$FRAGS_EMPTY/section-9-net-worth.html")" \
+    --slot "section-10-anomalies=$(cat "$FRAGS_EMPTY/section-10-anomalies.html")" \
+    --slot "section-11-recommendations=$(cat "$FRAGS_EMPTY/section-11-recommendations.html")" \
+    --slot "section-12-tax-summary=$(cat "$FRAGS_EMPTY/section-12-tax-summary.html")" \
     --slot "footer-persona=$persona"
 }
 
@@ -208,6 +240,121 @@ test_dispatch_summary_shape() {
   esac
   # The report pointer resolved to the real assembled path.
   assert_contains "$dispatch" "📄 Full report: $out" "report pointer names the assembled report"
+}
+
+# ══ issue #33 (GAP-4): the EMPTY / new-budget case runs through the SAME engine ══
+
+# ── AC#8: the empty/new-budget fixtures exist, are valid JSON, and are empty ────
+test_empty_budget_fixtures_are_valid_and_empty() {
+  for f in list-transactions accounts categories months; do
+    assert_file_exists "$FIX_EMPTY/$f.json"
+    assert_json_valid  "$FIX_EMPTY/$f.json"
+  done
+  # The defining shape of this fixture: no transactions, no accounts, no
+  # prior-month history — so the review's denominators are all zero.
+  assert_eq "0" "$(jq '.data.transactions | length' "$FIX_EMPTY/list-transactions.json")" "empty fixture has zero transactions"
+  assert_eq "0" "$(jq '.data.accounts | length'     "$FIX_EMPTY/accounts.json")"          "empty fixture has zero accounts"
+  assert_eq "0" "$(jq '.data.months | length'       "$FIX_EMPTY/months.json")"            "empty fixture has no prior-month data"
+  # And no business category group anywhere in the empty categories fixture.
+  if jq -e '.data.category_groups[] | select(.name | test("[Bb]usiness"))' "$FIX_EMPTY/categories.json" >/dev/null 2>&1; then
+    fail "empty fixture unexpectedly contains a business category group"
+  fi
+  if grep -rInE 'ynab-[a-z0-9]{20,}|[0-9]{12,19}|BEGIN [A-Z ]*PRIVATE KEY' "$FIX_EMPTY" ; then
+    fail "an empty fixture contains a token/real-account-shaped string"
+  fi
+  return 0
+}
+
+# ── AC#2/#4: every section renders an explicit empty-state slot, no empty table ─
+test_empty_budget_renders_explicit_empty_state_slots() {
+  local out html
+  out="$(assemble_empty_report "$SANDBOX/empty")"
+  assert_file_exists "$out"
+  html="$(cat "$out")"
+
+  # Every slot was substituted — no leftover markers, no partial report.
+  case "$html" in *"<!-- SLOT:"*) fail "leftover SLOT marker in the empty-budget report" ;; esac
+
+  # All 12 section headings are still present (the sections stay in the document).
+  local n
+  for n in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    assert_contains "$html" "<h2>$n. " "section $n heading present in empty report"
+  done
+
+  # AC#2: the two canonical empty-state messages appear (an explicit slot, not
+  # an empty table). Both strings are the single source of truth in
+  # assets/review-guards.js (EMPTY_STATE_MESSAGES) — keep them in lockstep.
+  assert_contains "$html" "No transactions in this window" "empty-state 'no transactions' slot rendered"
+  assert_contains "$html" "No findings this period"        "empty-state 'no findings' slot rendered"
+
+  # AC#2/#4: a degenerate budget must NEVER emit an empty <table> (the failure
+  # mode this issue exists to prevent) — the empty-state slots replace tables.
+  case "$html" in *"<table"*) fail "empty-budget report emitted a <table> where an empty-state slot was required" ;; esac
+}
+
+# ── AC#3/#4: no NaN / Infinity ever reaches the rendered empty-budget output ────
+test_empty_budget_output_has_no_nan_or_infinity() {
+  local out html
+  out="$(assemble_empty_report "$SANDBOX/empty-nan")"
+  html="$(cat "$out")"
+  # A divide-by-zero that slipped a guard would surface here as NaN/Infinity.
+  case "$html" in
+    *NaN*)      fail "empty-budget report contains NaN — a divide-by-zero guard was missed" ;;
+    *Infinity*) fail "empty-budget report contains Infinity — a divide-by-zero guard was missed" ;;
+  esac
+  return 0
+}
+
+# ── AC#3: the health gauge reads n/a and OMITS the meter (no NaN-valued meter) ──
+test_empty_budget_health_gauge_is_na_and_omits_meter() {
+  local out html meters
+  out="$(assemble_empty_report "$SANDBOX/empty-gauge")"
+  html="$(cat "$out")"
+  # The health KPI shows the n/a sentinel, not a number.
+  assert_contains "$html" "Health score" "health-score KPI card present"
+  assert_contains "$html" '<div class="kpi__value">n/a</div>' "health-score KPI renders the n/a sentinel"
+  # A n/a score has no numeric value, so the report must carry NO meter at all —
+  # a role=meter with aria-valuenow=NaN would be worse than omitting the gauge.
+  meters="$({ grep -o 'role="meter"' "$out" || true; } | wc -l | tr -d '[:space:]')"
+  assert_eq "0" "$meters" "empty-budget report omits every role=meter gauge (n/a score has no numeric value)"
+}
+
+# ── AC#5: no business entity configured ⇒ tax section omitted with a one-line note
+test_empty_budget_tax_sections_omitted_with_note() {
+  local out html
+  out="$(assemble_empty_report "$SANDBOX/empty-tax")"
+  html="$(cat "$out")"
+  # The exact one-line note (assets/review-guards.js NO_BUSINESS_ENTITY_NOTE),
+  # in place of any empty Schedule C / SE tax table.
+  assert_contains "$html" "No business entity configured — tax sections skipped" "tax sections replaced with the omit note"
+  # No Schedule C/SE table leaked into the tax section.
+  case "$html" in
+    *"Schedule C"*|*"Schedule SE"*) fail "empty-budget report emitted a Schedule C/SE section for a no-business budget" ;;
+  esac
+  return 0
+}
+
+# ── AC#7(a): zero findings ⇒ dispatch skipped, "No findings this period" summary ─
+test_empty_budget_dispatch_is_zero_findings_summary() {
+  local out dispatch signoff findings
+  out="$(assemble_empty_report "$SANDBOX/empty-disp")"
+  signoff="$(YNAB_CONFIG_FILE="$CFG" bash "$PERSONA" signoff)"
+  dispatch="$(sed -e "s#{{output_path}}#$out#" -e "s#{{signoff}}#$signoff#" "$FIX/dispatch-empty.txt")"
+
+  # The zero-findings summary line is present…
+  assert_contains "$dispatch" "No findings this period" "empty dispatch carries the zero-findings summary"
+  # …and the dispatch is SKIPPED: zero severity-prefixed findings, never padded
+  # to five (AC#7(a) — contrast test_dispatch_summary_shape's exactly-five).
+  findings="$(printf '%s\n' "$dispatch" | grep -cE '^(🔴|🟡|🟢) ' || true)"
+  assert_eq "0" "$findings" "empty dispatch emits no severity-prefixed findings (dispatch skipped)"
+  # Report pointer + persona sign-off still close the summary.
+  assert_contains "$dispatch" "📄 Full report: $out" "empty dispatch still points at the report"
+  local last
+  last="$(printf '%s\n' "$dispatch" | sed -e '/^[[:space:]]*$/d' | tail -1)"
+  case "$last" in
+    "— "*", your financial assistant") : ;;
+    *) fail "empty dispatch does not close with a persona-signed footer: [$last]" ;;
+  esac
 }
 
 run_tests

@@ -125,8 +125,15 @@ out of scope for the read-only phase and absent from any review path.
   page as "more to fetch," not "done."
 - **Empty / new budget is a normal state.** A budget with no accounts,
   categories, or transactions in the window is not an error — render each
-  section with an explicit "nothing in this period" line and a neutral KPI, and
-  add an `empty_budget` note to the dispatch summary. Never fabricate rows.
+  section with an explicit empty-state slot (`No transactions in this window` /
+  `No findings this period`) and a neutral `n/a` KPI, and add an `empty_budget`
+  note to the dispatch summary. Never fabricate rows, and never emit an empty
+  table or a computed `0/0`. The full contract — the degenerate-state
+  enumeration, the divide-by-zero guards, the business-tax gate, and the
+  dispatch findings plan — is
+  [§6 Empty-state & degenerate-budget handling](#empty-state--degenerate-budget-handling),
+  backed by the shared guard module
+  [`../../assets/review-guards.js`](../../assets/review-guards.js).
 
 ---
 
@@ -245,7 +252,13 @@ Which sections run, and over what window, is set by the [tier matrix](#7-tier-ma
    inverse of avoidable/outlier spend), **(f) Tax Readiness** (§1/§12). Show each
    sub-score and the rolled overall (0–100 for the progress bar). → the
    health-score KPI card in `SLOT:kpi-dashboard` (with a detail card if the tier
-   warrants it).
+   warrants it). Compute every sub-score and the roll-up through the guard module
+   ([`../../assets/review-guards.js`](../../assets/review-guards.js): `subScore`,
+   `overallHealthScore`): a sub-score whose section has no data is `null` (not a
+   masking `0`), and when **every** sub-score is `null` — a brand-new budget with
+   nothing to measure — the overall score is the `n/a` sentinel, rendered as the
+   plain KPI value `n/a` with **no** `role="meter"` gauge (a meter needs a numeric
+   value). Never a `NaN`. See the empty-state contract below.
 10. **Forecast.** Project period-end and near-term cash flow / net worth from the
     period's run-rate and known scheduled transactions. → feeds
     `SLOT:section-5-cash-flow` and `SLOT:section-9-net-worth`.
@@ -266,6 +279,48 @@ in §1/§10; the four **KPI cards** (`SLOT:kpi-dashboard`: income, spending, net
 cash flow, health score) from §1/§3/§10/§9. Every one of the 14 slots is filled
 (an out-of-scope section is replaced with an **empty string** — the surrounding
 `<section>` stays in the document; see §8).
+
+### Empty-state & degenerate-budget handling
+
+A brand-new, zero-transaction, or no-business budget is a **normal first-run
+state**, not an error (GAP-4 / issue #33). Every degenerate input is handled
+through the shared, dependency-free guard module
+[`../../assets/review-guards.js`](../../assets/review-guards.js) — never inline
+arithmetic — so a fresh user's first review never produces a `NaN` health score,
+a divide-by-zero percentage, or an empty table.
+
+- **Enumerate the degenerate states.** Call `detectDegenerateStates(snapshot)`
+  to learn which of the enumerated `DEGENERATE_STATES` apply: zero accounts, zero
+  transactions in the window, zero uncategorized, no Ready-to-Assign data, no
+  business category group, no prior-month comparison data, and brand-new budget
+  (no historical months). Branch the rendering on the result.
+- **Every section renders an explicit empty-state slot** when its data is
+  absent — the canonical `EMPTY_STATE_MESSAGES` (`No transactions in this window`
+  / `No findings this period`, or a section-appropriate equivalent) inside the
+  card, **never** an empty `<table>` and never a silently computed `0/0`.
+- **Guard every ratio, percentage, and health-score computation.** Route savings
+  rate, threshold percentages, category-increase comparisons, and any other
+  division through `ratio` / `percentOf` / `savingsRate` / `changePercent` and
+  the health-score helpers. A zero/absent denominator or empty dataset yields the
+  `null` sentinel — rendered as `n/a` via `orNa` / `formatPercent` /
+  `formatHealthScore` — never `NaN` or `Infinity`. A `n/a` health score renders
+  as the plain KPI value `n/a` with **no** `role="meter"` gauge.
+- **Gate the business-tax sections** (Schedule C / SE) with
+  `businessTaxSectionMode`: with **no** business entity configured, omit both
+  sections and render the single one-line note `NO_BUSINESS_ENTITY_NOTE`
+  (`No business entity configured — tax sections skipped`) in place of any empty
+  tax table; with a business configured but **zero** matching transactions in the
+  window, render the empty-state slot and an `n/a` gauge instead.
+- **Define dispatch behavior below five findings** with `dispatchFindingsPlan`
+  (see §8): **zero** findings skips the dispatch entirely and emits a
+  `No findings this period` summary; **one-to-four** findings dispatch as-is with
+  no padding or placeholder rows.
+
+The golden-snapshot integration test
+([`../../tests/integration/review-engine-snapshot.test.sh`](../../tests/integration/review-engine-snapshot.test.sh))
+exercises this path against an empty/new-budget fixture alongside the populated
+one, asserting explicit empty-state slots, no `NaN`/empty-table output, an `n/a`
+health gauge, the omitted tax sections, and the zero-findings dispatch.
 
 ---
 
@@ -441,6 +496,16 @@ severity emoji (aligned with the M2-5 report badges), the per-finding
 `{emoji} **statement.** action.` structure, the report-pointer line, and the
 sign-off — is frozen in [`../../docs/dispatch-format.md`](../../docs/dispatch-format.md),
 with a worked example for every tier. Render the dispatch to that contract.
+
+**Degenerate finding counts** (issue #33) are the two exceptions to the fixed
+five — decide the mode with `dispatchFindingsPlan(findingCount)` from the guard
+module ([`../../assets/review-guards.js`](../../assets/review-guards.js)):
+**zero** findings (a brand-new/empty budget) skips the five-finding dispatch
+entirely and emits a `No findings this period` summary plus the report pointer
+and sign-off; **one-to-four** findings dispatch exactly as they are — no padding,
+no placeholder rows to reach five. Five or more keeps the frozen top-five
+contract above. The full carve-out is documented in
+[`../../docs/dispatch-format.md`](../../docs/dispatch-format.md).
 
 When the dispatch surfaces **any tax figure, quarterly estimate, or Schedule
 amount**, include the canonical **not-tax-advice tag** on its own line between the

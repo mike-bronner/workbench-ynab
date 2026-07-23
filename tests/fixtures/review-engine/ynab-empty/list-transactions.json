@@ -1,0 +1,6 @@
+{
+  "$comment": "SYNTHETIC YNAB list_transactions response for the EMPTY / new-budget golden-snapshot fixture (issue #33, GAP-4). A brand-new budget has no transactions in the lookback window — the review must render empty-state slots (never NaN, never an empty table) for this input. No real name, institution, account number, or balance appears here.",
+  "data": {
+    "transactions": []
+  }
+}

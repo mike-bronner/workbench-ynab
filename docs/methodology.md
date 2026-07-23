@@ -35,6 +35,16 @@ removed.
 always 1000 regardless of currency; display formatting is owned by the shared
 money helper (`assets/format-money.js`).
 
+**Empty-state & degenerate budgets.** A brand-new, zero-transaction, or
+no-business budget is a normal first-run state, not an error (GAP-4). The skill
+routes every ratio, percentage, and health-score computation through the shared
+guard module (`assets/review-guards.js`), so a zero/absent denominator yields an
+`n/a` sentinel — never a `NaN` or a divide-by-zero — every section renders an
+explicit empty-state slot instead of an empty table, the business-tax sections
+are omitted with a one-line note when no business entity is configured, and a
+zero-finding dispatch is skipped with a "No findings this period" summary. The
+full contract lives in the skill (`skills/review/ynab-review.md` §6).
+
 ## The twelve sections
 
 As implemented in [`skills/review/ynab-review.md`](../skills/review/ynab-review.md)
