@@ -316,11 +316,20 @@ a divide-by-zero percentage, or an empty table.
   `No findings this period` summary; **one-to-four** findings dispatch as-is with
   no padding or placeholder rows.
 
-The golden-snapshot integration test
+The guard math itself — that every degenerate input yields the `n/a` sentinel
+instead of `NaN`/`Infinity` — is proven by the unit tests
+([`../../tests/unit/review-guards.test.mjs`](../../tests/unit/review-guards.test.mjs)),
+which import and exercise `assets/review-guards.js` directly (each guard is called
+with a zero/absent denominator and asserted against the sentinel). The
+golden-snapshot integration test
 ([`../../tests/integration/review-engine-snapshot.test.sh`](../../tests/integration/review-engine-snapshot.test.sh))
-exercises this path against an empty/new-budget fixture alongside the populated
-one, asserting explicit empty-state slots, no `NaN`/empty-table output, an `n/a`
-health gauge, the omitted tax sections, and the zero-findings dispatch.
+covers the complementary **rendering** contract: it assembles an empty/new-budget
+fixture through the real report writer alongside the populated one and asserts the
+explicit empty-state slots, no empty `<table>` (and no `NaN`/`Infinity` text in the
+rendered output), the `n/a` health gauge with no `role="meter"`, the omitted tax
+sections, and the zero-findings dispatch. It renders the empty-state fragments — it
+does not execute the guard module, so the no-`NaN` guarantee for the math lives with
+the unit tests above.
 
 ---
 

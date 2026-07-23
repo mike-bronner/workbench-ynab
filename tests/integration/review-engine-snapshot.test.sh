@@ -292,15 +292,23 @@ test_empty_budget_renders_explicit_empty_state_slots() {
   case "$html" in *"<table"*) fail "empty-budget report emitted a <table> where an empty-state slot was required" ;; esac
 }
 
-# ── AC#3/#4: no NaN / Infinity ever reaches the rendered empty-budget output ────
+# ── AC#3/#4: no NaN / Infinity text reaches the rendered empty-budget output ────
+# This asserts a fixture-and-writer contract, not the guard math: the empty-budget
+# report is assembled from the hand-authored empty-state fragments through the real
+# report writer (pure string substitution — this path never require()s or executes
+# assets/review-guards.js), and its rendered output must carry no literal
+# NaN/Infinity. The guard math itself — that a divide-by-zero yields the n/a
+# sentinel instead of NaN/Infinity — is proven separately, and directly, by the
+# unit tests (tests/unit/review-guards.test.mjs), which import and exercise the
+# module. So a regression in a guard would be caught there, not here.
 test_empty_budget_output_has_no_nan_or_infinity() {
   local out html
   out="$(assemble_empty_report "$SANDBOX/empty-nan")"
   html="$(cat "$out")"
-  # A divide-by-zero that slipped a guard would surface here as NaN/Infinity.
+  # The rendered empty-budget report must carry no NaN/Infinity text.
   case "$html" in
-    *NaN*)      fail "empty-budget report contains NaN — a divide-by-zero guard was missed" ;;
-    *Infinity*) fail "empty-budget report contains Infinity — a divide-by-zero guard was missed" ;;
+    *NaN*)      fail "empty-budget report contains NaN in its rendered output" ;;
+    *Infinity*) fail "empty-budget report contains Infinity in its rendered output" ;;
   esac
   return 0
 }

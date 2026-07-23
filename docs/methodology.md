@@ -43,7 +43,10 @@ guard module (`assets/review-guards.js`), so a zero/absent denominator yields an
 explicit empty-state slot instead of an empty table, the business-tax sections
 are omitted with a one-line note when no business entity is configured, and a
 zero-finding dispatch is skipped with a "No findings this period" summary. The
-full contract lives in the skill (`skills/review/ynab-review.md` §6).
+full contract lives in the skill (`skills/review/ynab-review.md` §6). The guard
+math is proven by the unit tests (`tests/unit/review-guards.test.mjs`, which
+exercise the module directly); the empty-state **rendering** is proven by the
+golden-snapshot integration test.
 
 ## The twelve sections
 
