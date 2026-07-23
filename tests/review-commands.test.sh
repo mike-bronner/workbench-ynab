@@ -112,6 +112,18 @@ check_shared() {
   assert_present "[$label] dispatches the ynab-orchestrator" 'ynab-orchestrator'
   assert_present_re "[$label] dispatch carries today" 'today: <?YYYY-MM-DD'
   assert_present_re "[$label] dispatch carries the timezone" 'timezone:'
+
+  # Timezone is the required source of truth for date math (issue #31): resolved
+  # fail-closed via _cfg_timezone, and `today` derived in that zone via
+  # _today_in_tz — never the host clock.
+  assert_present "[$label] resolves the timezone fail-closed via _cfg_timezone" \
+    '_cfg_timezone'
+  assert_present "[$label] derives today in the configured tz via _today_in_tz" \
+    '_today_in_tz'
+  # NB: the "fall back to the system timezone when unset" absent-guard lives in
+  # the router-only section — that stale phrase only ever existed in the router,
+  # so asserting its absence here would be vacuously true for the four ad-hoc
+  # tier commands (a guard that can never fail guards nothing).
   assert_present_re "[$label] orchestrator dispatched only once" \
     '(exactly|only) once|once per run'
 
@@ -202,6 +214,13 @@ else
 
   # Hard rules.
   assert_present_re "[router] mutation is a bug" 'mutation = bug'
+
+  # Router-only regression guard: the old "fall back to the system timezone when
+  # unset" behaviour was removed here (issue #31). This is a genuine guard only
+  # for the router — the phrase never existed in the ad-hoc tier commands — so it
+  # lives here, not in check_shared (where it would be vacuously true).
+  assert_absent_flat_re "[router] no host-clock timezone fallback" \
+    'fall back to the system timezone when unset'
 
   check_shared "router"
 fi

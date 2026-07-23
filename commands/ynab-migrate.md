@@ -178,15 +178,42 @@ plugin's out-of-repo config so the user doesn't re-enter it.
    CONFIG_FILE="$CONFIG_DIR/config.json"
    mkdir -p "$CONFIG_DIR"
    # Seed on first run via the tested helper: it copies the shipped example with
-   # the placeholder `budgets` array and `default_budget` STRIPPED (so the real
-   # migrated budget can land below — migrate-config fills only blank fields, and
-   # a placeholder budgets array is not blank), writes temp→validate→mv, and
+   # the placeholder `budgets` array, `default_budget`, and the example
+   # `timezone` STRIPPED (so the real migrated values can land below —
+   # migrate-config fills only blank fields, a placeholder budgets array is not
+   # blank, and the example's concrete `America/Phoenix` would otherwise become
+   # this user's silent baked-in zone, issue #31), writes temp→validate→mv, and
    # chmods the file 0600 (it holds budget/business/tax data). No-op when the
    # config already exists.
    bash "${CLAUDE_PLUGIN_ROOT}/bin/ynab-migrate.sh" seed-config "$CONFIG_FILE"
    ```
 
-4. Show the user the exact fields you propose to write (their migrated values) and
+4. **Collect the timezone (issue #31).** The seed strips the example zone, so a
+   migrated config carries none until you land it here — and the review loader
+   (`bin/config.sh` `_cfg_timezone`) **fails closed** on a missing zone, so this
+   step is required for reviews to run. Resolve the machine's zone as the
+   **default to offer**, ask the user to confirm or change it, and **validate the
+   value before it enters the config** — mirroring `commands/setup.md` Step 13.
+   Never write an invalid or empty `.timezone`, and never fall back to
+   "system local":
+
+   ```bash
+   source "${CLAUDE_PLUGIN_ROOT}/bin/config.sh"   # for _is_valid_timezone
+   SYS_TZ="$(readlink /etc/localtime 2>/dev/null | sed -n 's#.*/zoneinfo/##p')"
+   [ -n "$SYS_TZ" ] && _is_valid_timezone "$SYS_TZ" || SYS_TZ="UTC"   # last-resort default
+   # Offer $SYS_TZ as the default; the user may enter a different IANA zone.
+   # Validate $COLLECTED_TZ and re-ask until it is a real IANA zone:
+   _is_valid_timezone "$COLLECTED_TZ" || { echo "❌ '$COLLECTED_TZ' is not a valid IANA timezone (e.g. America/Phoenix, UTC)."; }
+   ```
+
+   Land the confirmed zone through the same blank-only helper as every other
+   field (a config that already carries a real zone is left untouched):
+
+   ```bash
+   bash "${CLAUDE_PLUGIN_ROOT}/bin/ynab-migrate.sh" migrate-config "$CONFIG_FILE" '["timezone"]' "$(jq -n --arg v "$COLLECTED_TZ" '$v')"
+   ```
+
+5. Show the user the exact fields you propose to write (their migrated values) and
    ask for confirmation. On **yes**, write each field through the tested helper —
    it fills a field **only** when the current value is absent, null, empty, or a
    `<PLACEHOLDER>`, and writes via a temp-file→validate→`mv`, so it can **never**

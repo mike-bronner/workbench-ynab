@@ -30,6 +30,8 @@
 #   default_entry="$(_cfg_default_budget)"    # one budgets entry as JSON
 #   persona="$(_cfg '.persona.name')"
 #   persona="${persona:-$DEFAULT_PERSONA}"    # caller applies its own default
+#   timezone="$(_cfg_timezone)" || exit 1     # required IANA tz; fail closed
+#   today="$(_today_in_tz "$timezone")"       # authoritative today in that tz
 #
 # See docs/config-loader.md for the full contract and a worked example per key.
 
@@ -40,6 +42,12 @@
 # YNAB_CONFIG_FILE may be pre-set by the caller (used by the test harness to point
 # at a sandbox fixture); when unset it resolves to the canonical plugin-data path.
 YNAB_CONFIG_FILE="${YNAB_CONFIG_FILE:-$HOME/.claude/plugins/data/workbench-ynab-claude-workbench/config.json}"
+
+# The IANA tz database directory, used by _is_valid_timezone to confirm a zone
+# name resolves to a compiled TZif zone file (not merely any file of that name).
+# Standard on macOS and Linux; honours the conventional $TZDIR override when the
+# OS sets one (also the test seam).
+TZ_DB_DIR="${TZDIR:-/usr/share/zoneinfo}"
 
 # _cfg '<jq-path>'
 #   Echo the value at the given jq path, or nothing when the file is missing, jq
@@ -68,6 +76,107 @@ _require_config() {
     return 1
   fi
   return 0
+}
+
+# _is_valid_timezone TZ
+#   Return 0 iff TZ is a syntactically-safe, real IANA zone; non-zero otherwise.
+#   A pure predicate — it prints nothing, so callers branch on its status.
+#   FAILS CLOSED: an empty value, an absolute path, a ".." traversal, a trailing
+#   slash, any character outside the IANA name set ([A-Za-z0-9_+/-]), a build
+#   artifact that is not a selectable zone, or a name that does not resolve to a
+#   compiled zone file under $TZ_DB_DIR is rejected. Nested zones (e.g.
+#   America/Argentina/Buenos_Aires) are accepted since the file check follows the
+#   real path.
+#
+#   The final gate is NOT a bare `-f` existence check: the zoneinfo tree also
+#   holds housekeeping files (leapseconds, +VERSION, tzdata.zi, *.tab) and TZif
+#   pseudo-zones (Factory, posixrules) that resolve to a UTC-equivalent date, so
+#   a plain existence check would green-light them and leak the exact silent
+#   host-clock-equivalent (issue #31). Instead, the artifact is rejected two
+#   ways: the non-selectable TZif pseudo-zones by name, and everything else by
+#   requiring the file to begin with the "TZif" magic (RFC 8536) — which the
+#   text housekeeping files do not.
+#
+#   Both deny-list checks are CASE-FOLDED and cover the leap-second mirror
+#   subtrees, because the name→file lookup is not a canonical-zone check: a
+#   case-insensitive filesystem (macOS/APFS) resolves `factory`/`FACTORY` to the
+#   real `Factory` TZif file, and hosts that ship the `right/`/`posix/` mirrors
+#   (Debian tzdata-legacy, *BSD, RHEL) expose `right/Factory` etc. — both slip
+#   past an exact-case, basename-only name guard and re-leak the UTC-equivalent
+#   date (issue #31, review round 3). So the mirror subtrees are rejected
+#   wholesale and the pseudo-zone names are matched case-insensitively.
+_is_valid_timezone() {
+  local tz="$1" zonefile lc base_lc
+  [ -n "$tz" ] || return 1
+  case "$tz" in
+    /* | *..* | */) return 1 ;;               # no absolute path, traversal, or trailing slash
+    *[!A-Za-z0-9_/+-]*) return 1 ;;           # only IANA-name characters
+  esac
+  lc="$(printf '%s' "$tz" | tr '[:upper:]' '[:lower:]')"
+  case "$lc" in
+    right/* | posix/*) return 1 ;;            # leap-second / POSIX-TZ mirror duplicates, not canonical zones
+  esac
+  base_lc="${lc##*/}"
+  case "$base_lc" in
+    factory | posixrules) return 1 ;;         # real TZif files, but UTC-mapping build artifacts — never selectable zones (case-folded: a case-insensitive FS resolves `factory` to `Factory`)
+  esac
+  zonefile="$TZ_DB_DIR/$tz"
+  [ -f "$zonefile" ] || return 1              # must resolve to a real file …
+  [ "$(head -c 4 "$zonefile" 2>/dev/null)" = "TZif" ]   # … and it must be a compiled TZif zone, not a housekeeping artifact
+}
+
+# _cfg_timezone
+#   Echo the validated IANA timezone from config, or FAIL CLOSED. This is the
+#   loader's load-time timezone gate (issue #31): a review's date math is
+#   timezone-sensitive, so a missing or bogus zone must stop the run loudly
+#   rather than silently defaulting to the host clock — which would misplace
+#   near-midnight transactions and the wrong tax year.
+#     * missing / empty      → descriptive error to stderr, return 1
+#     * present but invalid   → descriptive error to stderr, return 1
+#     * valid                 → echo it on stdout, return 0
+#   NEVER falls back to the system-local zone. Callers resolve it as a hard
+#   stop: `tz="$(_cfg_timezone)" || exit 1`.
+_cfg_timezone() {
+  local tz
+  tz="$(_cfg '.timezone')"
+  if [ -z "$tz" ]; then
+    echo "workbench-ynab: config.timezone is required but missing/empty in $YNAB_CONFIG_FILE" 1>&2
+    echo "workbench-ynab: set a valid IANA timezone (e.g. America/Phoenix) — run /workbench-ynab:setup." 1>&2
+    return 1
+  fi
+  if ! _is_valid_timezone "$tz"; then
+    echo "workbench-ynab: config.timezone '$tz' is not a valid IANA timezone identifier." 1>&2
+    echo "workbench-ynab: use a zoneinfo name like America/Phoenix or UTC — run /workbench-ynab:setup." 1>&2
+    return 1
+  fi
+  printf '%s\n' "$tz"
+}
+
+# _today_in_tz TZ [EPOCH]
+#   Echo today's ISO-8601 calendar date (YYYY-MM-DD) in IANA zone TZ. This is
+#   the SINGLE source of "today" for every review entry point (the router and
+#   the four ad-hoc tier commands), so a scheduled run and an interactive run
+#   fired at the same instant agree on the review window and the tax-year label
+#   (issue #31). EPOCH (Unix seconds; or the $YNAB_NOW_EPOCH env var) overrides
+#   "now" — the deterministic test seam, mirroring lib/monitor/alerts.mjs's
+#   options.now. TZ is assumed already validated (_cfg_timezone /
+#   _is_valid_timezone); an invalid zone makes `date` fall back to UTC, which
+#   that load-time validation exists to prevent. As a last-resort guard this
+#   helper still refuses an EMPTY zone outright (non-zero, stderr) rather than
+#   letting `date` read the host clock.
+_today_in_tz() {
+  local tz="$1" epoch="${2:-${YNAB_NOW_EPOCH:-}}"
+  # Defense-in-depth: every caller gates via _cfg_timezone/_is_valid_timezone
+  # first, but refuse an empty zone outright so a caller that forgets can never
+  # let `date` silently fall back to the host clock (issue #31).
+  [ -n "$tz" ] || { echo "workbench-ynab: _today_in_tz called with an empty timezone" 1>&2; return 1; }
+  if [ -z "$epoch" ]; then
+    TZ="$tz" date +%Y-%m-%d
+  elif date --version >/dev/null 2>&1; then
+    TZ="$tz" date -d "@$epoch" +%Y-%m-%d       # GNU coreutils (Linux CI)
+  else
+    TZ="$tz" date -r "$epoch" +%Y-%m-%d        # BSD date (macOS)
+  fi
 }
 
 # _migrate_config

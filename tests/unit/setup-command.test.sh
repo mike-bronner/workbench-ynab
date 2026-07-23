@@ -206,4 +206,123 @@ test_step4_token_guard_is_aggregate_and_pre_publish() {
     "Step 4 guard drops the staged .tmp on a hit, before any mv into place"
 }
 
+# --- Step 13 timezone collection: extract-and-RUN (issue #31) -----------------
+# The walk's timezone step embeds two bash snippets — the $SYS_TZ machine-zone
+# resolver and the _is_valid_timezone re-ask gate. Grepping for the phrases is
+# hollow (they also live in prose), so mirror the extract_step1a_block
+# convention: pull each fenced block by a needle unique to it and execute it
+# against the REAL bin/config.sh, so the collection is proven end-to-end —
+# including that the gate rejects a non-zone artifact like Factory.
+
+# Print the first ```bash fenced block whose body contains <needle>. Fences may
+# be indented (these snippets sit under a Markdown bullet), so the anchors allow
+# leading whitespace; bash ignores the retained per-line indent when the block
+# is executed.
+extract_fenced_block_containing() {
+  local needle="$1"
+  awk -v needle="$needle" '
+    /^[[:space:]]*```bash[[:space:]]*$/ { inb=1; buf=""; next }
+    inb && /^[[:space:]]*```[[:space:]]*$/ { inb=0; if (index(buf, needle)) printf "%s", buf; next }
+    inb { buf = buf $0 "\n" }
+  ' "$CMD"
+}
+
+# run_sys_tz <readlink-output> — execute the $SYS_TZ resolver with `readlink`
+# stubbed to emit <readlink-output>, CLAUDE_PLUGIN_ROOT pointing at the repo so
+# the block sources the real loader. Captures the resolved SYS_TZ in SYSTZ_OUT.
+run_sys_tz() {
+  local rl="$1" block sb
+  # The needle is literal command source text — never expanded here.
+  # shellcheck disable=SC2016
+  block="$(extract_fenced_block_containing 'readlink /etc/localtime')"
+  [ -n "$block" ] || { fail "could not extract the Step 13 SYS_TZ block"; return; }
+  sb="$(mktemp -d)"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" %q\n' "$rl" > "$sb/readlink"
+  chmod +x "$sb/readlink"
+  # The trailing printf is literal source written INTO run.sh — $SYS_TZ must
+  # expand there (after the block sets it), not here.
+  # shellcheck disable=SC2016
+  { printf '%s\n' "$block"; printf 'printf "%%s\\n" "$SYS_TZ"\n'; } > "$sb/run.sh"
+  SYSTZ_OUT="$(CLAUDE_PLUGIN_ROOT="$REPO_ROOT" PATH="$sb:$PATH" bash "$sb/run.sh" 2>/dev/null)"
+  rm -rf "$sb"
+}
+
+# run_tz_validate <COLLECTED_TZ> — execute the re-ask validation snippet against
+# the real loader with COLLECTED_TZ set. Captures its output (the ❌ line, if
+# any) in TZV_OUT.
+run_tz_validate() {
+  local tz="$1" block sb
+  # The needle is literal command source text — never expanded here.
+  # shellcheck disable=SC2016
+  block="$(extract_fenced_block_containing '_is_valid_timezone "$COLLECTED_TZ"')"
+  [ -n "$block" ] || { fail "could not extract the Step 13 validation block"; return; }
+  sb="$(mktemp -d)"
+  {
+    printf 'source "%s/bin/config.sh"\n' "$REPO_ROOT"
+    printf 'COLLECTED_TZ=%q\n' "$tz"
+    printf '%s\n' "$block"
+  } > "$sb/run.sh"
+  TZV_OUT="$(bash "$sb/run.sh" 2>&1)"
+  rm -rf "$sb"
+}
+
+# The extraction finds the right blocks (needles scoped to the BLOCK body).
+test_step13_blocks_extract() {
+  # shellcheck disable=SC2016
+  assert_contains "$(extract_fenced_block_containing 'readlink /etc/localtime')" \
+    'SYS_TZ=' "the SYS_TZ resolver block extracts"
+  # shellcheck disable=SC2016
+  assert_contains "$(extract_fenced_block_containing '_is_valid_timezone "$COLLECTED_TZ"')" \
+    "not a valid IANA timezone" "the validation re-ask block extracts"
+}
+
+# SYS_TZ resolves the machine's zone from /etc/localtime when it is a real zone.
+test_step13_sys_tz_resolves_machine_zone() {
+  run_sys_tz "/var/db/timezone/zoneinfo/America/New_York"
+  assert_eq "America/New_York" "$SYSTZ_OUT" \
+    "SYS_TZ resolves the machine's zone from the /etc/localtime link"
+}
+
+# SYS_TZ falls back to UTC (never empty, never "system local") when the link
+# resolves to nothing.
+test_step13_sys_tz_falls_back_to_utc() {
+  run_sys_tz ""
+  assert_eq "UTC" "$SYSTZ_OUT" \
+    "SYS_TZ falls back to UTC when /etc/localtime yields no zone"
+}
+
+# A machine link pointing at the Factory pseudo-zone must NOT become the default:
+# the shared _is_valid_timezone gate (issue #31 fix) rejects it, so SYS_TZ falls
+# back to UTC — the setup path inherits the fix.
+test_step13_sys_tz_rejects_nonzone_default() {
+  run_sys_tz "/usr/share/zoneinfo/Factory"
+  assert_eq "UTC" "$SYSTZ_OUT" \
+    "a link to the Factory pseudo-zone falls back to UTC, never Factory"
+}
+
+# The re-ask gate rejects a non-zone artifact (Factory) — proving an invalid
+# value is surfaced and never silently written.
+test_step13_validation_rejects_nonzone_factory() {
+  run_tz_validate "Factory"
+  assert_contains "$TZV_OUT" "not a valid IANA timezone" \
+    "the re-ask gate rejects the Factory pseudo-zone"
+}
+
+# A real IANA zone passes the re-ask gate silently (no ❌ emitted).
+test_step13_validation_accepts_real_zone() {
+  run_tz_validate "America/Phoenix"
+  assert_eq "" "$TZV_OUT" "a real IANA zone passes the re-ask gate silently"
+}
+
+# The human-facing invariants: the walk table row and the never-write-invalid
+# rule (deleting them regresses this).
+test_step13_documents_required_timezone_invariant() {
+  local body; body="$(cat "$CMD")"
+  assert_contains "$body" "Timezone (IANA)" "the walk table carries the timezone row"
+  # The rule wraps across a line break in the prose ("never write an invalid or\n
+  # empty `.timezone`"), so match the leading, single-line fragment.
+  assert_contains "$body" "never write an invalid or" \
+    "the walk forbids writing an invalid/empty .timezone"
+}
+
 run_tests

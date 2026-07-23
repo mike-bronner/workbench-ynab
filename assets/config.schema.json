@@ -4,7 +4,7 @@
   "title": "workbench-ynab config.json",
   "description": "User configuration for the workbench-ynab plugin. Lives OUTSIDE the repo at $HOME/.claude/plugins/data/workbench-ynab-claude-workbench/config.json so it survives plugin updates. Read by plugin SKILLS and commands via bin/config.sh — never by the vendored MCP launcher. All tax logic is data-driven: any user's situation is one config instance, never a schema constant.",
   "type": "object",
-  "required": ["schema_version", "budgets", "tax_profile", "persona", "report"],
+  "required": ["schema_version", "timezone", "budgets", "tax_profile", "persona", "report"],
   "additionalProperties": false,
   "properties": {
     "schema_version": {
@@ -65,6 +65,11 @@
     "default_budget": {
       "type": "string",
       "description": "Optional. The `label` of the budgets entry to use when a caller needs a single budget and does not specify one — the fallback for single-budget users. When absent, the first budgets entry is the default (bin/config.sh `_cfg_default_budget`)."
+    },
+    "timezone": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9+_-]+(/[A-Za-z0-9+_-]+)*$",
+      "description": "REQUIRED. The single source of truth for ALL date math (issue #31): the review's 7-day lookback window, carryover boundary, month start/end, quarterly windows, and tax-year resolution all compute against this timezone, never the host clock. An IANA tz identifier — e.g. `America/Phoenix` — mirroring bujo's convention. `/workbench-ynab:setup` resolves your system's zone at setup time and writes it here as an explicit identifier; it is NEVER stored as \"system local\", so scheduled and interactive runs are deterministic. The loader (`bin/config.sh` `_cfg_timezone`) validates it against the tz database at load time and FAILS CLOSED — a descriptive error, never a silent fall-through to the host clock — on a missing or invalid value. This `pattern` is a shape check only; the loader's zoneinfo lookup is the authoritative validity gate — it requires the name to resolve to a compiled TZif zone file (not merely any file of that name), so zoneinfo housekeeping artifacts (leapseconds, +VERSION, tzdata.zi) and the UTC-equivalent pseudo-zones (Factory, posixrules) are rejected."
     },
     "business": {
       "type": "object",

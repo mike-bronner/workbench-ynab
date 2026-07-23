@@ -167,6 +167,7 @@ absent). Collect, in order:
 | 10 | Schedules that apply | `.tax_profile.schedules` | `C, A, SE, 1` |
 | 11 | Persona name | `.persona.name` | `$PERSONA_DEFAULT` (the default voice) |
 | 12 | Report output directory | `.report.output_dir` | `~/Documents/Claude/Reports` |
+| 13 | Timezone (IANA) | `.timezone` | `$SYS_TZ` — the machine's resolved zone (never "system local") |
 
 Notes for the walk:
 
@@ -192,6 +193,28 @@ Notes for the walk:
   the name — never write a violating `persona.name` into `config.json`. An
   empty answer is fine (the loader falls back silently), and `--` guards
   against a name that itself looks like a flag.
+- **`timezone` is REQUIRED and validated (issue #31).** It is the single source
+  of truth for every date-sensitive review computation (window, carryover,
+  month/quarter boundaries, tax year), so the loader (`_cfg_timezone`) **fails
+  closed** on a missing or invalid value — a fresh config MUST carry it. Resolve
+  the machine's zone to **offer as the default**, and write the resolved
+  identifier (never the literal `system local`):
+
+  ```bash
+  source "${CLAUDE_PLUGIN_ROOT}/bin/config.sh"   # for _is_valid_timezone
+  SYS_TZ="$(readlink /etc/localtime 2>/dev/null | sed -n 's#.*/zoneinfo/##p')"
+  [ -n "$SYS_TZ" ] && _is_valid_timezone "$SYS_TZ" || SYS_TZ="UTC"   # last-resort default
+  ```
+
+  Pre-fill the `.timezone` prompt with `$SYS_TZ` (or the existing config value on
+  a re-run), and **validate the collected value before it enters the config**:
+
+  ```bash
+  _is_valid_timezone "$COLLECTED_TZ" || { echo "❌ '$COLLECTED_TZ' is not a valid IANA timezone (e.g. America/Phoenix, UTC)."; }
+  ```
+
+  On a non-zero result, surface the error and re-ask — never write an invalid or
+  empty `.timezone`. A valid IANA identifier is the only acceptable value.
 - Use `schema_version: 1`.
 
 When every field is gathered, **assemble the full JSON, show it to the user**,
@@ -207,8 +230,8 @@ overwrite:
 ```bash
 mkdir -p "$CONFIG_DIR"
 
-# $NEW_JSON is the object Step 3 assembled (schema_version + budget + optional
-# business + tax_profile + persona + report). Merge it over the existing file so
+# $NEW_JSON is the object Step 3 assembled (schema_version + timezone + budget +
+# optional business + tax_profile + persona + report). Merge it over the existing file so
 # unknown/hand-added keys survive. `*` deep-merges objects; the new values win.
 #
 # Every gate below fails CLOSED (issue #154): any failure removes the staged
