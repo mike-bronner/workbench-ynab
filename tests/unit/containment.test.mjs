@@ -34,6 +34,12 @@ import {
 import { emptyTracker, loadTracker, saveTracker } from '../../lib/tax/estimatedTax.mjs';
 import { loadThresholds, DEFAULT_THRESHOLDS } from '../../lib/tax/confidence.mjs';
 import { readState, writeState, defaultState } from '../../lib/monitor/state.mjs';
+import {
+  loadAlertsConfig,
+  appendAlertLog,
+  dispatchAlerts,
+  sanitizeAlertsConfig,
+} from '../../lib/monitor/alerts.mjs';
 
 const ROOT_DIR = mkdtempSync(join(tmpdir(), 'ynab-containment-root-'));
 const OUTSIDE = mkdtempSync(join(tmpdir(), 'ynab-containment-outside-'));
@@ -43,6 +49,7 @@ mkdirSync(join(OUTSIDE, 'dir'));
 writeFileSync(join(OUTSIDE, 'tracker.json'), JSON.stringify({ schemaVersion: 1, years: {} }));
 writeFileSync(join(OUTSIDE, 'config.json'), JSON.stringify({ classification: { highThreshold: 0.9, mediumThreshold: 0.4 } }));
 writeFileSync(join(OUTSIDE, 'state.json'), JSON.stringify(defaultState()));
+writeFileSync(join(OUTSIDE, 'alert-victim.jsonl'), 'untouched\n');
 
 // A traversal path from ROOT_DIR to OUTSIDE/<file>, with the `..` surviving.
 const traverse = (file) => `${ROOT_DIR}/../${basename(OUTSIDE)}/${file}`;
@@ -266,6 +273,73 @@ test('(#206) an explicit dataDir names the state root — a contained round-trip
   const written = writeState(defaultState(), { dataDir: ROOT_DIR });
   assert.ok(isWithin(canonicalize(ROOT_DIR), canonicalize(written)));
   assert.equal(readState({ dataDir: ROOT_DIR }).existed, true);
+});
+
+// --- (#244) monitor/alerts.mjs — config read + alert-log write seams ----------
+
+test('(#244) loadAlertsConfig refuses a `..`-traversal configFile escaping the dataDir root, unread', () => {
+  // Without the guard this would READ OUTSIDE/config.json (no `alerts` block) and
+  // silently return the defaults — so the THROW is the discriminator.
+  assert.throws(() => loadAlertsConfig({ dataDir: ROOT_DIR, configFile: traverse('config.json') }), containmentThrow());
+});
+
+test('(#244) loadAlertsConfig refuses a symlink escape via the YNAB_CONFIG_FILE env seam', () => {
+  const link = plantLink('sneaky-alerts-config.json', 'config.json');
+  assert.throws(() => loadAlertsConfig({}, { YNAB_CONFIG_FILE: link, YNAB_DATA_DIR: ROOT_DIR }), containmentThrow());
+});
+
+test('(#244) an explicit dataDir names the config root — a contained alerts config still loads (test seam)', () => {
+  const configPath = join(ROOT_DIR, 'alerts-config.json');
+  writeFileSync(configPath, JSON.stringify({ alerts: { large_transaction_amount: 999 } }));
+  // Proves the guard PERMITS a contained read AND the read actually happened
+  // (999 × 1000 milliunits, not the 500-dollar default).
+  assert.equal(loadAlertsConfig({ dataDir: ROOT_DIR, configFile: configPath }).largeTransactionMilliunits, 999000);
+});
+
+test('(#244) an absent-but-contained config degrades to the alerts defaults — the zero-config guarantee is intact', () => {
+  assert.deepEqual(
+    loadAlertsConfig({ dataDir: ROOT_DIR, configFile: join(ROOT_DIR, 'no-such-config.json') }),
+    sanitizeAlertsConfig(undefined),
+  );
+});
+
+test('(#244) appendAlertLog refuses an escaping `..`-traversal logPath — nothing created (no dir, no file)', () => {
+  // Target a not-yet-existing OUTSIDE subdir so the "no dir" claim is provable:
+  // the guard must fire BEFORE mkdirSync would create it.
+  assert.throws(
+    () => appendAlertLog({ x: 1 }, { dataDir: ROOT_DIR, logPath: traverse('alertdir/alert-log.jsonl') }),
+    containmentThrow('write'),
+  );
+  assert.equal(existsSync(join(OUTSIDE, 'alertdir')), false, 'escaping alert-log dir was created');
+  assert.equal(existsSync(join(OUTSIDE, 'alertdir', 'alert-log.jsonl')), false, 'escaping alert-log file was created');
+});
+
+test('(#244) appendAlertLog refuses a symlink escape via the YNAB_ALERT_LOG_FILE env seam — the outside file is not appended to', () => {
+  const link = plantLink('sneaky-alert-log.jsonl', 'alert-victim.jsonl');
+  const before = readFileSync(join(OUTSIDE, 'alert-victim.jsonl'), 'utf8');
+  assert.throws(
+    () => appendAlertLog({ x: 1 }, { env: { YNAB_ALERT_LOG_FILE: link, YNAB_DATA_DIR: ROOT_DIR } }),
+    containmentThrow('write'),
+  );
+  assert.equal(readFileSync(join(OUTSIDE, 'alert-victim.jsonl'), 'utf8'), before, 'outside alert log was appended to');
+});
+
+test('(#244) an explicit dataDir names the alert-log root — a contained append round-trips (test seam)', () => {
+  const written = appendAlertLog({ hello: 'world' }, { dataDir: ROOT_DIR });
+  assert.ok(isWithin(canonicalize(ROOT_DIR), canonicalize(written)));
+  assert.equal(JSON.parse(readFileSync(written, 'utf8').trim()).hello, 'world');
+});
+
+test('(#244) dispatchAlerts does NOT throw when the config path escapes the data root — degrades to the no-dispatch shape', () => {
+  // A valid finding would otherwise dispatch — so a return of the no-dispatch
+  // shape (rather than a throw, and rather than the empty-list short-circuit)
+  // proves loadAlertsConfig's containment throw is caught and degraded.
+  const finding = { severity: 'action', title: 'Large transaction', suggested_action: 'Review it', detail: 'x', dedupe_key: 'k' };
+  let result;
+  assert.doesNotThrow(() => {
+    result = dispatchAlerts([finding], { dataDir: ROOT_DIR, configFile: traverse('config.json') });
+  });
+  assert.deepEqual(result, { dispatched: false, rendered: '', logPath: null, notified: false });
 });
 
 // --- cleanup ------------------------------------------------------------------
