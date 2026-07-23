@@ -170,8 +170,18 @@ skipped as already-applied **before** any prompt:
    12 op(s) remain to review.
 ```
 
-If **every** op is already applied, report "Everything in this proposal is already
-applied — nothing to do." and exit. Otherwise continue with the to-apply set only.
+If **every** op is already applied, **release the lock and exit** with the message below
+— Step 1b short-circuits *before* Step 2's batch loop, so this exit never reaches the
+end-of-run release and must release inline here (matching the no-proposal and
+invalid-proposal exits above):
+
+```bash
+echo "✅ Everything in this proposal is already applied — nothing to do."
+bash "${CLAUDE_PLUGIN_ROOT}/bin/apply-lock.sh" release   # release the GAP-9 lock — everything already applied
+exit 0
+```
+
+Otherwise continue with the to-apply set only.
 
 ## Step 2 — Group the operations into typed batches
 
@@ -390,7 +400,14 @@ names the failed op and its `error_class`, and states the exact remediation
 (`re-issue token via /workbench-ynab:setup` for `auth_revoked`; `token requires write
 scope` for `insufficient_scope`), distinguishing **"no changes applied"** from
 **"N of M applied, batch stopped at op K"**. **Never** auto-retry a failed batch —
-re-running after the fix resumes safely via the idempotency guard (Step 1b).
+re-running after the fix resumes safely via the idempotency guard (Step 1b). This abort
+ends the run mid-Step-5, short-circuiting the end-of-run release below, so **release the
+lock before stopping** (matching the no-proposal and invalid-proposal exits above):
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/bin/apply-lock.sh" release   # release the GAP-9 lock on auth abort
+exit 1
+```
 
 ## Loop or finish
 

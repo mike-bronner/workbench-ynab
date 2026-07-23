@@ -86,6 +86,30 @@ test_acquires_single_flight_lock() {
   fi
 }
 
+# Step 0 promises the release is paired with ALL FOUR named early-exit paths
+# (no proposal, invalid proposal, everything already applied, auth failure). The
+# release must be shown INLINE at each — not merely present once in the file —
+# because this runbook is executed by a probabilistic agent: showing it at some
+# exits and relying on recall of the general rule for the rest is fragile at
+# exactly the moment it matters. The stakes are a session-scoped deadlock: the
+# lock's recorded owner is $PPID (the long-lived host process), so a missed
+# release at a post-acquire exit leaves a lock whose PID stays alive — kill -0
+# stale-recovery never fires and the next /ynab-apply is blocked. This guards
+# issue #51's review finding; test_acquires_single_flight_lock's lone
+# "release appears somewhere" substring check passes even if three exits drop it.
+# Each pattern pins the release COMMAND and its exit-naming comment on ONE line,
+# so deleting any single exit's release fails the matching assertion here.
+test_release_paired_with_every_named_exit() {
+  grep -qE 'apply-lock\.sh" release.*on exit' "$CMD" \
+    || fail "no-proposal exit does not pair the lock release inline"
+  grep -qE 'apply-lock\.sh" release.*on abort' "$CMD" \
+    || fail "invalid-proposal exit does not pair the lock release inline"
+  grep -qE 'apply-lock\.sh" release.*already applied' "$CMD" \
+    || fail "everything-already-applied exit does not pair the lock release inline"
+  grep -qE 'apply-lock\.sh" release.*auth abort' "$CMD" \
+    || fail "auth-failure exit does not pair the lock release inline"
+}
+
 # Step 1b — idempotency guard cross-references the M4-3 audit log.
 test_idempotency_via_audit_log() {
   local body; body="$(cat "$CMD")"
