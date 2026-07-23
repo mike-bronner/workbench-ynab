@@ -68,6 +68,13 @@ test_is_valid_timezone_accepts_real_zones() {
 test_is_valid_timezone_rejects_bad_input() {
   # Each of these must be rejected — the discriminating cases behind "fail
   # closed". Removing any one guard in _is_valid_timezone regresses a line here.
+  # Factory/posixrules/leapseconds/+VERSION are the zoneinfo housekeeping
+  # artifacts that a bare `-f` existence check green-lit (issue #31): Factory
+  # and posixrules are real TZif files (rejected by name — they map to UTC and
+  # are not selectable zones), leapseconds and +VERSION are text files (rejected
+  # by the TZif-magic gate). All four resolve to a silent host-clock-equivalent
+  # date if accepted, so they must fail closed on ANY host — whether the file is
+  # present (magic/name reject) or absent (`-f` reject).
   local tz
   for tz in \
     "" \
@@ -78,7 +85,11 @@ test_is_valid_timezone_rejects_bad_input() {
     "America/Phoenix/" \
     "America Phoenix" \
     "America/Phoenix;rm" \
-    "America/Phoenix\$TZ"
+    "America/Phoenix\$TZ" \
+    "Factory" \
+    "posixrules" \
+    "leapseconds" \
+    "+VERSION"
   do
     if _is_valid_timezone "$tz"; then
       fail "expected reject but accepted: [$tz]"
@@ -86,14 +97,40 @@ test_is_valid_timezone_rejects_bad_input() {
   done
 }
 
+# Deterministic, host-independent proof that the final gate is a TZif check and
+# not a bare `-f` existence check (issue #31, review round 2). Points TZ_DB_DIR
+# at a sandbox holding: a genuine TZif zone (accepted), a text housekeeping file
+# whose name would sail through the char-class guard (rejected by the magic
+# check — the case `-f` alone can't catch), and a real TZif file named `Factory`
+# (rejected by name even though its magic is valid). Dropping the TZif-magic
+# gate makes the housekeeping case pass; dropping the Factory name-guard makes
+# the pseudo-zone case pass — each regresses a line here.
+test_is_valid_timezone_rejects_non_tzif_artifacts() {
+  local zi="$SANDBOX/zi2"
+  mkdir -p "$zi"
+  printf 'TZif2\0\0\0' > "$zi/Real_Zone"        # a genuine compiled-zone signature
+  printf '# not a zone, just leap-second text\n' > "$zi/Housekeeping"
+  printf 'TZif2\0\0\0' > "$zi/Factory"          # real TZif magic, but a build artifact
+  # shellcheck disable=SC2034
+  TZ_DB_DIR="$zi"
+  _is_valid_timezone "Real_Zone" || fail "a TZif zone file must be accepted"
+  if _is_valid_timezone "Housekeeping"; then
+    fail "a non-TZif housekeeping file was accepted (the -f-only leak)"
+  fi
+  if _is_valid_timezone "Factory"; then
+    fail "the Factory pseudo-zone was accepted despite valid TZif magic"
+  fi
+}
+
 # Path-traversal to a file that ACTUALLY EXISTS outside the tz database must
-# still be rejected — the discriminating case that -f alone can't catch (the
-# target exists), so it isolates the traversal/char-class guard. Points TZ_DB_DIR
-# at a sandbox zoneinfo whose parent holds a real "secret" file.
+# still be rejected — proving the rejection comes from the traversal/char-class
+# guard (which fires on the `.` before the file lookup ever runs), not merely
+# from a nonexistent target. Points TZ_DB_DIR at a sandbox zoneinfo whose parent
+# holds a real "secret" file.
 test_is_valid_timezone_blocks_traversal_to_real_file() {
   local zi="$SANDBOX/zi"
   mkdir -p "$zi"
-  : > "$zi/Local_Zone"            # a real zone file inside the db
+  printf 'TZif2\0\0\0' > "$zi/Local_Zone"   # a real (TZif-magic) zone file inside the db
   : > "$SANDBOX/secret"           # a real file one level OUTSIDE the db
   # Consumed by the sourced _is_valid_timezone (cross-file), so shellcheck can't
   # see the read; each test runs in its own subshell so this never leaks.
@@ -134,6 +171,11 @@ test_cfg_timezone_invalid_fails_closed() {
   assert_eq "1" "$rc" "_cfg_timezone exits non-zero on an invalid zone"
   assert_contains "$err" "not a valid IANA" "error names the invalid-zone reason"
   assert_contains "$err" "Mars/Phobos" "error echoes the offending value"
+  # Fail CLOSED: as with the missing-zone sibling, isolate stdout so a stray
+  # host-clock fallback on the invalid path would be caught here too.
+  local out
+  out="$(YNAB_CONFIG_FILE="$FIX_INVALID" _cfg_timezone 2>/dev/null)" || true
+  assert_eq "" "$out" "_cfg_timezone emits no host-clock fallback on stdout for an invalid zone"
 }
 
 # ── _today_in_tz — three boundary scenarios (AC #7) + determinism (AC #6) ──────
@@ -174,6 +216,22 @@ test_today_scheduled_equals_interactive() {
   interactive="$(YNAB_NOW_EPOCH="$E3" _today_in_tz America/Phoenix)"
   assert_eq "$scheduled" "$interactive" "same instant + zone yields the same today via arg or env seam"
   assert_eq "2026-12-31" "$interactive" "and it is the configured-zone date, not the host-clock date"
+}
+
+# The no-override production branch — `TZ="$tz" date +%Y-%m-%d`, the one every
+# command actually calls — is otherwise never exercised: every assertion above
+# injects an epoch, so dropping `TZ=` (or deleting the branch) would leave the
+# suite green. Clear the epoch seam entirely and pin `_today_in_tz UTC` against
+# an independent `date -u`, bracketing the read so a midnight tick between the
+# two calls cannot flake it.
+test_today_no_epoch_uses_live_clock_in_tz() {
+  local before got after
+  before="$(date -u +%Y-%m-%d)"
+  got="$(YNAB_NOW_EPOCH='' _today_in_tz UTC)"   # empty seam → the live-clock branch
+  after="$(date -u +%Y-%m-%d)"
+  if [ "$got" != "$before" ] && [ "$got" != "$after" ]; then
+    fail "_today_in_tz UTC live-clock branch gave '$got', expected '$before' or '$after'"
+  fi
 }
 
 run_tests

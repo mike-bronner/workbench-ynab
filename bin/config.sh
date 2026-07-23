@@ -44,8 +44,9 @@
 YNAB_CONFIG_FILE="${YNAB_CONFIG_FILE:-$HOME/.claude/plugins/data/workbench-ynab-claude-workbench/config.json}"
 
 # The IANA tz database directory, used by _is_valid_timezone to confirm a zone
-# name resolves to a real zoneinfo file. Standard on macOS and Linux; honours
-# the conventional $TZDIR override when the OS sets one (also the test seam).
+# name resolves to a compiled TZif zone file (not merely any file of that name).
+# Standard on macOS and Linux; honours the conventional $TZDIR override when the
+# OS sets one (also the test seam).
 TZ_DB_DIR="${TZDIR:-/usr/share/zoneinfo}"
 
 # _cfg '<jq-path>'
@@ -78,21 +79,34 @@ _require_config() {
 }
 
 # _is_valid_timezone TZ
-#   Return 0 iff TZ is a syntactically-safe, existing IANA zone name; non-zero
-#   otherwise. A pure predicate — it prints nothing, so callers branch on its
-#   status. FAILS CLOSED: an empty value, an absolute path, a ".." traversal, a
-#   trailing slash, any character outside the IANA name set ([A-Za-z0-9_+/-]),
-#   or a name with no matching file under $TZ_DB_DIR is rejected. The zoneinfo
-#   file check accepts nested zones (e.g. America/Argentina/Buenos_Aires) since
-#   `-f` follows the real file path.
+#   Return 0 iff TZ is a syntactically-safe, real IANA zone; non-zero otherwise.
+#   A pure predicate — it prints nothing, so callers branch on its status.
+#   FAILS CLOSED: an empty value, an absolute path, a ".." traversal, a trailing
+#   slash, any character outside the IANA name set ([A-Za-z0-9_+/-]), a build
+#   artifact that is not a selectable zone, or a name that does not resolve to a
+#   compiled zone file under $TZ_DB_DIR is rejected. Nested zones (e.g.
+#   America/Argentina/Buenos_Aires) are accepted since the file check follows the
+#   real path.
+#
+#   The final gate is NOT a bare `-f` existence check: the zoneinfo tree also
+#   holds housekeeping files (leapseconds, +VERSION, tzdata.zi, *.tab) and TZif
+#   pseudo-zones (Factory, posixrules) that resolve to a UTC-equivalent date, so
+#   a plain existence check would green-light them and leak the exact silent
+#   host-clock-equivalent (issue #31). Instead, the artifact is rejected two
+#   ways: the non-selectable TZif pseudo-zones by name, and everything else by
+#   requiring the file to begin with the "TZif" magic (RFC 8536) — which the
+#   text housekeeping files do not.
 _is_valid_timezone() {
-  local tz="$1"
+  local tz="$1" zonefile
   [ -n "$tz" ] || return 1
   case "$tz" in
     /* | *..* | */) return 1 ;;               # no absolute path, traversal, or trailing slash
     *[!A-Za-z0-9_/+-]*) return 1 ;;           # only IANA-name characters
+    Factory | posixrules) return 1 ;;         # real TZif files, but build artifacts that map to UTC — never selectable zones
   esac
-  [ -f "$TZ_DB_DIR/$tz" ]                      # must resolve to a real zoneinfo file
+  zonefile="$TZ_DB_DIR/$tz"
+  [ -f "$zonefile" ] || return 1              # must resolve to a real file …
+  [ "$(head -c 4 "$zonefile" 2>/dev/null)" = "TZif" ]   # … and it must be a compiled TZif zone, not a housekeeping artifact
 }
 
 # _cfg_timezone
@@ -131,9 +145,15 @@ _cfg_timezone() {
 #   "now" — the deterministic test seam, mirroring lib/monitor/alerts.mjs's
 #   options.now. TZ is assumed already validated (_cfg_timezone /
 #   _is_valid_timezone); an invalid zone makes `date` fall back to UTC, which
-#   that load-time validation exists to prevent.
+#   that load-time validation exists to prevent. As a last-resort guard this
+#   helper still refuses an EMPTY zone outright (non-zero, stderr) rather than
+#   letting `date` read the host clock.
 _today_in_tz() {
   local tz="$1" epoch="${2:-${YNAB_NOW_EPOCH:-}}"
+  # Defense-in-depth: every caller gates via _cfg_timezone/_is_valid_timezone
+  # first, but refuse an empty zone outright so a caller that forgets can never
+  # let `date` silently fall back to the host clock (issue #31).
+  [ -n "$tz" ] || { echo "workbench-ynab: _today_in_tz called with an empty timezone" 1>&2; return 1; }
   if [ -z "$epoch" ]; then
     TZ="$tz" date +%Y-%m-%d
   elif date --version >/dev/null 2>&1; then

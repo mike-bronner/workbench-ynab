@@ -89,7 +89,11 @@ descriptive message to stderr and returns non-zero — and the review stops. It
 near-midnight transactions in the lookback window and map a date to the wrong tax
 year, so the plugin refuses to guess. The JSON Schema also carries a `pattern`,
 but that is a shape check only; the loader's zoneinfo lookup is the authoritative
-validity gate.
+validity gate — and it verifies the name resolves to a compiled `TZif` zone
+file, not merely that some file of that name exists, so zoneinfo housekeeping
+artifacts (`leapseconds`, `+VERSION`, `tzdata.zi`) and the UTC-equivalent
+pseudo-zones (`Factory`, `posixrules`) are rejected rather than silently
+accepted.
 
 The illustrative value `America/Phoenix` appears **only** as an instance value in
 [`assets/config.example.json`](../assets/config.example.json) — never as a baked-in

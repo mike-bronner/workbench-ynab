@@ -47,7 +47,8 @@ computed from the configured `timezone` (`config.timezone`, issue #31). **Never
 call the host clock** (`new Date()`, `date`, `now`, the shell's `TZ`) to derive
 or widen a date: a review run in the wrong zone misplaces near-midnight
 transactions and the wrong tax year. When a downstream tax read needs an "as of"
-date, pass the plan's date — never a host-clock default.
+date, pass the review window's end date (`plan.data_pull.until_date`) — never a
+host-clock default.
 
 From the plan you consume:
 
@@ -56,6 +57,7 @@ From the plan you consume:
 | `plan.review_scope` / `plan.report.tiers` | The tier(s) to run — selects the row of the [tier matrix](#7-tier-matrix). |
 | `plan.budget.{name,id}` | The budget to read. |
 | `plan.data_pull.accounts` | Account ids to fetch (ids, not bodies). |
+| `plan.data_pull.until_date` | The authoritative "as of" date (window end, in the configured tz) for any downstream tax read — never the host clock. |
 | `plan.data_pull.months` | Month keys in scope. |
 | `plan.data_pull.transactions.{since_date,until_date}` | The lookback window — already sized by the orchestrator. |
 | `plan.report.period` | Human period label for the report header. |

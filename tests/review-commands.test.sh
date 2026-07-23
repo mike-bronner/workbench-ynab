@@ -120,8 +120,10 @@ check_shared() {
     '_cfg_timezone'
   assert_present "[$label] derives today in the configured tz via _today_in_tz" \
     '_today_in_tz'
-  assert_absent_flat_re "[$label] no host-clock timezone fallback" \
-    'fall back to the system timezone when unset'
+  # NB: the "fall back to the system timezone when unset" absent-guard lives in
+  # the router-only section — that stale phrase only ever existed in the router,
+  # so asserting its absence here would be vacuously true for the four ad-hoc
+  # tier commands (a guard that can never fail guards nothing).
   assert_present_re "[$label] orchestrator dispatched only once" \
     '(exactly|only) once|once per run'
 
@@ -212,6 +214,13 @@ else
 
   # Hard rules.
   assert_present_re "[router] mutation is a bug" 'mutation = bug'
+
+  # Router-only regression guard: the old "fall back to the system timezone when
+  # unset" behaviour was removed here (issue #31). This is a genuine guard only
+  # for the router — the phrase never existed in the ad-hoc tier commands — so it
+  # lives here, not in check_shared (where it would be vacuously true).
+  assert_absent_flat_re "[router] no host-clock timezone fallback" \
+    'fall back to the system timezone when unset'
 
   check_shared "router"
 fi
