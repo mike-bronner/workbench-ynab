@@ -60,6 +60,10 @@ upgrade an older file. Current version: **`2`** (the multi-budget shape, issue
 #84 — version 1 had a singular `budget` object; see the
 [migration note](#migrating-a-v1-config-singular-budget) below).
 
+```json
+"schema_version": 2
+```
+
 ---
 
 ### `timezone` *(string, required)*
@@ -93,14 +97,17 @@ validity gate — and it verifies the name resolves to a compiled `TZif` zone
 file, not merely that some file of that name exists, so zoneinfo housekeeping
 artifacts (`leapseconds`, `+VERSION`, `tzdata.zi`) and the UTC-equivalent
 pseudo-zones (`Factory`, `posixrules`) are rejected rather than silently
-accepted.
+accepted. The pseudo-zone rejection is **case-insensitive** and covers the
+`right/` and `posix/` leap-second mirror subtrees — so `factory`, `FACTORY`, and
+`right/Factory` (all of which resolve to the UTC-equivalent `Factory` zone on a
+case-insensitive filesystem or a mirror-shipping host) fail closed too.
 
 The illustrative value `America/Phoenix` appears **only** as an instance value in
 [`assets/config.example.json`](../assets/config.example.json) — never as a baked-in
 default in the loader or schema (per the generic-not-hardcoded rule above).
 
 ```json
-"schema_version": 2
+"timezone": "America/Phoenix"
 ```
 
 ---

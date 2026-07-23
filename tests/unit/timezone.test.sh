@@ -75,6 +75,9 @@ test_is_valid_timezone_rejects_bad_input() {
   # by the TZif-magic gate). All four resolve to a silent host-clock-equivalent
   # date if accepted, so they must fail closed on ANY host — whether the file is
   # present (magic/name reject) or absent (`-f` reject).
+  # factory/FACTORY (case-fold, resolvable on a case-insensitive FS) and
+  # right/Factory (the leap-second mirror subtree) are the round-3 bypass vectors
+  # of the same pseudo-zone class — rejected case-insensitively and by subtree.
   local tz
   for tz in \
     "" \
@@ -89,7 +92,10 @@ test_is_valid_timezone_rejects_bad_input() {
     "Factory" \
     "posixrules" \
     "leapseconds" \
-    "+VERSION"
+    "+VERSION" \
+    "factory" \
+    "FACTORY" \
+    "right/Factory"
   do
     if _is_valid_timezone "$tz"; then
       fail "expected reject but accepted: [$tz]"
@@ -120,6 +126,40 @@ test_is_valid_timezone_rejects_non_tzif_artifacts() {
   if _is_valid_timezone "Factory"; then
     fail "the Factory pseudo-zone was accepted despite valid TZif magic"
   fi
+}
+
+# Deterministic, host-independent proof that the pseudo-zone deny-list closes the
+# round-3 leak (issue #31): a case-insensitive filesystem resolves `factory` /
+# `FACTORY` to the real `Factory` TZif file, and the `right/`/`posix/` leap-second
+# mirror subtrees expose `right/Factory` — all UTC-equivalent pseudo-zones that a
+# bare TZif-magic gate would green-light. Points TZ_DB_DIR at a sandbox holding a
+# real (TZif-magic) file at each of those paths and asserts every one is rejected,
+# while a genuine zone is still accepted. Dropping the case-fold on the name deny
+# re-accepts factory/FACTORY; dropping the right/posix-prefix reject re-accepts
+# the mirror zones — each regresses a line here, on ANY host (case-sensitive CI
+# included, where the files exist under those exact names).
+test_is_valid_timezone_rejects_case_and_mirror_pseudozones() {
+  local zi="$SANDBOX/zi3"
+  mkdir -p "$zi/right" "$zi/posix"
+  printf 'TZif2\0\0\0' > "$zi/factory"           # lowercase pseudo-zone (case-fold vector)
+  printf 'TZif2\0\0\0' > "$zi/FACTORY"           # uppercase pseudo-zone (collapses to the same inode on a case-insensitive FS)
+  printf 'TZif2\0\0\0' > "$zi/right/Factory"     # leap-second mirror pseudo-zone
+  printf 'TZif2\0\0\0' > "$zi/posix/Factory"     # POSIX-TZ mirror pseudo-zone
+  printf 'TZif2\0\0\0' > "$zi/right/Real_Zone"   # mirror duplicate of a REAL zone — only the right/ subtree reject catches it (basename isn't a pseudo-zone)
+  printf 'TZif2\0\0\0' > "$zi/posix/Real_Zone"   # POSIX-TZ mirror duplicate of a real zone
+  printf 'TZif2\0\0\0' > "$zi/Real_Zone"         # sanity control: a genuine TZif zone stays accepted
+  # shellcheck disable=SC2034
+  TZ_DB_DIR="$zi"
+  local tz
+  # factory/FACTORY discriminate the case-fold on the name deny; right/posix/*
+  # discriminate the mirror-subtree reject — right/Real_Zone in particular is NOT
+  # caught by the basename deny, so it fails only if the subtree guard is present.
+  for tz in factory FACTORY right/Factory posix/Factory right/Real_Zone posix/Real_Zone; do
+    if _is_valid_timezone "$tz"; then
+      fail "pseudo-zone bypass accepted despite valid TZif magic: [$tz]"
+    fi
+  done
+  _is_valid_timezone "Real_Zone" || fail "sanity: a real TZif zone must still be accepted"
 }
 
 # Path-traversal to a file that ACTUALLY EXISTS outside the tz database must
@@ -221,16 +261,24 @@ test_today_scheduled_equals_interactive() {
 # The no-override production branch — `TZ="$tz" date +%Y-%m-%d`, the one every
 # command actually calls — is otherwise never exercised: every assertion above
 # injects an epoch, so dropping `TZ=` (or deleting the branch) would leave the
-# suite green. Clear the epoch seam entirely and pin `_today_in_tz UTC` against
-# an independent `date -u`, bracketing the read so a midnight tick between the
-# two calls cannot flake it.
-test_today_no_epoch_uses_live_clock_in_tz() {
+# suite green. The earlier version pinned `_today_in_tz UTC` against `date -u`,
+# but the `test` CI job runs on `ubuntu-latest` with an ambient `TZ=UTC`, so the
+# configured zone and the host clock were the SAME value there — the test could
+# not tell "TZ applied" from "TZ dropped" (verified: stripping `TZ=` still passed
+# 12/12 under TZ=UTC). Pin against a FAR-OFFSET zone (Pacific/Kiritimati, UTC+14)
+# and its own independent `TZ=… date` read instead: for correct code the two
+# always agree, while a dropped `TZ=` makes `got` the host-clock date, which
+# differs from the Kiritimati date for the 14 h/day the two calendars diverge —
+# so the regression is now catchable on the UTC host that gates this PR, not just
+# on a non-UTC dev box. Bracketing tolerates a midnight tick between the reads.
+test_today_no_epoch_uses_passed_zone_not_host_clock() {
+  local tz="Pacific/Kiritimati"   # UTC+14 — the farthest-forward zone, so its date differs from the UTC CI host most of the day
   local before got after
-  before="$(date -u +%Y-%m-%d)"
-  got="$(YNAB_NOW_EPOCH='' _today_in_tz UTC)"   # empty seam → the live-clock branch
-  after="$(date -u +%Y-%m-%d)"
+  before="$(TZ="$tz" date +%Y-%m-%d)"
+  got="$(YNAB_NOW_EPOCH='' _today_in_tz "$tz")"   # empty seam → the live-clock branch
+  after="$(TZ="$tz" date +%Y-%m-%d)"
   if [ "$got" != "$before" ] && [ "$got" != "$after" ]; then
-    fail "_today_in_tz UTC live-clock branch gave '$got', expected '$before' or '$after'"
+    fail "_today_in_tz $tz live-clock branch gave '$got', expected the $tz date '$before'/'$after' — the passed zone did not drive the result"
   fi
 }
 

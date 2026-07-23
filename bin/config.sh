@@ -96,13 +96,29 @@ _require_config() {
 #   ways: the non-selectable TZif pseudo-zones by name, and everything else by
 #   requiring the file to begin with the "TZif" magic (RFC 8536) — which the
 #   text housekeeping files do not.
+#
+#   Both deny-list checks are CASE-FOLDED and cover the leap-second mirror
+#   subtrees, because the name→file lookup is not a canonical-zone check: a
+#   case-insensitive filesystem (macOS/APFS) resolves `factory`/`FACTORY` to the
+#   real `Factory` TZif file, and hosts that ship the `right/`/`posix/` mirrors
+#   (Debian tzdata-legacy, *BSD, RHEL) expose `right/Factory` etc. — both slip
+#   past an exact-case, basename-only name guard and re-leak the UTC-equivalent
+#   date (issue #31, review round 3). So the mirror subtrees are rejected
+#   wholesale and the pseudo-zone names are matched case-insensitively.
 _is_valid_timezone() {
-  local tz="$1" zonefile
+  local tz="$1" zonefile lc base_lc
   [ -n "$tz" ] || return 1
   case "$tz" in
     /* | *..* | */) return 1 ;;               # no absolute path, traversal, or trailing slash
     *[!A-Za-z0-9_/+-]*) return 1 ;;           # only IANA-name characters
-    Factory | posixrules) return 1 ;;         # real TZif files, but build artifacts that map to UTC — never selectable zones
+  esac
+  lc="$(printf '%s' "$tz" | tr '[:upper:]' '[:lower:]')"
+  case "$lc" in
+    right/* | posix/*) return 1 ;;            # leap-second / POSIX-TZ mirror duplicates, not canonical zones
+  esac
+  base_lc="${lc##*/}"
+  case "$base_lc" in
+    factory | posixrules) return 1 ;;         # real TZif files, but UTC-mapping build artifacts — never selectable zones (case-folded: a case-insensitive FS resolves `factory` to `Factory`)
   esac
   zonefile="$TZ_DB_DIR/$tz"
   [ -f "$zonefile" ] || return 1              # must resolve to a real file …
