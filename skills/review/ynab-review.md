@@ -41,6 +41,14 @@ already did that and handed you a single YAML `plan:` block. Treat it as
 authoritative and **do not recompute it** (same contract as bujo: the
 orchestrator owns the schedule, the protocol owns the analysis).
 
+Every date you use — the lookback window, month/quarter boundaries, the tax-year
+label — comes **exclusively** from this plan, whose windows the dispatcher
+computed from the configured `timezone` (`config.timezone`, issue #31). **Never
+call the host clock** (`new Date()`, `date`, `now`, the shell's `TZ`) to derive
+or widen a date: a review run in the wrong zone misplaces near-midnight
+transactions and the wrong tax year. When a downstream tax read needs an "as of"
+date, pass the plan's date — never a host-clock default.
+
 From the plan you consume:
 
 | Plan field | Use |

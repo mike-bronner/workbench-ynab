@@ -38,6 +38,7 @@ loader, the JSON Schema, or any default.
 | Key | Type | Required | Summary |
 |---|---|---|---|
 | `schema_version` | integer | **required** | Config schema version, for forward migration. |
+| `timezone` | string | **required** | IANA timezone — the single source of truth for all date math (window, carryover, month/quarter boundaries, tax year). |
 | `budgets` | array | **required** | The YNAB budgets the plugin operates on (replaces the v1 singular `budget`). |
 | `default_budget` | string | optional | `label` of the entry used when a caller needs a single budget. |
 | `business` | object | optional | Side-business config (accounts, category group, expense categories). |
@@ -58,6 +59,41 @@ shape ships; `/workbench-ynab:setup` and downstream migration can then detect an
 upgrade an older file. Current version: **`2`** (the multi-budget shape, issue
 #84 — version 1 had a singular `budget` object; see the
 [migration note](#migrating-a-v1-config-singular-budget) below).
+
+---
+
+### `timezone` *(string, required)*
+
+An **IANA timezone identifier** — e.g. `America/Phoenix`, `America/New_York`,
+`UTC` — mirroring `workbench-bujo`'s convention. It is the **single source of
+truth for every date-sensitive computation** the review performs: the weekly
+7-day lookback window, the carryover boundary, month start/end, the quarterly
+estimated-tax windows, and the tax-year label (issue #31, design ref GAP-22).
+All of these are computed **against the configured timezone, never the host
+clock**, so a review is deterministic regardless of where or when it runs.
+
+**Explicit default, never "system local".** `/workbench-ynab:setup` resolves
+your machine's current IANA zone at setup time and pre-fills it, then writes the
+**resolved identifier** into `config.json`. The stored value is always a concrete
+zone name — it is *never* the literal string `system local` or an instruction to
+re-read the host clock at run time — which is what keeps a scheduled run and an
+interactive run on the same day in agreement. You may override it to any valid
+IANA zone.
+
+**Required, and validated fail-closed at load time.** The loader
+([`bin/config.sh`](config-loader.md) `_cfg_timezone`) checks the value against the
+tz database (`$TZDIR`, default `/usr/share/zoneinfo`) every time a review starts.
+A **missing or invalid** timezone is a **hard error** — the loader prints a
+descriptive message to stderr and returns non-zero — and the review stops. It
+**never** silently falls back to the host clock: a wrong zone would misplace
+near-midnight transactions in the lookback window and map a date to the wrong tax
+year, so the plugin refuses to guess. The JSON Schema also carries a `pattern`,
+but that is a shape check only; the loader's zoneinfo lookup is the authoritative
+validity gate.
+
+The illustrative value `America/Phoenix` appears **only** as an instance value in
+[`assets/config.example.json`](../assets/config.example.json) — never as a baked-in
+default in the loader or schema (per the generic-not-hardcoded rule above).
 
 ```json
 "schema_version": 2

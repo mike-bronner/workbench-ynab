@@ -148,6 +148,12 @@ assert_present    "offline warning only after retries"      "ynab_mcp_offline"
 # ── Inputs: prompt-fed, never config.json ──────────────────────────────────────
 assert_present_re "today is a prompt input"                 'today.+ISO date'
 assert_present_re "does not read config.json itself"        'You do .*not.* read .config\.json.'
+# Timezone ownership landed (issue #31): the stale "owned by the timezone-
+# ownership issue" placeholder is gone, and a missing today/timezone fails
+# closed — a warning, never a silent host-clock fallback.
+assert_absent_re  "stale timezone-ownership placeholder removed" 'owned by the timezone-ownership issue'
+assert_present_re "missing timezone never falls back to system tz" 'never.{0,40}fall back to the system timezone'
+assert_present_re "missing today is not substituted from the clock" 'not.{0,20}substitute the system date'
 assert_absent_re  "no plugin-data config path inlined"      'plugins/data/workbench-ynab'
 assert_present_re "explicit review_scope stays authoritative" 'review_scope.*(authoritative|skip eligibility)'
 

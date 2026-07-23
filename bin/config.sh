@@ -30,6 +30,8 @@
 #   default_entry="$(_cfg_default_budget)"    # one budgets entry as JSON
 #   persona="$(_cfg '.persona.name')"
 #   persona="${persona:-$DEFAULT_PERSONA}"    # caller applies its own default
+#   timezone="$(_cfg_timezone)" || exit 1     # required IANA tz; fail closed
+#   today="$(_today_in_tz "$timezone")"       # authoritative today in that tz
 #
 # See docs/config-loader.md for the full contract and a worked example per key.
 
@@ -40,6 +42,11 @@
 # YNAB_CONFIG_FILE may be pre-set by the caller (used by the test harness to point
 # at a sandbox fixture); when unset it resolves to the canonical plugin-data path.
 YNAB_CONFIG_FILE="${YNAB_CONFIG_FILE:-$HOME/.claude/plugins/data/workbench-ynab-claude-workbench/config.json}"
+
+# The IANA tz database directory, used by _is_valid_timezone to confirm a zone
+# name resolves to a real zoneinfo file. Standard on macOS and Linux; honours
+# the conventional $TZDIR override when the OS sets one (also the test seam).
+TZ_DB_DIR="${TZDIR:-/usr/share/zoneinfo}"
 
 # _cfg '<jq-path>'
 #   Echo the value at the given jq path, or nothing when the file is missing, jq
@@ -68,6 +75,72 @@ _require_config() {
     return 1
   fi
   return 0
+}
+
+# _is_valid_timezone TZ
+#   Return 0 iff TZ is a syntactically-safe, existing IANA zone name; non-zero
+#   otherwise. A pure predicate — it prints nothing, so callers branch on its
+#   status. FAILS CLOSED: an empty value, an absolute path, a ".." traversal, a
+#   trailing slash, any character outside the IANA name set ([A-Za-z0-9_+/-]),
+#   or a name with no matching file under $TZ_DB_DIR is rejected. The zoneinfo
+#   file check accepts nested zones (e.g. America/Argentina/Buenos_Aires) since
+#   `-f` follows the real file path.
+_is_valid_timezone() {
+  local tz="$1"
+  [ -n "$tz" ] || return 1
+  case "$tz" in
+    /* | *..* | */) return 1 ;;               # no absolute path, traversal, or trailing slash
+    *[!A-Za-z0-9_/+-]*) return 1 ;;           # only IANA-name characters
+  esac
+  [ -f "$TZ_DB_DIR/$tz" ]                      # must resolve to a real zoneinfo file
+}
+
+# _cfg_timezone
+#   Echo the validated IANA timezone from config, or FAIL CLOSED. This is the
+#   loader's load-time timezone gate (issue #31): a review's date math is
+#   timezone-sensitive, so a missing or bogus zone must stop the run loudly
+#   rather than silently defaulting to the host clock — which would misplace
+#   near-midnight transactions and the wrong tax year.
+#     * missing / empty      → descriptive error to stderr, return 1
+#     * present but invalid   → descriptive error to stderr, return 1
+#     * valid                 → echo it on stdout, return 0
+#   NEVER falls back to the system-local zone. Callers resolve it as a hard
+#   stop: `tz="$(_cfg_timezone)" || exit 1`.
+_cfg_timezone() {
+  local tz
+  tz="$(_cfg '.timezone')"
+  if [ -z "$tz" ]; then
+    echo "workbench-ynab: config.timezone is required but missing/empty in $YNAB_CONFIG_FILE" 1>&2
+    echo "workbench-ynab: set a valid IANA timezone (e.g. America/Phoenix) — run /workbench-ynab:setup." 1>&2
+    return 1
+  fi
+  if ! _is_valid_timezone "$tz"; then
+    echo "workbench-ynab: config.timezone '$tz' is not a valid IANA timezone identifier." 1>&2
+    echo "workbench-ynab: use a zoneinfo name like America/Phoenix or UTC — run /workbench-ynab:setup." 1>&2
+    return 1
+  fi
+  printf '%s\n' "$tz"
+}
+
+# _today_in_tz TZ [EPOCH]
+#   Echo today's ISO-8601 calendar date (YYYY-MM-DD) in IANA zone TZ. This is
+#   the SINGLE source of "today" for every review entry point (the router and
+#   the four ad-hoc tier commands), so a scheduled run and an interactive run
+#   fired at the same instant agree on the review window and the tax-year label
+#   (issue #31). EPOCH (Unix seconds; or the $YNAB_NOW_EPOCH env var) overrides
+#   "now" — the deterministic test seam, mirroring lib/monitor/alerts.mjs's
+#   options.now. TZ is assumed already validated (_cfg_timezone /
+#   _is_valid_timezone); an invalid zone makes `date` fall back to UTC, which
+#   that load-time validation exists to prevent.
+_today_in_tz() {
+  local tz="$1" epoch="${2:-${YNAB_NOW_EPOCH:-}}"
+  if [ -z "$epoch" ]; then
+    TZ="$tz" date +%Y-%m-%d
+  elif date --version >/dev/null 2>&1; then
+    TZ="$tz" date -d "@$epoch" +%Y-%m-%d       # GNU coreutils (Linux CI)
+  else
+    TZ="$tz" date -r "$epoch" +%Y-%m-%d        # BSD date (macOS)
+  fi
 }
 
 # _migrate_config

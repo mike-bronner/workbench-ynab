@@ -80,6 +80,17 @@ test_prompt_routes_all_tiers_no_per_tier_commands() {
   done
 }
 
+# Timezone contract (issue #31) — the template must tell the agent to supply the
+# authoritative `today` computed in the configured timezone, never relying on the
+# shell environment's default locale/TZ, so a scheduled run agrees with an
+# interactive run on the same day.
+test_prompt_supplies_authoritative_today_in_configured_tz() {
+  local body; body="$(cat "$PROMPT")"
+  assert_contains "$body" "configured timezone" "the prompt anchors on the configured timezone"
+  assert_contains "$body" "authoritative" "the prompt calls for an authoritative today"
+  assert_contains "$body" "shell environment" "the prompt forbids relying on the shell's default TZ"
+}
+
 # ── Config schema (AC #4) ───────────────────────────────────────────────────
 
 # AC #4 — schedules.review carries cron (string, default "0 7 * * 1") and

@@ -112,6 +112,16 @@ check_shared() {
   assert_present "[$label] dispatches the ynab-orchestrator" 'ynab-orchestrator'
   assert_present_re "[$label] dispatch carries today" 'today: <?YYYY-MM-DD'
   assert_present_re "[$label] dispatch carries the timezone" 'timezone:'
+
+  # Timezone is the required source of truth for date math (issue #31): resolved
+  # fail-closed via _cfg_timezone, and `today` derived in that zone via
+  # _today_in_tz — never the host clock.
+  assert_present "[$label] resolves the timezone fail-closed via _cfg_timezone" \
+    '_cfg_timezone'
+  assert_present "[$label] derives today in the configured tz via _today_in_tz" \
+    '_today_in_tz'
+  assert_absent_flat_re "[$label] no host-clock timezone fallback" \
+    'fall back to the system timezone when unset'
   assert_present_re "[$label] orchestrator dispatched only once" \
     '(exactly|only) once|once per run'
 

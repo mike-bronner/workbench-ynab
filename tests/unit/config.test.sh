@@ -112,6 +112,12 @@ test_example_config() {
     val="$(YNAB_CONFIG_FILE="$EXAMPLE" _cfg "$path")"
     [ -n "$val" ] || fail "example $path empty"
   done
+  # timezone (issue #31): required, present, and a valid IANA zone that reads
+  # back through the fail-closed gate rather than merely as raw text.
+  val="$(YNAB_CONFIG_FILE="$EXAMPLE" _cfg '.timezone')"
+  [ -n "$val" ] || fail "example .timezone empty"
+  _is_valid_timezone "$val" || fail "example .timezone is not a valid IANA zone: $val"
+  assert_eq "$val" "$(YNAB_CONFIG_FILE="$EXAMPLE" _cfg_timezone)" "example timezone reads through _cfg_timezone"
 }
 
 run_tests
