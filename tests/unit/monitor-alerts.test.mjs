@@ -115,19 +115,21 @@ test('dollar thresholds are converted to milliunits at the config boundary (× 1
 });
 
 test('loadAlertsConfig: missing file, absent block, and partial block all degrade safely', () => {
+  // dataDir: TMP names the containment root (#244) — every freshPath lives under
+  // TMP, so these contained reads pass the guard and exercise the degrade paths.
   // Missing file → defaults (zero-config requirement), never a throw.
-  const missing = loadAlertsConfig({ configFile: freshPath('no-such-config.json') });
+  const missing = loadAlertsConfig({ configFile: freshPath('no-such-config.json'), dataDir: TMP });
   assert.equal(missing.largeTransactionMilliunits, 500000);
 
   // Present file with no alerts block → defaults.
   const noBlock = freshPath('config-noblock.json');
   writeFileSync(noBlock, JSON.stringify({ schema_version: 1 }));
-  assert.equal(loadAlertsConfig({ configFile: noBlock }).channel, CHANNEL_MACOS);
+  assert.equal(loadAlertsConfig({ configFile: noBlock, dataDir: TMP }).channel, CHANNEL_MACOS);
 
   // Partial block → merge over defaults.
   const partial = freshPath('config-partial.json');
   writeFileSync(partial, JSON.stringify({ alerts: { large_transaction_amount: 250, channel: 'log-only' } }));
-  const cfg = loadAlertsConfig({ configFile: partial });
+  const cfg = loadAlertsConfig({ configFile: partial, dataDir: TMP });
   assert.equal(cfg.largeTransactionMilliunits, 250000);
   assert.equal(cfg.channel, CHANNEL_LOG_ONLY);
   assert.equal(cfg.unusualMultiplier, 3);
@@ -135,7 +137,7 @@ test('loadAlertsConfig: missing file, absent block, and partial block all degrad
   // Malformed JSON → defaults, never a throw.
   const bad = freshPath('config-bad.json');
   writeFileSync(bad, '{ this is not json');
-  assert.equal(loadAlertsConfig({ configFile: bad }).enabled, true);
+  assert.equal(loadAlertsConfig({ configFile: bad, dataDir: TMP }).enabled, true);
 });
 
 // --- dedupe_key format ---------------------------------------------------------
@@ -239,7 +241,7 @@ test('dispatchAlerts appends to the alert log regardless of channel (the audit t
     const logPath = freshPath(`alert-log-${channel}.jsonl`);
     const config = sanitizeAlertsConfig({ channel });
     const result = dispatchAlerts([finding(ACTION, 1)], {
-      config, logPath, platform: 'darwin', spawnImpl: () => ({ status: 0 }), now: '2026-07-16T08:00:00Z',
+      config, logPath, dataDir: TMP, platform: 'darwin', spawnImpl: () => ({ status: 0 }), now: '2026-07-16T08:00:00Z',
     });
     assert.equal(result.dispatched, true);
     assert.equal(result.logPath, logPath);
@@ -260,14 +262,14 @@ test('dispatchAlerts channel switch: macos-notification notifies, log-only does 
 
   const mac = dispatchAlerts([finding(ATTENTION, 1)], {
     config: sanitizeAlertsConfig({ channel: CHANNEL_MACOS }),
-    logPath: freshPath('switch-mac.jsonl'), platform: 'darwin', spawnImpl,
+    logPath: freshPath('switch-mac.jsonl'), dataDir: TMP, platform: 'darwin', spawnImpl,
   });
   assert.equal(mac.notified, true);
   assert.equal(spawned, 1);
 
   const logOnly = dispatchAlerts([finding(ATTENTION, 2)], {
     config: sanitizeAlertsConfig({ channel: CHANNEL_LOG_ONLY }),
-    logPath: freshPath('switch-log.jsonl'), platform: 'darwin', spawnImpl,
+    logPath: freshPath('switch-log.jsonl'), dataDir: TMP, platform: 'darwin', spawnImpl,
   });
   assert.equal(logOnly.notified, false);
   assert.equal(spawned, 1, 'log-only must not spawn a notifier');
@@ -278,6 +280,7 @@ test('dispatchAlerts strips markdown bold from the notification text', () => {
   dispatchAlerts([finding(ACTION, 1)], {
     config: sanitizeAlertsConfig({}),
     logPath: freshPath('strip.jsonl'),
+    dataDir: TMP,
     platform: 'darwin',
     spawnImpl: (cmd, args) => { body = args.at(-2); return { status: 0 }; },
   });
@@ -300,19 +303,24 @@ test('dispatchAlerts caps the log entry at MAX_FINDINGS, most-severe first', () 
   const logPath = freshPath('cap.jsonl');
   const many = [1, 2, 3].map((n) => finding(INFO, n))
     .concat([4, 5, 6].map((n) => finding(ACTION, n)));
-  dispatchAlerts(many, { config: sanitizeAlertsConfig({ channel: CHANNEL_LOG_ONLY }), logPath });
+  dispatchAlerts(many, { config: sanitizeAlertsConfig({ channel: CHANNEL_LOG_ONLY }), logPath, dataDir: TMP });
   const entry = JSON.parse(readFileSync(logPath, 'utf8').trim());
   assert.equal(entry.findings.length, MAX_FINDINGS);
   assert.deepEqual(entry.findings.slice(0, 3).map((f) => f.severity), [ACTION, ACTION, ACTION]);
 });
 
 test('dispatchAlerts never throws when the log append fails (unattended pass survives)', () => {
-  // A file path under a path that is itself a FILE → mkdir/append must fail.
-  const blocker = freshPath('not-a-dir');
-  writeFileSync(blocker, 'file in the way');
+  // A logPath that is itself a DIRECTORY: it canonicalizes INSIDE TMP so it
+  // passes the #244 containment guard, but appendFileSync then fails EISDIR — the
+  // write throws inside dispatchAlerts's try/catch, which must swallow it and
+  // keep the pass alive. (Testing the IO-failure catch specifically, distinct
+  // from a containment refusal — an escaping path is covered in
+  // containment.test.mjs.)
+  const logDir = freshPath('log-is-a-dir');
+  mkdirSync(logDir);
   const result = dispatchAlerts([finding(ACTION, 1)], {
     config: sanitizeAlertsConfig({ channel: CHANNEL_LOG_ONLY }),
-    logPath: join(blocker, 'alert-log.jsonl'),
+    logPath: logDir, dataDir: TMP,
   });
   assert.equal(result.dispatched, true);
   assert.equal(result.logPath, null);
@@ -324,7 +332,7 @@ test('dispatchAlerts never throws on malformed findings — junk is dropped, val
   // outside dispatchAlerts's try/catch).
   const logPath = freshPath('malformed.jsonl');
   const result = dispatchAlerts([finding(ACTION, 1), null, undefined, 42, 'junk'], {
-    config: sanitizeAlertsConfig({ channel: CHANNEL_LOG_ONLY }), logPath,
+    config: sanitizeAlertsConfig({ channel: CHANNEL_LOG_ONLY }), logPath, dataDir: TMP,
   });
   assert.equal(result.dispatched, true);
   assert.equal(result.rendered.split('\n').length, 1, 'only the valid finding renders');
@@ -354,7 +362,7 @@ test('dispatchAlerts never throws on poisoned finding FIELDS — exotic objects 
     { ...base, title: 'unstringable severity.', severity: { toString() { throw new Error('boom'); } } },
   ];
   const result = dispatchAlerts(poisoned, {
-    config: sanitizeAlertsConfig({ channel: CHANNEL_LOG_ONLY }), logPath,
+    config: sanitizeAlertsConfig({ channel: CHANNEL_LOG_ONLY }), logPath, dataDir: TMP,
   });
   assert.equal(result.dispatched, true);
   const lines = result.rendered.split('\n');
@@ -392,7 +400,7 @@ test('appendAlertLog enforces owner-only modes on every append, not just at crea
   writeFileSync(logPath, '{"stale":true}\n');
   chmodSync(dir, 0o755);
   chmodSync(logPath, 0o644);
-  appendAlertLog({ probe: true }, { logPath });
+  appendAlertLog({ probe: true }, { logPath, dataDir: TMP });
   assert.equal(statSync(logPath).mode & 0o777, 0o600);
   assert.equal(statSync(dir).mode & 0o777, 0o700);
 });
@@ -406,7 +414,7 @@ test('dispatchAlerts loads config through the configFile seam when none is pre-s
   const logPath = freshPath('config-seam.jsonl');
   let spawned = 0;
   const result = dispatchAlerts([finding(ACTION, 1)], {
-    configFile, logPath, env: {}, platform: 'darwin',
+    configFile, logPath, dataDir: TMP, env: {}, platform: 'darwin',
     spawnImpl: () => { spawned += 1; return { status: 0 }; },
   });
   assert.equal(result.dispatched, true);
@@ -418,7 +426,7 @@ test('dispatchAlerts loads config through the configFile seam when none is pre-s
   const offFile = freshPath('dispatch-config-off.json');
   writeFileSync(offFile, JSON.stringify({ alerts: { enabled: false } }));
   const offLog = freshPath('config-seam-off.jsonl');
-  const off = dispatchAlerts([finding(ACTION, 1)], { configFile: offFile, logPath: offLog, env: {} });
+  const off = dispatchAlerts([finding(ACTION, 1)], { configFile: offFile, logPath: offLog, dataDir: TMP, env: {} });
   assert.equal(off.dispatched, false);
   assert.equal(existsSync(offLog), false);
 });
@@ -439,7 +447,7 @@ test('a full dispatch emits NOTHING to stdout (MCP/JSON-RPC safety)', () => {
     import { dispatchAlerts, sanitizeAlertsConfig } from ${JSON.stringify(MODULE_PATH)};
     dispatchAlerts(
       [{ severity: 'action', title: 't.', detail: 'd', suggested_action: 'a.', dedupe_key: 'k:s:p' }],
-      { config: sanitizeAlertsConfig({ channel: 'log-only' }), logPath: ${JSON.stringify(logPath)} },
+      { config: sanitizeAlertsConfig({ channel: 'log-only' }), logPath: ${JSON.stringify(logPath)}, dataDir: ${JSON.stringify(TMP)} },
     );
   `;
   const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8' });
