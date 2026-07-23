@@ -1,0 +1,6 @@
+YNAB Quarterly Tax Review — 2025-05-01
+
+No findings this period — this budget has no accounts or transactions in the window yet. Add an account and import or enter some transactions, then run the review again.
+
+📄 Full report: {{output_path}}
+{{signoff}}
