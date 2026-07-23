@@ -106,9 +106,9 @@ For each eligible tier, record in `plan.report.reasons` **why** it fired and its
 - `today = 2026-04-22` (Wednesday) → `tiers: []` — no window matches; the plan says so and the router does nothing.
 
 > **Estimated-tax payment reminders (M6-5) key on this same quarterly window.**
-> The quarterly-tax reminder check (issue #83) fires on the same
-> 7-day-before-through-due-date window this tier-routing owns — gated by
-> `alerts.tax.reminders_enabled` and `alerts.tax.lead_time_days`, and reading the
+> The quarterly-tax reminder check (issue #83) fires within the
+> `alerts.tax.lead_time_days` window (default 7) before a due date through the due
+> date itself — gated by `alerts.tax.reminders_enabled`, and reading the
 > M6-4 tracker for the remaining-due amount and payment suppression. Because *you*
 > are the read-only planner, you never dispatch it: the **review router**
 > (`commands/ynab-review.md` Step 1d) resolves the config + tracker, computes the

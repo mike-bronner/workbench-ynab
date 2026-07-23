@@ -40,7 +40,7 @@ const trackerUnpaid = {
   schemaVersion: 1,
   years: { 2026: { 3: { estimated_liability: 1200, payments: [], remaining_due: 1200 } } },
 };
-// Same, but with a payment recorded against Q3 → suppression.
+// Same, but PAID IN FULL against Q3 (remaining_due 0) → suppression.
 const trackerPaid = {
   schemaVersion: 1,
   years: {
@@ -49,6 +49,22 @@ const trackerPaid = {
         estimated_liability: 1200,
         payments: [{ date: '2026-09-10', amount_usd: 1200, ynab_transaction_id: 't-1' }],
         remaining_due: 0,
+      },
+    },
+  },
+};
+// A PARTIAL payment: ≥1 payment recorded but remaining_due > 0. Suppression must
+// STILL fire — AC #8 is "at least one payment recorded", NOT "paid in full". This
+// fixture pins hasRecordedPayment's `payments.length >= 1` semantics: swap the impl
+// to a `remaining_due <= 0` check and this quarter would (wrongly) fire, going red.
+const trackerPartiallyPaid = {
+  schemaVersion: 1,
+  years: {
+    2026: {
+      3: {
+        estimated_liability: 1200,
+        payments: [{ date: '2026-09-10', amount_usd: 500, ynab_transaction_id: 't-1' }],
+        remaining_due: 700,
       },
     },
   },
@@ -80,6 +96,17 @@ test('suppression: no reminder fires for a quarter once a payment is recorded', 
   for (const today of ['2026-09-08', '2026-09-15']) {
     const findings = computeQuarterlyTaxReminders({ ...base, tracker: trackerPaid, today });
     assert.deepEqual(findings, [], `expected suppression on ${today}`);
+  }
+});
+
+test('suppression pins "≥1 payment recorded" (AC #8), NOT "paid in full": a partial payment still suppresses', () => {
+  // trackerPartiallyPaid has one payment but remaining_due > 0. AC #8 suppresses on
+  // "at least one payment recorded", so this must fire nothing on both the lead-time
+  // and due-day paths — locking hasRecordedPayment against a remaining_due<=0 reading
+  // that the paid-in-full fixture (remaining_due 0) alone can't distinguish.
+  for (const today of ['2026-09-08', '2026-09-15']) {
+    const findings = computeQuarterlyTaxReminders({ ...base, tracker: trackerPartiallyPaid, today });
+    assert.deepEqual(findings, [], `partial payment must still suppress on ${today}`);
   }
 });
 
@@ -124,11 +151,20 @@ test('every finding carries the canonical not-tax-advice tag, byte-for-byte', ()
   );
 });
 
-test('an unpaid firing finding reports the M6-2 contract fields', () => {
-  const [f] = computeQuarterlyTaxReminders({ ...base, today: '2026-09-15' });
-  assert.deepEqual(Object.keys(f).sort(), ['dedupe_key', 'detail', 'severity', 'suggested_action', 'title']);
-  assert.equal(typeof f.detail, 'string');
-  assert.match(f.detail, /payment_recorded=false/);
+test('an unpaid firing finding reports the M6-2 contract fields on BOTH the due-day and lead-time paths', () => {
+  const KEYS = ['dedupe_key', 'detail', 'severity', 'suggested_action', 'title'];
+  const due = computeQuarterlyTaxReminders({ ...base, today: '2026-09-15' })[0];
+  assert.equal(due.severity, ACTION);
+  assert.deepEqual(Object.keys(due).sort(), KEYS);
+  assert.equal(typeof due.detail, 'string');
+  assert.match(due.detail, /payment_recorded=false/);
+  // Same full shape on the lead-time (ATTENTION) branch — a field dropped only on
+  // that path would otherwise slip past a due-day-only assertion.
+  const lead = computeQuarterlyTaxReminders({ ...base, today: '2026-09-08' })[0];
+  assert.equal(lead.severity, ATTENTION);
+  assert.deepEqual(Object.keys(lead).sort(), KEYS);
+  assert.equal(typeof lead.detail, 'string');
+  assert.match(lead.detail, /payment_recorded=false/);
 });
 
 test('lead-time and due-day findings carry DISTINCT dedupe keys (both can fire)', () => {
@@ -137,6 +173,25 @@ test('lead-time and due-day findings carry DISTINCT dedupe keys (both can fire)'
   assert.equal(lead.dedupe_key, `${REMINDER_TYPE}:Q3-lead:2026`);
   assert.equal(due.dedupe_key, `${REMINDER_TYPE}:Q3-due:2026`);
   assert.notEqual(lead.dedupe_key, due.dedupe_key);
+});
+
+// --- Ordering: most urgent first ---------------------------------------------
+
+test('findings come out most-urgent-first (ascending days-until-due), so the cap never drops the nearer one', () => {
+  // Two quarters from different tax years, both inside a wide lead window, with the
+  // FAR-OFF one listed first in dueDates. The detector must reorder so the nearer
+  // due date leads — otherwise dispatchAlerts' MAX_FINDINGS cap (severity sort only,
+  // input order within a severity) could drop the more urgent reminder.
+  const dueDates = [
+    { quarter: 1, date: '2027-04-15', taxYear: 2027 }, // 95 days away
+    { quarter: 4, date: '2027-01-15', taxYear: 2026 }, //  5 days away
+  ];
+  const findings = computeQuarterlyTaxReminders({
+    today: '2027-01-10', dueDates, tracker: null, leadTimeDays: 100, remindersEnabled: true,
+  });
+  assert.equal(findings.length, 2);
+  assert.match(findings[0].title, /Q4 2026/); // nearer (5d) first
+  assert.match(findings[1].title, /Q1 2027/); // farther (95d) second
 });
 
 // --- Robustness / fail-closed ------------------------------------------------
