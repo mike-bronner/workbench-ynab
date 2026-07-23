@@ -166,7 +166,14 @@ top 5** (`MAX_FINDINGS`, matching the review dispatch's fixed five):
   (dir `0700`, file `0600`), same sensitivity class as the monitor state —
   and the modes are re-enforced on every append (creation-time modes alone
   never tighten a pre-existing dir/file; `bin/audit-log.sh` keeps the same
-  guarantee the same way).
+  guarantee the same way). The resolved log path is **containment-checked**
+  before any write (issue #206/#244): a path escaping the data-dir root is
+  refused unwritten — nothing is created on it — exactly as
+  `lib/monitor/state.mjs` guards its write seam. Because `dispatchAlerts` is
+  best-effort, a refused path degrades to stderr + no log write (the pass
+  survives), never a crash. The config read (`loadAlertsConfig`) is guarded
+  the same way — an escaping `YNAB_CONFIG_FILE` throws a structured
+  `containment` error before the read, mirroring `confidence.mjs`.
 - **Notification is best-effort by contract.** Off-darwin it is skipped; a
   missing or failing `osascript` returns `false` and logs to stderr — a failed
   notification **never** raises an exception or crashes the monitor pass.
@@ -180,7 +187,10 @@ top 5** (`MAX_FINDINGS`, matching the review dispatch's fixed five):
 
 Mirroring the monitor state store: `options.configFile` → env
 `YNAB_CONFIG_FILE` for the config read, and `options.logPath` → env
-`YNAB_ALERT_LOG_FILE` → `YNAB_DATA_DIR` for the alert log. The notification
-path stubs via `options.platform` / `options.spawnImpl`, so the suite passes on
-non-darwin CI. See
+`YNAB_ALERT_LOG_FILE` → `YNAB_DATA_DIR` for the alert log. `options.dataDir` →
+env `YNAB_DATA_DIR` names the **containment root** both paths must resolve
+under (an explicit `configFile`/`logPath` never vouches for itself), so a test
+pointing at a temp file passes `dataDir` alongside it — exactly as the
+confidence/state suites do. The notification path stubs via `options.platform`
+/ `options.spawnImpl`, so the suite passes on non-darwin CI. See
 [`tests/unit/monitor-alerts.test.mjs`](../tests/unit/monitor-alerts.test.mjs).
