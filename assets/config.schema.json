@@ -295,6 +295,24 @@
           "enum": ["macos-notification", "log-only"],
           "default": "macos-notification",
           "description": "Delivery-channel switch (docs/alerts-config.md). 'macos-notification' (default) fires a best-effort macOS desktop notification; 'log-only' stops at the audit log. Every dispatch appends to the alert log regardless of channel."
+        },
+        "tax": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Quarterly estimated-tax payment reminders (M6-5, docs/alerts-config.md). The review pipeline nudges you ahead of each estimated-tax due date, reading the amounts from the M6-4 tracker and dispatching through the same channel as every other alert. Omit the whole block to accept the defaults.",
+          "properties": {
+            "lead_time_days": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 7,
+              "description": "How many calendar days before a quarterly due date the lead-time reminder starts firing. Defaults to 7. 0 means remind only on the due date itself."
+            },
+            "reminders_enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Master switch for estimated-tax reminders. Defaults to true. Set false to silence them without affecting any other alert."
+            }
+          }
         }
       }
     },

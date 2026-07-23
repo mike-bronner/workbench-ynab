@@ -30,6 +30,7 @@ throws (user config is a trust boundary).
 | `bill_due_lookahead_days` | integer ≥ 0 | `3` | days | How many days ahead an upcoming scheduled bill is worth flagging. |
 | `overdrawn` | boolean | `true` | — | Whether a negative account balance is alert-worthy. |
 | `channel` | string enum | `"macos-notification"` | — | Delivery-channel switch — see [Channels](#channels) below. |
+| `tax` | object | *(see below)* | — | Quarterly estimated-tax reminders (M6-5) — see [Estimated-tax reminders](#estimated-tax-reminders-m6-5) below. |
 
 ```json
 "alerts": {
@@ -39,7 +40,8 @@ throws (user config is a trust boundary).
   "budget_overrun_pct": 100,
   "bill_due_lookahead_days": 3,
   "overdrawn": true,
-  "channel": "macos-notification"
+  "channel": "macos-notification",
+  "tax": { "lead_time_days": 7, "reminders_enabled": true }
 }
 ```
 
@@ -85,6 +87,54 @@ condition is never re-announced on every poll. Detectors must record each
 dispatched finding's `dedupe_key` there, and pick a `period` granularity that
 matches how often re-announcing is acceptable (e.g. the month for a budget
 overrun).
+
+## Estimated-tax reminders (M6-5)
+
+The quarterly estimated-tax reminder is a **detector** in the M6-3 sense — it
+emits ordinary findings the dispatch layer above delivers unchanged — but it
+lives with the tax code
+([`lib/tax/estimatedTaxReminder.mjs`](../lib/tax/estimatedTaxReminder.mjs),
+issue #83) because it reads the M6-4 tracker and the tax profile. It is a **thin
+layer**: it invents no tax math and no delivery, only the decision of *when to
+nudge*.
+
+**Cadence — no new cron entry.** The reminder runs inside the **unified
+`ynab-review` scheduled task** (M2-11 / `schedules.review`), keyed on the same
+quarterly due-date window the read-only orchestrator's tier-routing already owns.
+The review router computes today's date in the configured timezone, resolves the
+due dates and tracker, calls the detector, and dispatches any findings through
+`dispatchAlerts` — so estimated-tax reminders add **zero** scheduled tasks (they
+piggy-back the review's cadence, mirroring bujo's one-task pattern).
+
+`computeQuarterlyTaxReminders({ today, dueDates, tracker, leadTimeDays, remindersEnabled })`
+returns zero or more findings:
+
+| Condition | Result |
+|---|---|
+| `reminders_enabled` is `false` | No findings — the master switch. |
+| `today` within `lead_time_days` calendar days **before** a due date | 🟡 `attention` lead-time reminder. |
+| `today` **is** the due date and no payment recorded for that quarter | 🔴 `action` — escalated (overdue signal). |
+| the quarter already has ≥1 payment in the tracker | Suppressed — no reminder (no nagging after payment). |
+| `today` earlier than `lead_time_days` before, or after, the due date | No finding. |
+
+- **Due dates come from config, never code.** The Apr 15 / Jun 15 / Sep 15 /
+  Jan 15 dates are read from the tax profile
+  (`loadProfile().getQuarterlyDueDates(year)`); the detector receives resolved
+  `{ quarter, date, taxYear }` entries and hardcodes no quarter date. The
+  router unions this tax year's and last tax year's quarters so a January run
+  still sees the prior year's Q4 (due Jan 15).
+- **Timezone.** All comparisons are civil-date arithmetic on `today`, which the
+  router computes in the user's configured timezone — the same timezone key used
+  everywhere else in the plugin.
+- **Rendering** (each finding) includes the quarter label (e.g. `Q3 2026`), the
+  due date, the current remaining-due estimate from the tracker, and the
+  recommended payment amount, and carries the canonical compact not-tax-advice
+  tag verbatim (`skills/shared/disclaimer.md`).
+- **`dedupe_key`** is `estimated_tax_reminder:Q{n}-lead:{taxYear}` for the
+  lead-time reminder and `…-due:…` for the due-day one — distinct so the due-day
+  🔴 still fires on the deadline even after the lead-time 🟡 fired earlier.
+- **stderr discipline.** The detector is pure and writes nothing; diagnostics on
+  the surrounding path go to stderr only, never leaking into the dispatch channel.
 
 ## Rendering
 

@@ -37,6 +37,7 @@ import {
   dollarsToMilliunits,
   dedupeKey,
   sanitizeAlertsConfig,
+  sanitizeTaxAlertsConfig,
   loadAlertsConfig,
   sortFindings,
   renderAlerts,
@@ -104,6 +105,44 @@ test('sanitizeAlertsConfig boundaries: 0 lookahead days is valid, negative rates
   assert.equal(cfg.billDueLookaheadDays, 0);
   assert.equal(cfg.unusualMultiplier, 3);
   assert.equal(cfg.budgetOverrunPct, 100);
+});
+
+// --- alerts.tax: the estimated-tax reminder block (M6-5, issue #83) ----------
+
+test('zero-config: the alerts.tax block defaults to lead_time_days 7, reminders on', () => {
+  // An absent, null, or malformed tax block resolves to the documented defaults.
+  for (const raw of [undefined, null, 'nope', []]) {
+    const tax = sanitizeAlertsConfig({ tax: raw }).tax;
+    assert.equal(tax.leadTimeDays, 7);
+    assert.equal(tax.remindersEnabled, true);
+  }
+  // Omitting the whole alerts block still yields the tax defaults.
+  assert.deepEqual(sanitizeAlertsConfig(undefined).tax, { leadTimeDays: 7, remindersEnabled: true });
+  // The default block itself carries the raw (snake_case) shape.
+  assert.equal(DEFAULT_ALERTS_CONFIG.tax.lead_time_days, 7);
+  assert.equal(DEFAULT_ALERTS_CONFIG.tax.reminders_enabled, true);
+});
+
+test('sanitizeTaxAlertsConfig: valid overrides honoured, invalid fields fall back per-field', () => {
+  assert.deepEqual(sanitizeTaxAlertsConfig({ lead_time_days: 14, reminders_enabled: false }), {
+    leadTimeDays: 14,
+    remindersEnabled: false,
+  });
+  // 0 is the valid edge (due-day-only); negatives, non-integers, and non-booleans fall back.
+  assert.equal(sanitizeTaxAlertsConfig({ lead_time_days: 0 }).leadTimeDays, 0);
+  assert.equal(sanitizeTaxAlertsConfig({ lead_time_days: -1 }).leadTimeDays, 7);
+  assert.equal(sanitizeTaxAlertsConfig({ lead_time_days: 3.5 }).leadTimeDays, 7);
+  assert.equal(sanitizeTaxAlertsConfig({ reminders_enabled: 'yes' }).remindersEnabled, true);
+});
+
+test('loadAlertsConfig surfaces the tax block from a partial config file', () => {
+  const partial = freshPath('config-tax.json');
+  writeFileSync(partial, JSON.stringify({ alerts: { tax: { lead_time_days: 10, reminders_enabled: false } } }));
+  const cfg = loadAlertsConfig({ configFile: partial });
+  assert.equal(cfg.tax.leadTimeDays, 10);
+  assert.equal(cfg.tax.remindersEnabled, false);
+  // Sibling alert fields still take their defaults.
+  assert.equal(cfg.channel, CHANNEL_MACOS);
 });
 
 test('dollar thresholds are converted to milliunits at the config boundary (× 1000)', () => {

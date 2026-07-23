@@ -105,6 +105,17 @@ For each eligible tier, record in `plan.report.reasons` **why** it fired and its
 - `today = 2026-04-13` (Monday) → `tiers: [quarterly-tax, weekly]` — inside the Apr 15 reminder window (Apr 8–15) and the configured weekly day. See the full plan block below.
 - `today = 2026-04-22` (Wednesday) → `tiers: []` — no window matches; the plan says so and the router does nothing.
 
+> **Estimated-tax payment reminders (M6-5) key on this same quarterly window.**
+> The quarterly-tax reminder check (issue #83) fires on the same
+> 7-day-before-through-due-date window this tier-routing owns — gated by
+> `alerts.tax.reminders_enabled` and `alerts.tax.lead_time_days`, and reading the
+> M6-4 tracker for the remaining-due amount and payment suppression. Because *you*
+> are the read-only planner, you never dispatch it: the **review router**
+> (`commands/ynab-review.md` Step 1d) resolves the config + tracker, computes the
+> reminder in the user's timezone, and delivers it through the M6-2 channel — so
+> the reminder rides the unified `ynab-review` task's cadence with no extra cron
+> entry. Detector: [`lib/tax/estimatedTaxReminder.mjs`](../lib/tax/estimatedTaxReminder.mjs).
+
 ## State inspection
 
 Read-only passes, kept separate so you don't burn context fetching data you only needed to confirm exists:
