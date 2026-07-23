@@ -75,7 +75,11 @@
     "budget_overrun_pct": 100,
     "bill_due_lookahead_days": 3,
     "overdrawn": true,
-    "channel": "macos-notification"
+    "channel": "macos-notification",
+    "tax": {
+      "lead_time_days": 7,
+      "reminders_enabled": true
+    }
   },
   "classification": {
     "highThreshold": 0.85,

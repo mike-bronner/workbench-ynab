@@ -320,6 +320,7 @@ The full contract — field semantics, the structured finding shape, the
 | `bill_due_lookahead_days` | integer | optional | `3` | Days ahead an upcoming scheduled bill is flagged. |
 | `overdrawn` | boolean | optional | `true` | Whether a negative account balance is alert-worthy. |
 | `channel` | string (enum) | optional | `"macos-notification"` | Delivery channel: `macos-notification` or `log-only`. Every dispatch also appends to the audit log. |
+| `tax` | object | optional | — | Quarterly estimated-tax reminders (M6-5). See [`alerts.tax`](#alertstax-object-optional) below. |
 
 ```json
 "alerts": {
@@ -329,9 +330,31 @@ The full contract — field semantics, the structured finding shape, the
   "budget_overrun_pct": 100,
   "bill_due_lookahead_days": 3,
   "overdrawn": true,
-  "channel": "macos-notification"
+  "channel": "macos-notification",
+  "tax": { "lead_time_days": 7, "reminders_enabled": true }
 }
 ```
+
+#### `alerts.tax` *(object, optional)*
+
+Quarterly estimated-tax **payment reminders** (M6-5, issue #83). Nudge the user
+ahead of each estimated-tax due date so a deadline never slips. The reminder is a
+thin layer over the M6-4 tracker (for the remaining-due figure and
+payment-suppression) and the M6-2 dispatch channel (delivery). Omit the whole
+block to accept the defaults — reminders are on out of the box. Due dates come
+from `tax_profile.quarterly_due_dates` / the tax profile — never hardcoded.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `lead_time_days` | integer ≥ 0 | optional | `7` | Calendar days before a due date the lead-time reminder starts firing. `0` reminds only on the due date itself. |
+| `reminders_enabled` | boolean | optional | `true` | Master switch for estimated-tax reminders. `false` silences them without touching any other alert. |
+
+Both take effect on the **next orchestrator/review run** — no code change. The
+reminder fires within `lead_time_days` of a quarter's due date (🟡 attention) and
+escalates to 🔴 on the due date when no payment is recorded, then stays silent
+once a payment for that quarter lands in the tracker. It runs inside the unified
+`ynab-review` scheduled task (`schedules.review`), so it adds **no** extra cron
+entry. Full contract: [`alerts-config.md`](alerts-config.md).
 
 ---
 

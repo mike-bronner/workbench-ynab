@@ -30,6 +30,7 @@ throws (user config is a trust boundary).
 | `bill_due_lookahead_days` | integer ≥ 0 | `3` | days | How many days ahead an upcoming scheduled bill is worth flagging. |
 | `overdrawn` | boolean | `true` | — | Whether a negative account balance is alert-worthy. |
 | `channel` | string enum | `"macos-notification"` | — | Delivery-channel switch — see [Channels](#channels) below. |
+| `tax` | object | *(see below)* | — | Quarterly estimated-tax reminders (M6-5) — see [Estimated-tax reminders](#estimated-tax-reminders-m6-5) below. |
 
 ```json
 "alerts": {
@@ -39,7 +40,8 @@ throws (user config is a trust boundary).
   "budget_overrun_pct": 100,
   "bill_due_lookahead_days": 3,
   "overdrawn": true,
-  "channel": "macos-notification"
+  "channel": "macos-notification",
+  "tax": { "lead_time_days": 7, "reminders_enabled": true }
 }
 ```
 
@@ -86,6 +88,54 @@ dispatched finding's `dedupe_key` there, and pick a `period` granularity that
 matches how often re-announcing is acceptable (e.g. the month for a budget
 overrun).
 
+## Estimated-tax reminders (M6-5)
+
+The quarterly estimated-tax reminder is a **detector** in the M6-3 sense — it
+emits ordinary findings the dispatch layer above delivers unchanged — but it
+lives with the tax code
+([`lib/tax/estimatedTaxReminder.mjs`](../lib/tax/estimatedTaxReminder.mjs),
+issue #83) because it reads the M6-4 tracker and the tax profile. It is a **thin
+layer**: it invents no tax math and no delivery, only the decision of *when to
+nudge*.
+
+**Cadence — no new cron entry.** The reminder runs inside the **unified
+`ynab-review` scheduled task** (M2-11 / `schedules.review`), keyed on the same
+quarterly due-date window the read-only orchestrator's tier-routing already owns.
+The review router computes today's date in the configured timezone, resolves the
+due dates and tracker, calls the detector, and dispatches any findings through
+`dispatchAlerts` — so estimated-tax reminders add **zero** scheduled tasks (they
+piggy-back the review's cadence, mirroring bujo's one-task pattern).
+
+`computeQuarterlyTaxReminders({ today, dueDates, tracker, leadTimeDays, remindersEnabled })`
+returns zero or more findings:
+
+| Condition | Result |
+|---|---|
+| `reminders_enabled` is `false` | No findings — the master switch. |
+| `today` within `lead_time_days` calendar days **before** a due date | 🟡 `attention` lead-time reminder. |
+| `today` **is** the due date and no payment recorded for that quarter | 🔴 `action` — escalated (overdue signal). |
+| the quarter already has ≥1 payment in the tracker | Suppressed — no reminder (no nagging after payment). |
+| `today` earlier than `lead_time_days` before, or after, the due date | No finding. |
+
+- **Due dates come from config, never code.** The Apr 15 / Jun 15 / Sep 15 /
+  Jan 15 dates are read from the tax profile
+  (`loadProfile().getQuarterlyDueDates(year)`); the detector receives resolved
+  `{ quarter, date, taxYear }` entries and hardcodes no quarter date. The
+  router unions this tax year's and last tax year's quarters so a January run
+  still sees the prior year's Q4 (due Jan 15).
+- **Timezone.** All comparisons are civil-date arithmetic on `today`, which the
+  router computes in the user's configured timezone — the same timezone key used
+  everywhere else in the plugin.
+- **Rendering** (each finding) includes the quarter label (e.g. `Q3 2026`), the
+  due date, the current remaining-due estimate from the tracker, and the
+  recommended payment amount, and carries the canonical compact not-tax-advice
+  tag verbatim (`skills/shared/disclaimer.md`).
+- **`dedupe_key`** is `estimated_tax_reminder:Q{n}-lead:{taxYear}` for the
+  lead-time reminder and `…-due:…` for the due-day one — distinct so the due-day
+  🔴 still fires on the deadline even after the lead-time 🟡 fired earlier.
+- **stderr discipline.** The detector is pure and writes nothing; diagnostics on
+  the surrounding path go to stderr only, never leaking into the dispatch channel.
+
 ## Rendering
 
 `renderAlerts(findings)` renders one line per finding, **most-severe first**
@@ -116,7 +166,14 @@ top 5** (`MAX_FINDINGS`, matching the review dispatch's fixed five):
   (dir `0700`, file `0600`), same sensitivity class as the monitor state —
   and the modes are re-enforced on every append (creation-time modes alone
   never tighten a pre-existing dir/file; `bin/audit-log.sh` keeps the same
-  guarantee the same way).
+  guarantee the same way). The resolved log path is **containment-checked**
+  before any write (issue #206/#244): a path escaping the data-dir root is
+  refused unwritten — nothing is created on it — exactly as
+  `lib/monitor/state.mjs` guards its write seam. Because `dispatchAlerts` is
+  best-effort, a refused path degrades to stderr + no log write (the pass
+  survives), never a crash. The config read (`loadAlertsConfig`) is guarded
+  the same way — an escaping `YNAB_CONFIG_FILE` throws a structured
+  `containment` error before the read, mirroring `confidence.mjs`.
 - **Notification is best-effort by contract.** Off-darwin it is skipped; a
   missing or failing `osascript` returns `false` and logs to stderr — a failed
   notification **never** raises an exception or crashes the monitor pass.
@@ -130,7 +187,10 @@ top 5** (`MAX_FINDINGS`, matching the review dispatch's fixed five):
 
 Mirroring the monitor state store: `options.configFile` → env
 `YNAB_CONFIG_FILE` for the config read, and `options.logPath` → env
-`YNAB_ALERT_LOG_FILE` → `YNAB_DATA_DIR` for the alert log. The notification
-path stubs via `options.platform` / `options.spawnImpl`, so the suite passes on
-non-darwin CI. See
+`YNAB_ALERT_LOG_FILE` → `YNAB_DATA_DIR` for the alert log. `options.dataDir` →
+env `YNAB_DATA_DIR` names the **containment root** both paths must resolve
+under (an explicit `configFile`/`logPath` never vouches for itself), so a test
+pointing at a temp file passes `dataDir` alongside it — exactly as the
+confidence/state suites do. The notification path stubs via `options.platform`
+/ `options.spawnImpl`, so the suite passes on non-darwin CI. See
 [`tests/unit/monitor-alerts.test.mjs`](../tests/unit/monitor-alerts.test.mjs).
