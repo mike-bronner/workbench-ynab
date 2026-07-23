@@ -62,6 +62,30 @@ test_uses_config_loader() {
     "command sources the config loader"
 }
 
+# Step 0 — acquires the GAP-9 single-flight lock before reading the proposal and
+# releases it on exit, and documents that the lock has NO bearing on approval (#51).
+test_acquires_single_flight_lock() {
+  local body; body="$(cat "$CMD")"
+  assert_contains "$body" 'bin/apply-lock.sh" acquire apply' \
+    "Step 0 acquires the single-flight lock as 'apply'"
+  assert_contains "$body" 'bin/apply-lock.sh" release' \
+    "the command releases the lock on exit"
+  # AC #6 must be stated at the consumer: the lock is a concurrency guard, not approval.
+  assert_contains "$body" "concurrency guard" \
+    "the command documents the lock as a concurrency guard only"
+  # The acquire must come BEFORE the proposal is read — otherwise a concurrent review
+  # could regenerate the proposal between the read and the lock.
+  local acquire_line proposal_line
+  acquire_line="$(grep -nF 'apply-lock.sh" acquire apply' "$CMD" | head -1 | cut -d: -f1)"
+  # -F fixed-string: the pattern matches the literal '$PROPOSAL_DIR' text in the
+  # command file, so the '$' is intentionally not a shell expansion here.
+  # shellcheck disable=SC2016
+  proposal_line="$(grep -nF 'ls -t "$PROPOSAL_DIR"' "$CMD" | head -1 | cut -d: -f1)"
+  if [ -z "$acquire_line" ] || [ -z "$proposal_line" ] || [ "$acquire_line" -ge "$proposal_line" ]; then
+    fail "the lock must be acquired before the proposal is read (acquire@${acquire_line:-none}, read@${proposal_line:-none})"
+  fi
+}
+
 # Step 1b — idempotency guard cross-references the M4-3 audit log.
 test_idempotency_via_audit_log() {
   local body; body="$(cat "$CMD")"

@@ -42,6 +42,7 @@ Tool prefix:    mcp__plugin_workbench-ynab_ynab__   (NB: plugin-namespaced — t
 Executor:       skills/apply-executor.md            (assets/apply-executor.js, M4-4)
 Guardrail:      skills/write-safety-guardrail.md    (assets/write-safety-guardrail.js, M4-2)
 Audit log:      bin/audit-log.sh                    (M4-3)
+Single-flight:  bin/apply-lock.sh                   (GAP-9 lock; $CONFIG_DIR/apply.lock)
 Contract:       assets/changeset-contract.md        (M4-1)
 ```
 
@@ -57,6 +58,38 @@ ACTIVE_BUDGET_ID="$(_cfg '.budget.id')"
 PROPOSAL_DIR="$(_cfg '.apply.proposal_path')"
 PROPOSAL_DIR="${PROPOSAL_DIR:-$CONFIG_DIR/proposals}"   # caller's default
 ```
+
+## Step 0 — Acquire the single-flight lock (GAP-9)
+
+Before reading the proposal, take the **single-flight concurrency lock** so a scheduled
+review (M2-11) — or a second interactive apply — cannot regenerate or double-apply the
+same proposal underneath this run. The lock lives at `$CONFIG_DIR/apply.lock` (the plugin
+data dir, **never** `/tmp`), records this run's pid + timestamp + `apply`, and is **purely
+a concurrency guard — it has zero bearing on the approval gate below** (a held lock
+authorizes nothing; approval is the Step 4 three-options prompt plus the guardrail, neither
+of which reads this lock — see `bin/apply-lock.sh`).
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/bin/apply-lock.sh" acquire apply || exit 1
+```
+
+If another apply or review already holds the lock, `acquire` prints
+`an apply/review is already running — try again once it completes` and exits non-zero —
+this command then stops without touching the proposal. A lock left by a **crashed** prior
+run (its pid no longer alive) is detected as stale and recovered automatically, so a crash
+never deadlocks the next run.
+
+**Release the lock on EVERY exit path** — normal completion (the final summary below), a
+clean "nothing to apply" exit, an abort, or any error. Run the release once the run is
+finishing, before returning:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/bin/apply-lock.sh" release
+```
+
+Because each `exit` in the steps below (no proposal, invalid proposal, everything already
+applied, auth failure) ends the run, pair each with a `release` first. The release is
+idempotent and ownership-checked, so calling it when the lock is already gone is harmless.
 
 ## Step 1 — Load the pending change-set
 
@@ -81,6 +114,7 @@ PROPOSAL="$(ls -t "$PROPOSAL_DIR"/*.json 2>/dev/null | head -1)"
 if [ -z "$PROPOSAL" ]; then
   echo "✅ No pending proposal — nothing to apply."
   echo "   The weekly review writes a change-set to $PROPOSAL_DIR; run it first."
+  bash "${CLAUDE_PLUGIN_ROOT}/bin/apply-lock.sh" release   # release the GAP-9 lock on exit
   exit 0
 fi
 echo "📄 Pending proposal: $PROPOSAL"
@@ -93,7 +127,9 @@ gives the human a clear message instead of a raw abort):
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/assets/validate-changeset.js" "$PROPOSAL" >/dev/null \
-  || { echo "❌ The pending proposal is not a valid change-set — refusing to proceed." >&2; exit 1; }
+  || { echo "❌ The pending proposal is not a valid change-set — refusing to proceed." >&2
+       bash "${CLAUDE_PLUGIN_ROOT}/bin/apply-lock.sh" release   # release the GAP-9 lock on abort
+       exit 1; }
 ```
 
 The envelope shape (provenance + ordered `operations[]`, each with `id`, `type`,
@@ -360,7 +396,11 @@ re-running after the fix resumes safely via the idempotency guard (Step 1b).
 
 After resolving a batch (applied / subset / rejected), **loop to the next batch** and
 repeat Steps 3–5 (the guardrail gate runs first, as Step 4.0). When every batch is
-resolved, exit.
+resolved, release the single-flight lock (Step 0) and exit:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/bin/apply-lock.sh" release   # release the GAP-9 lock
+```
 
 ## Final summary
 
@@ -391,6 +431,11 @@ Print a clean summary across all batches:
   receives **only** the token via `bin/launcher.sh` — it never reads `config.json`.
 - **Money is always milliunits.** Every monetary value flows through verbatim as a raw
   integer; only the **display** divides by 1000. The audit log keeps the exact integer.
+- **Single-flight, never an approval channel.** Step 0 takes `bin/apply-lock.sh` so a
+  scheduled review or a second apply can't run concurrently against the same proposal;
+  it is released on every exit path. The lock is a **concurrency guard only** — it
+  carries no approval state and neither the three-options gate nor the guardrail reads
+  it. Holding it authorizes no write (GAP-9 / #51).
 - **One approval = one batch = one apply.** Approval is per-batch; re-running after a
   partial apply detects already-applied ops via the audit log (Step 1b) and never
   re-applies them.
