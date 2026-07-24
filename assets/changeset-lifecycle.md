@@ -366,9 +366,16 @@ write; each interacts with it as follows:
   stays consistent.
 - **GAP-11 (idempotent resume).** Reads status to find the resumable candidate
   (`partial`, still in `proposals/`) and reads the audit log (via `audit_run_id`)
-  to skip already-`applied` ops — exactly the existing idempotency guard
-  (`/ynab-apply` Step 1b). When a resume completes the last op, it writes the
-  `partial → applied` transition and triggers the §6 move.
+  to locate which ops a prior run reached. The audit log locates the ops; it does
+  **not** decide them — under the GAP-11 design
+  ([`docs/write-back-idempotency.md`](../docs/write-back-idempotency.md)) every op
+  is verified against **live YNAB state** before it is skipped or dispatched, so a
+  record claiming `applied` that the ledger contradicts is flagged for review
+  rather than silently skipped. This supersedes the audit-only filter that ships
+  today as `/ynab-apply` Step 1b, which remains in place — correct for the
+  clean-prefix case — until the resume implementation lands. When a resume
+  completes the last op, it writes the `partial → applied` transition and triggers
+  the §6 move.
 
 The single source of per-op truth is the **audit log** (`result_status` per op);
 the single source of per-proposal truth is the **sidecar** (`status`). Neither

@@ -45,6 +45,54 @@ For a money-adjacent system the exactly-once-vs-at-least-once question these
 raise must be **designed, not left implicit** in a single acceptance-criterion
 bullet. This document does that.
 
+## What ships today — `/ynab-apply` Step 1b — and what this design supersedes
+
+Resume is not hypothetical. A resume path **ships today**:
+[`/ynab-apply`](../commands/ynab-apply.md) **Step 1b — Idempotency guard**. It
+solves state (1) — the clean prefix — and nothing else. Step 1b reads the audit
+records for the proposal's `run_id`, collects the `operation_id`s carrying a
+non-dry-run `result_status: applied`, and partitions those ops out of the set
+**before the executor is ever invoked**:
+
+```bash
+APPLIED_IDS ← audit-log.sh run "$RUN_ID" \
+  | jq 'select(.dry_run == false and .result_status == "applied") | .operation_id'
+```
+
+Because that partition happens ahead of the executor, the executor's
+`readLiveState` / `isStale` drift seam
+([`assets/apply-executor.js`](../assets/apply-executor.js) `prepareOp`) **never
+runs for an op the log already calls `applied`** — and when *every* op is
+recorded `applied`, Step 1b short-circuits the entire run ("Everything in this
+proposal is already applied — nothing to do") with **zero live YNAB calls**.
+
+**That is audit-only idempotency, and this design supersedes it.** Trusting
+`result_status` as the sole verdict is precisely the failure mode #48 exists to
+close: it is correct for the clean prefix and silently wrong for interleavings A
+and B, because a record saying `applied` is *evidence that a mutation was
+attempted*, never proof of the ledger's current contents. Concretely:
+
+| | Step 1b as shipped | This design |
+|---|---|---|
+| Verdict source | audit `result_status` alone | **live YNAB state**, audit as corroborating evidence |
+| Ops skipped with no live read | every op recorded `applied` | none — every op is live-verified before skip or dispatch |
+| Interleaving A (record says `applied`, ledger disagrees) | silently skipped | flagged for manual review, never re-applied |
+| Interleaving B (ledger changed, no record) | re-dispatched blind | detected, skipped, trail backfilled + warned |
+| Whole-proposal short-circuit | exits with zero live calls | still exits early — but only after every op is live-confirmed |
+
+The audit log keeps exactly the role it has today: it tells resume **where a run
+got to**, and therefore where to look. What changes is that it no longer gets the
+final word.
+
+**This document changes no shipped behavior on its own.** It is the design the
+resume implementation must build to; Step 1b's audit-only filter is superseded
+*when that implementation lands*, not before, and until then remains correct for
+the clean-prefix case it was written for. Two companion edits ship in this same
+change so the tree carries **one** definition of GAP-11 rather than two:
+[`assets/changeset-lifecycle.md`](../assets/changeset-lifecycle.md) §9, which
+previously equated GAP-11 with "exactly the existing idempotency guard", and a
+forward pointer in Step 1b itself.
+
 ## Consistency model — at-least-once-with-detection
 
 **The system targets at-least-once-with-detection, not exactly-once.** Exactly-once
@@ -121,37 +169,109 @@ UUID:
 
 ```
 op.id = "op-" + base32_lower( SHA256(
-            source            ⧉    // proposal id — the review run id (envelope.source)
-            op_index          ⧉    // 0-based position in the ordered operations[] array
-            op.type           ⧉    // categorize | allocate | delete_duplicate | reconcile
-            target_entity_id  ⧉    // transaction_id | category_id(+month) | account_id
-            canonical_json(after) // the intended-change hash
-        )[0:16 bytes] )            // 128 bits, ⧉ = 0x1F unit separator
+            source                              ⧉  // proposal id — the review run id (envelope.source)
+            op_index                            ⧉  // 0-based position in the ordered operations[] array
+            op.type                             ⧉  // categorize | allocate | delete_duplicate | reconcile
+            target_entity_id                    ⧉  // transaction_id | category_id(+month) | account_id
+            canonical_json(intended_change(op))     // the intended-change digest
+        )[0:16 bytes] )                             // 128 bits, ⧉ = 0x1F unit separator
 ```
 
-The four components are exactly those the AC names: **proposal id + op index +
-target entity id + intended-change hash**.
+**Five** fields are hashed. Four are exactly those the AC names — **proposal id
+(`source`) + op index + target entity id + intended-change digest**. The fifth,
+`op.type`, is a **deliberate addition beyond the AC**, and it is there for a
+specific reason: `intended_change(op)` below is a *per-type* projection, so the
+digest alone does not say which projection produced it. Hashing `op.type`
+alongside it binds the digest to its own interpretation — changing an op's `type`
+in place changes the key even if the projected fields happen to serialize
+identically. It adds nothing to collision-resistance (`op_index` and `source`
+already carry that, below); it is there to keep the digest self-describing.
+
+### `intended_change(op)` — what "the intended change" actually is
+
+The intended-change digest cannot simply be `canonical_json(after)`, because for
+two of the four op types `after` does not carry the op's payload:
+
+- **`delete_duplicate`** — `after` is schema-pinned to the constant
+  `{"deleted": true}` ([`assets/changeset-schema.json`](../assets/changeset-schema.json),
+  `deleteDuplicateOp.after.deleted` is a `const`), so it contributes **zero
+  entropy**. The op's real payload is the victim (already hashed as
+  `target_entity_id`) plus the **surviving twin**, which lives in the *top-level*
+  `twin` object.
+- **`reconcile`** — the transactions to mark cleared live in the *top-level*
+  `transaction_ids` array (`reconcileOp.transaction_ids`), not inside `after`.
+
+So the digest hashes a **per-type projection** of the op's mutation-determining
+fields:
+
+| Op type | `intended_change(op)` | Why |
+|---|---|---|
+| `categorize` | `{ after }` | `after.category_id` is the whole intent |
+| `allocate` | `{ after, month }` | `after.budgeted` is scoped to a specific budget `month` |
+| `delete_duplicate` | `{ after, twin_id: op.twin.transaction_id }` | `after` is a constant; the twin is the pairing evidence that makes the delete meaningful |
+| `reconcile` | `{ after, transaction_ids: sorted(op.transaction_ids ?? []) }` | the cleared-marking set is top-level, not in `after` |
+
+`transaction_ids` is **sorted** before hashing so a pure reordering — the same op
+semantically — yields the same key.
+
+Deliberately **not** hashed: `before` (a snapshot of the world, not a statement of
+intent — it can legitimately differ between two generations of the same proposal),
+and `rationale` / `risk` (human-facing metadata that does not change what the op
+does to the ledger).
+
+### `canonical_json` — pinned to RFC 8785 (JCS)
+
+Cross-run key stability rests entirely on `canonical_json` emitting the **same
+bytes for the same value on every run**, so the scheme is pinned here rather than
+left to the implementer: `canonical_json` is **RFC 8785, the JSON Canonicalization
+Scheme (JCS)**. Its relevant guarantees are object keys sorted by UTF-16 code
+unit, no insignificant whitespace, minimal string escaping, ECMAScript
+`Number::toString` number serialization, and UTF-8 output.
+
+Every value in the projections above is an integer (milliunits), a string id, a
+`YYYY-MM-DD` month, a boolean, or an array of string ids — **no floating-point
+values** — so JCS number formatting is exact here and its awkward edges (exponent
+form, `-0`) never arise.
+
+**The stability proof below is conditional on this pin.** The producer (M4-10)
+MUST use an RFC 8785 implementation; a hand-rolled `JSON.stringify` with ad-hoc
+key sorting is **not** a substitute — it leaves number formatting, escaping, and
+key-order rules unspecified, which is exactly what makes two runs disagree.
 
 ### Proof of stability and collision-resistance
 
-- **Stable across runs of the same proposal.** All four inputs are frozen in the
+- **Stable across runs of the same proposal.** All five inputs are frozen in the
   proposal file the moment it is produced: `source` is the envelope's provenance,
-  `op_index` is the array position, `target_entity_id` and `after` are the op's
-  own fields. A resume reads the *same* frozen file, so it recomputes the *same*
-  key. Regenerating the proposal from the same review inputs yields the same four
-  inputs and therefore the same key — no dependence on wall-clock time or a
-  random seed.
+  `op_index` is the array position, and `op.type`, `target_entity_id` and every
+  field `intended_change(op)` projects are the op's own frozen fields. A resume
+  reads the *same* frozen file, so it recomputes the *same* key. Regenerating the
+  proposal from the same review inputs yields the same five inputs and therefore
+  the same key — no dependence on wall-clock time or a random seed (and, because
+  `before` is excluded from the projection, no dependence on when the ledger was
+  snapshotted either).
 - **Collision-resistant within a change-set.** `op_index` is unique per proposal,
   so no two ops in one change-set can share a key even before the hash — the
   index alone disambiguates. `source` extends that uniqueness *across* proposals
   (two proposals never share a `source`; see the lifecycle's `source` disambiguator
   in [`assets/changeset-lifecycle.md`](../assets/changeset-lifecycle.md)).
-- **Tamper-evident.** Folding `target_entity_id` and `canonical_json(after)` into
-  the hash binds the key to *what the op does*. If a proposal file is edited in
-  place — same slot, different target or different intended change — the key
-  changes, so resume treats it as a **new** op and refuses to falsely skip it as
-  "already applied." The unit-separator (`0x1F`) between fields prevents
-  concatenation ambiguity (e.g. `"a" ‖ "bc"` never hashing equal to `"ab" ‖ "c"`).
+- **Tamper-evident — over the mutation-determining fields, and only those.**
+  Folding `target_entity_id` and `canonical_json(intended_change(op))` into the
+  hash binds the key to *what the op does to the ledger*. An in-place edit of a
+  proposal file that changes the op's effect — a different target, a different
+  `after`, a different surviving `twin` on a delete, a different `transaction_ids`
+  set on a reconcile — changes the key, so resume treats it as a **new** op and
+  refuses to falsely skip it as "already applied."
+
+  This is scoped, not absolute: editing `before`, `rationale`, or `risk` in place
+  leaves the key unchanged **by design**, since none of them alters the mutation.
+  The per-type projection exists precisely because the naive
+  `canonical_json(after)` would *not* have this property — a `delete_duplicate`
+  whose `twin` was swapped in place is a materially different and more dangerous
+  op, and under an `after`-only digest (`after` being the constant
+  `{"deleted": true}`) its key would not have moved at all.
+
+  The unit-separator (`0x1F`) between fields prevents concatenation ambiguity
+  (e.g. `"a" ‖ "bc"` never hashing equal to `"ab" ‖ "c"`).
 - SHA-256 truncated to 128 bits keeps the second-preimage/collision margin far
   above the handful of ops in any real change-set.
 
@@ -175,9 +295,11 @@ The `run_id := source` identity is stated in
 [`assets/changeset-lifecycle.md`](../assets/changeset-lifecycle.md) (the sidecar's
 `audit_run_id` "Equals `source`") and enforced in the executor's `recordAudit`
 (`run_id: changeset.source`). The `applied_state` / `error_class` pair is called
-out in [`docs/audit-log.md`](./audit-log.md) as *"the substrate the
-idempotent-resume design (#48) reads to reason about a failed op without
-re-querying."* This document is that reader.
+out in [`docs/audit-log.md`](./audit-log.md) as the substrate this design reads to
+decide **which recovery path a failed op takes** — `not_applied` → simply
+un-applied, dispatch normally; `unknown` → interleaving A, resolve against live
+state. This document is that reader; the fields route the decision, they never
+replace the live-state check.
 
 **One additive field is proposed** for interleaving B (below): a boolean
 `backfilled` (default absent/`false`), set only on a record resume reconstructs
@@ -195,15 +317,30 @@ the op's live state and the design compares it to **both** the `before` and the
 resume extends the comparison to `after`). The read tools, by op type, are the
 same logical read verbs the drift check already uses — the concrete namespaced
 names live in the single-source-of-truth capability map
-([`docs/mcp-capability-map.md`](./mcp-capability-map.md)), never inlined here:
+([`docs/mcp-capability-map.md`](./mcp-capability-map.md)), never inlined here
+(with the one gap noted under the table):
 
-| Op type | Read verb (see capability map) | Field compared | "Already applied" when live == |
+| Op type | Logical read verb | Field compared | "Already applied" when live == |
 |---|---|---|---|
 | `categorize` | `get_transaction` | `category_id` | `after.category_id` |
 | `allocate` | `get_month` (category under `month`) | that category's `budgeted` | `after.budgeted` |
 | `delete_duplicate` | `get_transaction` (the victim) | existence / `deleted` flag | victim not-found or `deleted: true` |
-| `reconcile` (mark cleared) | `list_transactions` | each listed txn's `cleared` | `after.cleared` on every `transaction_id` |
-| `reconcile` (reconcile account) | `list_accounts` | account `reconciled_balance` (+ `cleared_balance`) | `after.reconciled_balance` |
+| `reconcile` (mark cleared) | `get_transaction` / `list_transactions` | each listed txn's `cleared` | `after.cleared` on every `transaction_id` |
+| `reconcile` (reconcile account) | `get_account` | account `reconciled_balance` (+ `cleared_balance`) | `after.reconciled_balance` |
+
+Each row names the verb the corresponding write path's `readLiveState` already
+resolves: `get_month` for allocate ([`skills/allocate-handler.md`](../skills/allocate-handler.md)),
+and — for reconcile — `get_account` at account level with
+`get_transaction` / `list_transactions` for the mark-cleared ids
+([`skills/reconcile-write-path.md`](../skills/reconcile-write-path.md), the
+`readLiveState` sub-action shapes).
+
+> **Capability-map gap.** `get_account` is currently **missing** from the
+> capability map and from the machine-referenced tool SSoT, even though the
+> tested reconcile drift path uses it. Tracked as **#247** — until it lands,
+> `get_account` is the one verb in the table above that the map cannot yet
+> resolve to a namespaced name. Cite it from `skills/reconcile-write-path.md`
+> in the meantime; resolving it belongs to #247, not here.
 
 ### The unified resume decision
 
@@ -363,6 +500,13 @@ The first run completed all three and recorded `applied` for each, then the
 
 **Result: zero mutations, ledger unchanged, batch marked complete.** The naïve
 "re-apply everything" bug is avoided entirely.
+
+This walkthrough is the **designed** behavior, and it is where the difference
+from the shipped Step 1b is easiest to see: run the same scenario through Step 1b
+today and all three ops are filtered out on `result_status` alone, short-circuiting
+with **zero** live reads. The end state is identical *here* — because the audit
+log happens to be telling the truth. Walkthroughs (b) and (c) are the cases where
+it isn't, and there the three live reads above are the whole point.
 
 ### (b) Interleaving A — op-B errored mid-mutation, unconfirmable
 
