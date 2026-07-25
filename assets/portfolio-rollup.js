@@ -17,6 +17,16 @@
  *   milliunits across budgets, and no total is ever re-divided downstream — the
  *   values this module returns are already in currency units.
  *
+ * …WHICH IS WHY RENDERING GOES THROUGH `formatRollupMoney`, NOT `formatMoney`.
+ *   The tree-wide money helper (assets/format-money.js) takes RAW MILLIUNITS and
+ *   divides internally — "only DISPLAY divides" is its contract, and every other
+ *   caller in the repo still holds milliunits at render time. This module's
+ *   outputs do not: they were already converted at intake. Handing one to
+ *   `formatMoney` divides a second time and renders every figure 1000× too small.
+ *   `formatRollupMoney` IS that boundary — the single place the two conventions
+ *   meet — so the skill never has to remember a ×1000 and no `* 1000` literal
+ *   ever appears in prose. Call it for every rendered rollup amount.
+ *
  * NEVER SUM ACROSS CURRENCIES.
  *   skills/review/ynab-review.md §5 is binding: mixed-currency budgets are
  *   reported in their own currency, never merged into one figure. Totals are
@@ -40,7 +50,8 @@
  * under the plain `node --test` suite with NO node_modules present.
  */
 
-const { overallHealthScore } = require('./review-guards.js');
+const { overallHealthScore, NA_DISPLAY } = require('./review-guards.js');
+const { formatMoney } = require('./format-money.js');
 
 /** YNAB's fixed milliunit scale: 1000 milliunits = 1 currency unit. */
 const MILLIUNITS_PER_UNIT = 1000;
@@ -108,6 +119,36 @@ const asArray = (v) => (Array.isArray(v) ? v : []);
 function milliToCurrency(milliunits) {
   if (!Number.isFinite(milliunits)) return null;
   return milliunits / MILLIUNITS_PER_UNIT;
+}
+
+/**
+ * THE DISPLAY BOUNDARY — render any amount this module returns.
+ *
+ * Takes an amount in CURRENCY UNITS (what `aggregatePortfolio` /
+ * `aggregateScheduleC` return) and produces the display string, converting back
+ * to the milliunits `formatMoney` expects. It is the inverse of the intake
+ * conversion, applied once, in code rather than in prose: renderers never write
+ * a `* 1000`, and `formatMoney` is never called directly with a rollup total
+ * (which would divide a second time and render every figure 1000× too small).
+ *
+ * FAILS CLOSED ON THE SENTINEL. `null` — the module's "no data" value — renders
+ * as `"n/a"`, NOT as `formatMoney`'s non-finite fallback of `$0.00`. A masking
+ * zero would read as "this budget has nothing" when the truth is "nothing was
+ * measured"; the `n/a` string keeps that distinction visible and matches the
+ * review-guards display convention.
+ *
+ * Rounds to whole milliunits before formatting, honouring `formatMoney`'s
+ * "raw integer milliunits" contract: the float produced by ÷1000 then ×1000 can
+ * land a hair off an integer, and `formatMoney` documents integer input.
+ *
+ * @param {number|null} amount an amount in currency units, or the `null` sentinel.
+ * @param {object} [currencyFormat] that currency's YNAB `currency_format`
+ *   (`currencyFormats[iso]`); USD default when omitted.
+ * @returns {string} the formatted amount, or `"n/a"`.
+ */
+function formatRollupMoney(amount, currencyFormat) {
+  if (!Number.isFinite(amount)) return NA_DISPLAY;
+  return formatMoney(Math.round(amount * MILLIUNITS_PER_UNIT), currencyFormat);
 }
 
 /**
@@ -180,12 +221,17 @@ function isoCodeOf(snapshot) {
   return cf && isNonEmptyString(cf.iso_code) ? cf.iso_code.trim().toUpperCase() : 'UNKNOWN';
 }
 
-/** Add a converted amount into an accumulator, ignoring the `null` sentinel. */
+/**
+ * Add a converted amount into an accumulator, ignoring the `null` sentinel — an
+ * absent amount leaves the accumulator untouched, so a bucket that received no
+ * data at all stays at `null` (its "n/a") rather than falling to a masking `0`.
+ * That surviving `null` is what makes each bucket its own per-currency
+ * data-presence flag; no caller needs a separate accumulator to track it.
+ */
 function accumulate(bucket, key, milliunits) {
   const value = milliToCurrency(milliunits);
-  if (value === null) return false;
+  if (value === null) return;
   bucket[key] = (bucket[key] === null ? 0 : bucket[key]) + value;
-  return true;
 }
 
 /**
@@ -226,7 +272,6 @@ function aggregatePortfolio(snapshots) {
   const currencyFormats = Object.create(null);
   const perBudget = [];
   const notes = [];
-  let anyReadyToAssign = false;
 
   for (const snapshot of list) {
     const iso = isoCodeOf(snapshot);
@@ -240,7 +285,7 @@ function aggregatePortfolio(snapshots) {
     accumulate(bucket, 'netWorth', snapshot.netWorthMilli);
     accumulate(bucket, 'income', snapshot.incomeMilli);
     accumulate(bucket, 'spending', snapshot.spendingMilli);
-    if (accumulate(bucket, 'readyToAssign', snapshot.readyToAssignMilli)) anyReadyToAssign = true;
+    accumulate(bucket, 'readyToAssign', snapshot.readyToAssignMilli);
 
     perBudget.push({
       label: snapshot.label,
@@ -263,8 +308,18 @@ function aggregatePortfolio(snapshots) {
   const currencies = Object.keys(totals).sort();
   const mixedCurrency = currencies.length > 1;
   if (mixedCurrency) notes.push(ROLLUP_NOTES.MIXED_CURRENCY);
+
+  // Ready-to-Assign absence is judged PER CURRENCY, not globally. Each bucket's
+  // `readyToAssign` sits at the `null` sentinel exactly when no budget in THAT
+  // currency contributed the data, so the bucket IS the per-currency flag — no
+  // separate accumulator can drift from it. A global "did any budget anywhere
+  // report RTA" would leave one currency's `n/a` column unexplained whenever
+  // another currency happened to have data. The note fires when ANY currency
+  // lacks it; the renderer reads `totals[iso].readyToAssign === null` per column
+  // to say which.
+  const someCurrencyLacksReadyToAssign = currencies.some((iso) => totals[iso].readyToAssign === null);
   if (list.length === 0) notes.push(ROLLUP_NOTES.NO_BUDGETS);
-  else if (!anyReadyToAssign) notes.push(ROLLUP_NOTES.NO_READY_TO_ASSIGN);
+  else if (someCurrencyLacksReadyToAssign) notes.push(ROLLUP_NOTES.NO_READY_TO_ASSIGN);
 
   const budgetScores = perBudget.map((b) => b.healthScore).filter((v) => Number.isFinite(v));
   const healthScore = budgetScores.length === 0
@@ -383,6 +438,7 @@ module.exports = {
   EXCLUSION_REASONS,
   ROLLUP_NOTES,
   milliToCurrency,
+  formatRollupMoney,
   normalizeRole,
   selectBudgets,
   businessBudgets,

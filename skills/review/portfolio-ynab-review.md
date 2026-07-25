@@ -147,9 +147,22 @@ Three rules the module enforces and the rendering must respect:
 - **Currencies are never merged.** Totals are keyed by ISO code. When
   `mixedCurrency` is true, render **per-currency subtotals** — one KPI row per
   currency — and carry the `mixed_currency` note; never present a single summed
-  figure across currencies. Format each with
-  [`../../assets/format-money.js`](../../assets/format-money.js) `formatMoney` and
-  that currency's own `currencyFormats[iso]`.
+  figure across currencies. Format each with **`formatRollupMoney(amount,
+  currencyFormats[iso])`** from the same module — see the rule below.
+- **Render every amount with `formatRollupMoney`, never `formatMoney` directly.**
+  The two helpers take **different units**, and mixing them up renders every figure
+  1000× too small:
+  - `formatRollupMoney(amount, currencyFormat)` — from
+    [`../../assets/portfolio-rollup.js`](../../assets/portfolio-rollup.js) — takes
+    an amount in **currency units**, i.e. exactly what this module returns
+    (`totals[iso].netWorth`, `perBudget[].income`, `scheduleC.grossIncome`, …).
+    It also renders the `null` sentinel as `n/a` for you.
+  - `formatMoney` — from
+    [`../../assets/format-money.js`](../../assets/format-money.js) — takes **raw
+    milliunits** and divides by 1000 itself. It is the right helper for a
+    milliunit value straight off the API (`readyToAssignMilli` in a snapshot), and
+    the **wrong** one for anything the rollup returns. Never "fix" the units by
+    multiplying by 1000 at a call site — that is what `formatRollupMoney` is for.
 - **`null` is the n/a sentinel.** A `null` total or health score renders `n/a`; a
   `null` health score renders **without** a `role="meter"` gauge (a meter needs a
   numeric value), per the a11y contract in
@@ -204,8 +217,14 @@ The rollup **reuses the frozen template** — it does not get its own, and it ne
 regenerates chrome. Everything the AC asks for on the presentation side is a
 property of that template, inherited by construction:
 
-- the dark theme tokens (`--navy` `#1a1a2e`, `--teal` `#16a085`, the red
-  `#e74c3c`, `--amber` `#f39c12`) live in its `:root`;
+- the dark theme tokens — `--navy` `#1a1a2e`, `--teal` `#16a085`, `--coral` `#ef6e5e`, `--amber` `#f39c12` — live in its `:root`;
+  **the warning token is `--coral: #ef6e5e`. Do not use `#e74c3c`** — the issue's
+  AC names it, but the template does not contain it: it is the same hue family,
+  lightened in place to clear WCAG 2.1 AA contrast on the dark background (issue
+  #29) and pinned by `tests/unit/report-contrast.test.mjs`. Reference tokens as
+  `var(--coral)` rather than any hex literal; hardcoding `#e74c3c` would
+  reintroduce the contrast failure that fix removed. Rationale:
+  [`../../docs/portfolio-rollup.md`](../../docs/portfolio-rollup.md);
 - the **`@media print`** block — color-adjust, page-break rules, forced-open
   `<details>`, the running footer — is in the same file, so the prototype's
   missing-print-CSS bug **cannot** recur here as long as this skill fills the
@@ -233,7 +252,9 @@ is passed as the literal `no findings`.
 
 **Escape every YNAB string, and every formatted amount.** Budget labels come from
 config, but payee / category / account names — and the `currency_symbol` embedded
-in a `formatMoney` result — are untrusted external data. Route each through the
+in a `formatRollupMoney` / `formatMoney` result — are untrusted external data
+(`formatRollupMoney` delegates to `formatMoney`, which embeds the off-the-wire
+symbol and separators verbatim and does **not** pre-escape). Route each through the
 one shared escaper before it enters a fragment, exactly as the universal
 protocol's §8 requires:
 
@@ -278,6 +299,12 @@ below-five and zero-finding carve-outs.
 Carry every note into the summary: `mixed_currency`, `no_ready_to_assign`,
 `no_business_budget`, `tax_profile_error`, and one line per **excluded** budget
 from §1 with its reason.
+
+`no_ready_to_assign` is judged **per currency**: it fires when *any* currency's
+budgets supplied no Ready-to-Assign data, even if another currency did. Read
+`totals[iso].readyToAssign === null` to name which currency the note is about —
+that is the column rendering `n/a`, and an unexplained `n/a` is the thing this
+note exists to prevent.
 
 When any tax figure appears, include the canonical not-tax-advice tag on its own
 line between the findings and the report pointer, verbatim from

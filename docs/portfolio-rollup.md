@@ -55,6 +55,12 @@ per-budget breakdown that feeds the collapsible detail sections:
 | Cross-budget Ready-to-Assign | `totals[iso].readyToAssign` |
 | Unified health score | `healthScore` (0–100, or `null`) |
 
+**Ready-to-Assign absence is per currency.** `totals[iso].readyToAssign` stays at
+the `null` sentinel — rendering `n/a`, never a masking `0` — exactly when no budget
+in *that* currency supplied the data, and the `no_ready_to_assign` note fires when
+*any* currency lacks it. Judging it globally would leave one currency's `n/a`
+column unexplained whenever another currency happened to have the data.
+
 The **unified health score** is the mean of each budget's own 0–100 overall score
 (via `overallHealthScore` in [`../assets/review-guards.js`](../assets/review-guards.js)),
 so each budget counts once regardless of how many sections it could measure. A
@@ -68,6 +74,16 @@ budget is measurable the score is `null`, which renders `n/a` with **no**
 only division in the module, and every per-budget amount passes through it before
 it reaches a sum. Every figure the module returns is already in currency units —
 never re-divide one, never add a raw milliunit amount to one.
+
+Which is why rendering goes through **`formatRollupMoney(amount, currencyFormat)`**,
+the module's display boundary — *not* `formatMoney` directly. The tree-wide money
+helper takes **raw milliunits** and divides internally ("only DISPLAY divides"),
+but this module's outputs were already converted at intake; handing one straight
+to `formatMoney` divides a second time and renders every figure 1000× too small.
+`formatRollupMoney` converts back and formats in one step, so no call site ever
+writes a `* 1000`, and it renders the `null` sentinel as `n/a` rather than
+`formatMoney`'s non-finite fallback of `$0.00` — "nothing was measured" must not
+read as "there is nothing".
 
 **Currencies are never merged.** Totals are keyed by ISO code. When budgets
 disagree on currency, the rollup reports per-currency subtotals and the
@@ -113,7 +129,7 @@ renders a real Portfolio report and asserts the print block, the tokens, the KPI
 dashboard, and the collapsible per-budget sections survived into the HTML.
 
 > **Palette note.** The template's warning token is `--coral: #ef6e5e`, not the
-> prototype's `#e74c3c`: same hue family, darkened in place to clear WCAG 2.1 AA
+> prototype's `#e74c3c`: same hue family, lightened in place to clear WCAG 2.1 AA
 > contrast (issue #29) and pinned by `tests/unit/report-contrast.test.mjs`. The
 > rollup inherits the shipped token rather than reverting a gated a11y fix.
 

@@ -63,11 +63,67 @@ assert_absent_re() {
   if grep -qE -- "$2" "$FILE"; then no "$1: /$2/ unexpectedly matched in ${FILE##*/}"; else ok "$1"; fi
 }
 
-# assert_present_flat_re <desc> <ERE> — matched against the newline-flattened
-# file so a prose assertion survives markdown line-wrapping.
+# flatten — collapse a markdown stream to one whitespace-normalized line, so a
+# prose assertion survives line-wrapping. Newlines become spaces AND runs of
+# spaces are squeezed: a phrase wrapped mid-sentence leaves the newline plus the
+# next line's indent, so an un-squeezed flatten still fails a single-space
+# pattern — which silently pushed assertions onto whichever OTHER section of the
+# file happened to phrase it unwrapped.
+flatten() { tr '\n' ' ' | tr -s ' '; }
+
+# assert_present_flat_re <desc> <ERE> — matched against the flattened file.
 assert_present_flat_re() {
-  if tr '\n' ' ' < "$FILE" | grep -qiE -- "$2"; then ok "$1"; else no "$1: /$2/ did not match (flattened) in ${FILE##*/}"; fi
+  if flatten < "$FILE" | grep -qiE -- "$2"; then ok "$1"; else no "$1: /$2/ did not match (flattened) in ${FILE##*/}"; fi
 }
+
+# ── section-scoped assertions ────────────────────────────────────────────────
+# A whole-file grep for a word as common as `budget_id` or `spending` is
+# satisfied by unrelated prose anywhere in ~300 lines, so it cannot prove the
+# named step actually carries the behaviour. These scope the needle to ONE
+# numbered section, the stronger pattern this repo already uses in
+# tests/unit/fresh-install-test-doc.test.sh and tests/unit/pre-approval-globs.test.sh.
+#
+# skill_section <n> — emit the body of the skill's "## <n>. …" section, up to
+# (not including) the next "## " heading or "---" rule. Empty when the section is
+# absent or renumbered, so every scoped assertion below goes red the moment its
+# section is deleted, renamed, or its content moves elsewhere.
+skill_section() {
+  awk -v h="^## $1\\\\. " '
+    $0 ~ h { f = 1; next }
+    f && (/^## / || /^---$/) { exit }
+    f
+  ' "$SKILL_FILE"
+}
+
+# assert_in_section <n> <desc> <literal>
+assert_in_section() {
+  if skill_section "$1" | grep -qF -- "$3"; then ok "$2"; else no "$2: $(printf '%q' "$3") not found in skill §$1"; fi
+}
+
+# assert_in_section_re <n> <desc> <ERE, case-insensitive>
+assert_in_section_re() {
+  if skill_section "$1" | grep -qiE -- "$3"; then ok "$2"; else no "$2: /$3/ did not match in skill §$1"; fi
+}
+
+# assert_in_section_flat_re <n> <desc> <ERE> — section-scoped and newline-flattened,
+# so a prose assertion survives markdown line-wrapping.
+assert_in_section_flat_re() {
+  if skill_section "$1" | flatten | grep -qiE -- "$3"; then ok "$2"; else no "$2: /$3/ did not match (flattened) in skill §$1"; fi
+}
+
+# The scoping is only as good as the extractor: if skill_section silently
+# returned nothing, every assertion above it would pass vacuously. Prove it
+# extracts a real, bounded body before relying on it.
+if [ "$(skill_section 3 | wc -c)" -gt 200 ] && ! skill_section 3 | grep -q '^## '; then
+  ok "skill_section extracts a bounded section body"
+else
+  no "skill_section extracts a bounded section body (got $(skill_section 3 | wc -c) bytes)"
+fi
+if [ "$(skill_section 99 | wc -c)" -le 1 ]; then
+  ok "skill_section is empty for a section that does not exist"
+else
+  no "skill_section is empty for a section that does not exist"
+fi
 
 echo "portfolio-report.test.sh — the M6-7 cross-budget rollup surfaces"
 
@@ -131,29 +187,44 @@ assert_absent_re "command contains no literal budget UUID" \
   '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
 
 # ── AC#3 — namespaced, budget-scoped reads; reuse before re-fetch ─────────────
+# Scoped to §2 ("Get each budget's data"), the step that must actually carry the
+# fetch policy — `budget_id` and the tool prefix appear in prose elsewhere.
 echo "AC#3: per-budget reads are namespaced, scoped, and reused"
 FILE="$SKILL_FILE"
-assert_present "skill uses the namespaced tool family" "${PREFIX}"
-assert_present "skill defers concrete names to the tool SSoT" 'protocol/ynab-tools.md'
-assert_present_re "skill scopes each fetch to a budget_id" 'budget_id'
-assert_present_flat_re "skill reuses an existing per-budget output before re-fetching" \
+assert_in_section 2 "skill uses the namespaced tool family" "${PREFIX}"
+assert_in_section 2 "skill defers concrete names to the tool SSoT" 'protocol/ynab-tools.md'
+assert_in_section_re 2 "skill scopes each fetch to a budget_id" 'budget_id'
+assert_in_section_flat_re 2 "skill reuses an existing per-budget output before re-fetching" \
   "reuse .{0,60}before you re-fetch|Reuse an existing per-budget review output|Reuse before re-fetching"
 
 # ── AC#4 — all four rollup dimensions ─────────────────────────────────────────
+# Scoped to §3 ("Aggregate"), which carries the dimension→field table. Unscoped,
+# words this ordinary ("spending", "net worth") match incidental prose anywhere.
 echo "AC#4: the four aggregated dimensions"
-assert_present_re "skill covers combined net worth"        'net worth'
-assert_present_re "skill covers aggregate income"          'aggregate income'
-assert_present_re "skill covers spending"                  'spending'
-assert_present_re "skill covers cross-budget Ready-to-Assign" 'ready-to-assign'
-assert_present_re "skill covers the unified health score"  'unified health score'
+assert_in_section_re 3 "skill covers combined net worth"        'net worth'
+assert_in_section_re 3 "skill covers aggregate income"          'aggregate income'
+assert_in_section_re 3 "skill covers spending"                  'spending'
+assert_in_section_re 3 "skill covers cross-budget Ready-to-Assign" 'ready-to-assign'
+assert_in_section_re 3 "skill covers the unified health score"  'unified health score'
 
-# ── AC#5 — milliunits converted before aggregation ────────────────────────────
+# ── AC#5 — milliunits converted before aggregation, AND rendered at full scale ─
 echo "AC#5: milliunits are converted before aggregation"
-assert_present_re "skill states milliunits convert exactly once" \
+assert_in_section_re 3 "skill states milliunits convert exactly once" \
   'converted exactly once|milliunits are converted'
-assert_present_flat_re "skill forbids summing raw milliunits" \
+assert_in_section_flat_re 3 "skill forbids summing raw milliunits" \
   "[Nn]ever sum raw +milliunits|never add a raw +milliunit"
 assert_present "skill delegates the arithmetic to the tested module" 'portfolio-rollup.js'
+# THE RENDER BOUNDARY. The module's outputs are already in currency units, but
+# `formatMoney` takes RAW MILLIUNITS and divides again — instructing the plain
+# helper here renders every figure 1000× too small. The skill must name
+# `formatRollupMoney` (the boundary that converts back) and must say why plain
+# `formatMoney` is wrong for a rollup total; the arithmetic itself is proven in
+# tests/unit/portfolio-rollup.test.mjs, which renders a real total to a string.
+assert_in_section 3 "skill renders amounts through the units-correct boundary" 'formatRollupMoney'
+assert_in_section_flat_re 3 "skill warns that formatMoney takes raw milliunits, not rollup totals" \
+  "formatMoney.{0,120}raw.{0,20}milliunits"
+assert_in_section_flat_re 3 "skill forbids hand-scaling an amount at a call site" \
+  "never .{0,40}multiplying by 1000"
 
 # ── AC#6 — consolidated Schedule C into the M6-4 tracker ──────────────────────
 echo "AC#6: one consolidated YTD tax picture"
@@ -178,6 +249,35 @@ assert_present_re "skill spans all budgets in the dispatch" 'every.{0,20}budget|
 # Not a prose check: build a real report through the real writer and assert the
 # frozen template's guarantees survived into the output.
 echo "AC#7/#8: a rendered Portfolio report inherits the frozen template"
+
+# First, the SKILL's own token claims — cross-checked against the real template
+# rather than against a literal repeated here. The skill is the document an agent
+# reads at runtime, so a stale hex in it survives every check that only inspects
+# rendered output (the renderer never reads the skill). Every colour the skill
+# lists as a dark-theme token must actually exist in template.html.
+token_line="$(grep -m1 -- 'the dark theme tokens' "$SKILL_FILE" || true)"
+skill_tokens="$(printf '%s' "$token_line" | grep -oE '#[0-9a-fA-F]{6}' || true)"
+token_count="$(printf '%s' "$skill_tokens" | grep -c . || true)"
+if [ "$token_count" -eq 4 ]; then
+  ok "skill lists the four dark-theme tokens"
+else
+  no "skill lists the four dark-theme tokens (found $token_count)"
+fi
+for token in $skill_tokens; do
+  if grep -qF -- "$token" "$TEMPLATE"; then
+    ok "skill token $token really exists in the frozen template"
+  else
+    no "skill token $token is NOT in the frozen template — the skill would send an agent to a colour the template does not define"
+  fi
+done
+FILE="$SKILL_FILE"
+# …and the disambiguation itself: the AC names `#e74c3c`, the template ships
+# `--coral: #ef6e5e`. The skill must say so explicitly, or the next reader
+# "corrects" it back and silently reverts the issue #29 contrast fix.
+assert_in_section_flat_re 5 "skill names the shipped warning token" '--coral: #ef6e5e'
+assert_in_section_flat_re 5 "skill explicitly forbids the AC's stale #e74c3c" \
+  "do not use .{0,10}#e74c3c"
+
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -197,8 +297,12 @@ for i in "${!slot_args[@]}"; do
   case "${slot_args[i]}" in
     kpi-dashboard=*)
       slot_args[i]='kpi-dashboard=<div class="kpi-grid"><div class="kpi"><div class="kpi__label">Combined net worth</div><div class="kpi__value is-positive">$3,500.00</div></div></div>' ;;
+    # TWO budgets, deliberately: a rollup exists to combine several budgets, so a
+    # single-`<details>` fixture never exercises the multi-budget collapsible
+    # rendering that is the whole point — nor the print rule that must force
+    # EVERY collapsible open, not just the first.
     section-10-anomalies=*)
-      slot_args[i]='section-10-anomalies=<div class="card"><h2>Per-budget detail</h2><details><summary>Personal</summary><div class="details__body">detail</div></details></div>' ;;
+      slot_args[i]='section-10-anomalies=<div class="card"><h2>Per-budget detail</h2><details><summary>Personal</summary><div class="details__body">personal detail</div></details><details><summary>Business</summary><div class="details__body">business detail</div></details></div>' ;;
   esac
 done
 
@@ -230,7 +334,7 @@ if [ -f "$report_path" ]; then
   #
   # DELIBERATE DEVIATION on the warning token. The AC names the prototype's
   # `#e74c3c`, but the frozen template ships `--coral: #ef6e5e` — the SAME hue
-  # family, darkened in place to clear WCAG 2.1 AA contrast (issue #29) and
+  # family, lightened in place to clear WCAG 2.1 AA contrast (issue #29) and
   # pinned by tests/unit/report-contrast.test.mjs. Asserting the literal
   # `#e74c3c` here would require reverting an a11y fix the repo already gated,
   # so the rollup inherits the shipped token. The AC's real requirement — reuse
@@ -240,7 +344,20 @@ if [ -f "$report_path" ]; then
     assert_present "rendered HTML carries the dark-theme token $token" "$token"
   done
   assert_present "rendered HTML carries the KPI dashboard" 'class="kpi-grid"'
-  assert_present "rendered HTML carries a collapsible per-budget section" '<details><summary>Personal</summary>'
+  # Both budgets' collapsibles must survive assembly — the rollup's defining
+  # shape is one <details> PER budget, so assert the second one too and pin the
+  # count, which a single-fixture check could never do.
+  assert_present "rendered HTML carries the first budget's collapsible" '<details><summary>Personal</summary>'
+  assert_present "rendered HTML carries the second budget's collapsible" '<details><summary>Business</summary>'
+  # Match the fixture's exact `<details><summary>` shape, not a bare `<details>`:
+  # the template's own comments discuss `<details>/<summary>` in prose, which a
+  # looser count would tally as rendered collapsibles.
+  details_count="$(grep -oF -- '<details><summary>' "$report_path" | wc -l | tr -d ' ')"
+  if [ "$details_count" -eq 2 ]; then
+    ok "both per-budget collapsibles survive assembly (2 <details>)"
+  else
+    no "both per-budget collapsibles survive assembly (expected 2 <details>, got $details_count)"
+  fi
   assert_present "rendered HTML reports the Portfolio tier" 'Portfolio YNAB Review'
   # The disclaimer is hardcoded in the template, so the rollup inherits it too.
   assert_present_re "rendered HTML carries the not-tax-advice disclaimer" 'not tax advice'

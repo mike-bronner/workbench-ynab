@@ -25,6 +25,7 @@ const {
   EXCLUSION_REASONS,
   ROLLUP_NOTES,
   milliToCurrency,
+  formatRollupMoney,
   normalizeRole,
   selectBudgets,
   businessBudgets,
@@ -62,6 +63,78 @@ test('milliToCurrency returns the null sentinel for non-finite input, never NaN'
   for (const bad of [undefined, null, NaN, Infinity, -Infinity, '5000', {}]) {
     assert.equal(milliToCurrency(bad), null, `expected null for ${String(bad)}`);
   }
+});
+
+// --- the display boundary (AC#5) ---------------------------------------------
+//
+// These are the END-TO-END unit tests: a snapshot goes through the REAL
+// `aggregatePortfolio` and the resulting total through the REAL formatter, and
+// the assertion is the rendered STRING. Asserting the number alone cannot catch
+// a units mismatch at the render step — a total of `3500` is correct, and
+// `$3.50` is what a second ÷1000 makes of it.
+
+test('a real aggregated total renders at full scale — not 1000× too small', () => {
+  // $3,500.00 arrives as 3_500_000 milliunits, converted once at intake.
+  const portfolio = aggregatePortfolio([snapshot({ netWorthMilli: 3_500_000 })]);
+  assert.equal(portfolio.totals.USD.netWorth, 3500, 'intake conversion happened exactly once');
+  assert.equal(
+    formatRollupMoney(portfolio.totals.USD.netWorth, portfolio.currencyFormats.USD),
+    '$3,500.00',
+    'a rollup total must render at its real magnitude',
+  );
+});
+
+test('every rendered rollup figure survives the round trip at full scale', () => {
+  const portfolio = aggregatePortfolio([
+    snapshot({
+      netWorthMilli: 3_500_000,
+      incomeMilli: 8_250_500,
+      spendingMilli: 6_100_000,
+      readyToAssignMilli: 425_750,
+    }),
+  ]);
+  const usd = portfolio.totals.USD;
+  const fmt = portfolio.currencyFormats.USD;
+  assert.equal(formatRollupMoney(usd.netWorth, fmt), '$3,500.00');
+  assert.equal(formatRollupMoney(usd.income, fmt), '$8,250.50');
+  assert.equal(formatRollupMoney(usd.spending, fmt), '$6,100.00');
+  assert.equal(formatRollupMoney(usd.netCashFlow, fmt), '$2,150.50');
+  assert.equal(formatRollupMoney(usd.readyToAssign, fmt), '$425.75');
+});
+
+test('formatRollupMoney renders a per-budget figure and a negative in full', () => {
+  const portfolio = aggregatePortfolio([snapshot({ netWorthMilli: -12_345_600 })]);
+  assert.equal(
+    formatRollupMoney(portfolio.perBudget[0].netWorth, portfolio.currencyFormats.USD),
+    '-$12,345.60',
+  );
+});
+
+test('formatRollupMoney honours the budget own currency format, not USD', () => {
+  const portfolio = aggregatePortfolio([
+    snapshot({ label: 'EU', currency_format: EUR, netWorthMilli: 2_000_000 }),
+  ]);
+  assert.equal(
+    formatRollupMoney(portfolio.totals.EUR.netWorth, portfolio.currencyFormats.EUR),
+    '2,000.00 €',
+  );
+});
+
+test('formatRollupMoney renders the null sentinel as n/a, never a masking $0.00', () => {
+  const portfolio = aggregatePortfolio([snapshot({ readyToAssignMilli: null })]);
+  assert.equal(portfolio.totals.USD.readyToAssign, null);
+  // "nothing was measured" must never render as "there is nothing".
+  assert.equal(formatRollupMoney(portfolio.totals.USD.readyToAssign, USD), 'n/a');
+  for (const bad of [undefined, NaN, Infinity, -Infinity, '3500', {}]) {
+    assert.equal(formatRollupMoney(bad, USD), 'n/a', `expected n/a for ${String(bad)}`);
+  }
+});
+
+test('formatRollupMoney rounds to whole milliunits before formatting', () => {
+  // ÷1000 then ×1000 can land a hair off an integer; formatMoney documents
+  // integer milliunits, so the boundary rounds rather than passing a float on.
+  assert.equal(formatRollupMoney(0.1 + 0.2, USD), '$0.30');
+  assert.equal(formatRollupMoney(1234.567, USD), '$1,234.57');
 });
 
 // --- budget selection (AC#2) -------------------------------------------------
@@ -233,6 +306,33 @@ test('aggregatePortfolio reports absent Ready-to-Assign as the n/a sentinel, not
 test('aggregatePortfolio reports a present zero Ready-to-Assign as data, not absence', () => {
   const result = aggregatePortfolio([snapshot({ readyToAssignMilli: 0 })]);
   assert.equal(result.totals.USD.readyToAssign, 0);
+  assert.ok(!result.notes.includes(ROLLUP_NOTES.NO_READY_TO_ASSIGN));
+});
+
+test('the no-Ready-to-Assign note is per currency: one currency having data does not silence another', () => {
+  // USD has RTA data, EUR does not. The EUR column renders `n/a`, so the note
+  // that EXPLAINS an `n/a` column must fire — a global "any budget anywhere had
+  // RTA" flag would suppress it and leave the EUR `n/a` unexplained.
+  const result = aggregatePortfolio([
+    snapshot({ label: 'US', readyToAssignMilli: 1_000_000 }),
+    snapshot({ label: 'EU', currency_format: EUR, readyToAssignMilli: null }),
+  ]);
+  assert.equal(result.totals.USD.readyToAssign, 1000);
+  assert.equal(result.totals.EUR.readyToAssign, null, 'the EUR bucket keeps the n/a sentinel');
+  assert.ok(result.notes.includes(ROLLUP_NOTES.MIXED_CURRENCY));
+  assert.ok(
+    result.notes.includes(ROLLUP_NOTES.NO_READY_TO_ASSIGN),
+    'a currency with no RTA data must carry the note even when another currency has it',
+  );
+});
+
+test('the no-Ready-to-Assign note stays silent when every currency has the data', () => {
+  const result = aggregatePortfolio([
+    snapshot({ label: 'US', readyToAssignMilli: 1_000_000 }),
+    snapshot({ label: 'EU', currency_format: EUR, readyToAssignMilli: 2_000_000 }),
+  ]);
+  assert.equal(result.totals.USD.readyToAssign, 1000);
+  assert.equal(result.totals.EUR.readyToAssign, 2000);
   assert.ok(!result.notes.includes(ROLLUP_NOTES.NO_READY_TO_ASSIGN));
 });
 
