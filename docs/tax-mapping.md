@@ -532,7 +532,11 @@ The flow:
 5. **Summarize** — `computeTaxSummary(profile, ytdData)` composes the report's
    running YTD tax summary (Schedule C P&L, itemized-vs-standard, the medical
    AGI floor, SE tax, next quarterly payment) from the M3-6 primitives, with
-   every rate and date coming from the resolved profile. The quarterly
+   every rate and date coming from the resolved profile. `ytdData` **must**
+   carry an explicit `asOfDate` (`'YYYY-MM-DD'`): the engine never reads the
+   host clock, and **throws** when the anchor is missing or malformed, so a
+   caller can't silently anchor the summary on the wrong day — or the wrong
+   tax year — near midnight or outside UTC (#240). The quarterly
    estimated-tax tracker ([`/ynab-tax`](../commands/ynab-tax.md),
    [`docs/estimated-tax-tracker.md`](estimated-tax-tracker.md)) consumes the
    same profile data.
