@@ -86,8 +86,20 @@ job_block() {
 # (issue #252), so a file-wide step_block spans from the assets job's checkout
 # into the release job's and would be satisfied by either one's
 # `persist-credentials: false` — green with the release job's deleted.
+#
+# ONE awk over the file, deliberately not `job_block ... | awk`: this suite runs
+# under `set -euo pipefail`, and an awk that `exit`s early closes the pipe on an
+# upstream awk still block-writing into it — SIGPIPE, 141, and pipefail fails
+# the whole test before a single assertion runs. Whether that fires depends on
+# buffering, so it passes locally and fails on the runner. No pipe, no race.
 job_step_block() {
-  job_block "$1" "$4" | awk -v from="$2" -v to="$3" 'index($0, to){exit} index($0, from){f=1} f'
+  awk -v id="  $1:" -v from="$2" -v to="$3" '
+    $0 == id { j = 1; next }
+    j && /^  [A-Za-z0-9_-]+:$/ { exit }
+    j && index($0, to) { exit }
+    j && index($0, from) { f = 1 }
+    f
+  ' "$4"
 }
 
 # exec_only <text> — drop comment lines. Negative assertions ("this command
