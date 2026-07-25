@@ -197,6 +197,7 @@ Every command is namespaced under `/workbench-ynab:`. The plugin is mid-build; t
 | `/workbench-ynab:ynab-apply` | Review a proposed change-set and, on explicit approval, apply the ledger-only writes (dry-run by default). | Sprint 4 |
 | `/workbench-ynab:ynab-migrate` | Retire the legacy hand-run prototype: the old Desktop connector, its token, and the prototype scheduled tasks/directories. | Sprint 5 |
 | `/workbench-ynab:ynab-monitor` | Run one proactive between-run monitoring pass: advance the monitor state store from fresh YNAB data, exit silently when nothing changed. Scaffold only — no alerts/detectors yet. | Sprint 6 (v-Next) |
+| `/workbench-ynab:ynab-portfolio` | Run the cross-budget portfolio rollup: one consolidated report across every configured budget — combined net worth, aggregate income vs spending, cross-budget Ready-to-Assign, a unified health score, and a single YTD tax picture across the business-tagged budgets. Read-only. See [`docs/portfolio-rollup.md`](docs/portfolio-rollup.md). | Sprint 6 (v-Next) |
 
 ## Versioning
 
