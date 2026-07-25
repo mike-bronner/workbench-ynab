@@ -15,7 +15,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseCivilDate } from '../../lib/tax/civilDate.mjs';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 test('parseCivilDate returns the parts and the UTC epoch day for a real date', () => {
   assert.deepEqual(parseCivilDate('2025-04-15'), {
@@ -96,3 +101,38 @@ test('parseCivilDate rejects years 0000-0099, which JS Date remaps into 1900-199
   assert.equal(parseCivilDate('0100-01-01').year, 100);
 });
 
+// --- The invariant guard -----------------------------------------------------
+//
+// #263 is not really about three call sites — it is about the CLASS. The strict
+// parser was module-private, so every new date seam re-derived the shape-only
+// regex and silently dropped the calendar check (PR #261 did exactly that while
+// fixing a related bug). Promoting the parser only helps if nothing drifts back,
+// so this test IS the AC's "repo-wide check", executable and permanent: any new
+// hand-rolled YYYY-MM-DD parser under lib/ fails the suite and points the author
+// at parseCivilDate.
+
+test('no module under lib/ hand-rolls a YYYY-MM-DD parser — civilDate.mjs is the only one', () => {
+  const libDir = join(ROOT, 'lib');
+  const sources = readdirSync(libDir, { recursive: true, encoding: 'utf8' })
+    .filter((rel) => rel.endsWith('.mjs'))
+    .map((rel) => ({ rel: join('lib', rel), path: join(libDir, rel) }))
+    // The shared parser is the ONE place the pattern is allowed to live.
+    .filter(({ rel }) => rel !== join('lib', 'tax', 'civilDate.mjs'));
+
+  // Guard against the fixture silently emptying out (a moved lib/, a changed
+  // extension) and reporting green having inspected nothing.
+  assert.ok(sources.length >= 5, `expected to scan several lib modules, scanned ${sources.length}`);
+
+  // A 4-digit year group followed by a '-' and a 2-digit group: the signature of
+  // a civil-date regex, in any of the spellings a re-derivation tends to use.
+  const civilDateRegex = /\\d\{4\}\)?-\(?\\d\{2\}/;
+  const offenders = sources
+    .filter(({ path }) => civilDateRegex.test(readFileSync(path, 'utf8')))
+    .map(({ rel }) => rel);
+
+  assert.deepEqual(
+    offenders,
+    [],
+    `${offenders.join(', ')} hand-rolls a YYYY-MM-DD regex. Import parseCivilDate from lib/tax/civilDate.mjs instead — a shape-only check accepts impossible dates like '2025-02-30' and answers plausibly but wrongly (#263).`,
+  );
+});
