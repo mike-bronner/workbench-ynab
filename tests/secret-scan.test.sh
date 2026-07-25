@@ -188,11 +188,16 @@ printf 'y\033%s\n' "$SYNTH_HEX" > "$SANDBOX/src/esc-report.txt"
 esc_rc=0
 ( cd "$SANDBOX" && bash bin/secret-scan.sh ) > "$REPORT" 2>&1 || esc_rc=$?
 esc_bytes="$(LC_ALL=C tr -d '\11\12\40-\176\200-\377' < "$REPORT" | wc -c | tr -d ' ')"
-if [ "$esc_rc" -eq 1 ] && [ "$esc_bytes" -eq 0 ]; then
-  echo "  ✓ hit reported (exit 1) with 0 escape/control bytes in the report"
+# Pin the RENDERED form too, mirroring the NUL sibling: 0 control bytes alone
+# would still pass if the sanitizer deleted the byte instead of substituting it.
+# The NUL case already discriminates that mutation, so this is symmetry rather
+# than new coverage — but it costs one condition and makes each case honest
+# standalone.
+if [ "$esc_rc" -eq 1 ] && [ "$esc_bytes" -eq 0 ] && grep -q "?${SYNTH_HEX}" "$REPORT"; then
+  echo "  ✓ hit reported (exit 1), ESC rendered as '?', 0 escape/control bytes"
   pass=$((pass + 1))
 else
-  echo "  ✖ expected exit 1 with 0 escape/control bytes —" \
+  echo "  ✖ expected exit 1, a '?<hex>' hit, and 0 escape/control bytes —" \
        "got exit $esc_rc, $esc_bytes control byte(s)"
   fail=$((fail + 1))
 fi
@@ -227,10 +232,17 @@ fi
 # exit 1, correct path:line, zero indication of what matched. Reporting the match
 # itself (grep -o) makes that structurally impossible. Reverting GREP_BASE from
 # -rnoE to -rnE turns this red.
+#
+# The secret sits in the MIDDLE of the line, with junk on BOTH sides, and that
+# placement is load-bearing. It used to sit at the end, which stopped
+# discriminating once the cap became head-and-tail: keeping the tail preserves a
+# line-final match even with -o gone, so the case passed under its own mutation
+# (measured — it stayed green). Junk on both sides puts the match where neither
+# the kept head nor the kept tail reaches it, so only -o can surface it.
 echo "Self-test: a secret far past the cap is still shown in the report"
 reset_sandbox
 mkdir -p "$SANDBOX/src"
-{ printf 'var a=1;junk%.0s' $(seq 1 200); printf '%s RSA %s\n' "$BEGIN_FRAG" "$KEY_FRAG"; } > "$SANDBOX/src/minified.js"
+{ printf 'var a=1;junk%.0s' $(seq 1 200); printf '%s RSA %s' "$BEGIN_FRAG" "$KEY_FRAG"; printf 'var b=2;junk%.0s' $(seq 1 200); printf '\n'; } > "$SANDBOX/src/minified.js"
 far_rc=0
 ( cd "$SANDBOX" && bash bin/secret-scan.sh ) > "$REPORT" 2>&1 || far_rc=$?
 if [ "$far_rc" -eq 1 ] && grep -qF -e "${BEGIN_FRAG} RSA ${KEY_FRAG}" "$REPORT"; then
@@ -268,6 +280,43 @@ if [ "$loc_rc" -eq 1 ] && grep -q "$LONG_DIR/k.pem:1:" "$REPORT"; then
 else
   echo "  ✖ expected exit 1 and the full '$LONG_DIR/k.pem:1:' locator in the" \
        "report — got exit $loc_rc"
+  fail=$((fail + 1))
+fi
+
+# ...but the locator split is a HEURISTIC and can mis-anchor, and when it does a
+# PREFIX-ONLY cap re-opens the very redaction defect -o exists to close.
+# match() takes the LEFTMOST ":<digits>:" in the record, and the path always sits
+# to the left of grep's own "path:line:" delimiter — so a path containing
+# ":<digits>:" hijacks the split every time, with no craftedness threshold. The
+# locator then holds a path fragment and the "matched text" is rest-of-path + the
+# real ":<line>:" + the match, so capping its first MAX_HIT_LEN characters emits
+# pure path and slices the secret off the end: correct exit 1, correct-looking
+# report, zero indication of WHAT matched.
+#
+# The head-and-tail cap defeats this structurally: under -o the match is always
+# the record's SUFFIX, so keeping the tail guarantees it survives wherever the
+# split landed. Replacing the cap with `substr(txt, 1, max) "..."` turns this red.
+#
+# The long-path case above CANNOT catch this — its path has no colon to
+# mis-anchor on, so its split is correct and its match never approaches the cap.
+# The path here must also be long enough that the mis-split text exceeds
+# MAX_HIT_LEN (281 chars), or the cap never fires and the case passes vacuously.
+# No colon-bearing path is tracked in this repo today (`git ls-files | grep -F ':'`
+# is empty), so this is a latent boundary probe, not a live scenario — but git
+# tracks such paths happily, so the guard must not depend on their absence.
+echo "Self-test: a colon-bearing path cannot redact the match from the report"
+reset_sandbox
+COLON_DIR="src/weird:12:$(printf 'd%.0s' $(seq 1 120))/$(printf 'e%.0s' $(seq 1 120))"
+mkdir -p "$SANDBOX/$COLON_DIR"
+printf '%s RSA %s\n' "$BEGIN_FRAG" "$KEY_FRAG" > "$SANDBOX/$COLON_DIR/k.pem"
+colon_rc=0
+( cd "$SANDBOX" && bash bin/secret-scan.sh ) > "$REPORT" 2>&1 || colon_rc=$?
+if [ "$colon_rc" -eq 1 ] && grep -qF -e "${BEGIN_FRAG} RSA ${KEY_FRAG}" "$REPORT"; then
+  echo "  ✓ match survives a mis-anchored split on a colon-bearing path"
+  pass=$((pass + 1))
+else
+  echo "  ✖ expected exit 1 and the matched PEM header present in the report —" \
+       "got exit $colon_rc"
   fail=$((fail + 1))
 fi
 

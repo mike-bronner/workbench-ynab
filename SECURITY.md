@@ -92,12 +92,17 @@ Two layers keep credentials out of version control:
    nothing (issue #255). Scanning as text means grep would otherwise print raw
    file bytes, so reported hits are **sanitized and reported as `grep -o`
    matches**: a hit shows the matched shape rather than the whole physical line,
-   bytes outside printable ASCII become `?`, and the matched text — never the
-   `path:line:` locator — is capped at 200 characters with a `...` marker. That
-   keeps a finding actionable (`path:line:match`) on a minified bundle, where the
-   whole file can be one 500,000-character line and reporting the *line* would
-   show unrelated code while silently truncating away the secret that tripped the
-   rule. Bundle *integrity* verification
+   bytes outside printable ASCII become `?`, and the text after the `path:line:`
+   locator is capped at 200 characters with a `...` marker. The cap keeps the
+   **head *and* the tail** of that text: because `grep -o` makes the match the
+   record's suffix, keeping the tail guarantees the matched shape reaches the
+   report even when the locator split mis-anchors — which it does on any path
+   containing `:<digits>:`, since the split takes the leftmost one. (No such path
+   is tracked here, but git accepts them, so the report does not rely on their
+   absence.) That keeps a finding actionable (`path:line:match`) on a minified
+   bundle, where the whole file can be one 500,000-character line and reporting
+   the *line* would show unrelated code while silently truncating away the secret
+   that tripped the rule. Bundle *integrity* verification
    is a **complementary** control, not a substitute for this scan:
    `verify-bundle.sh` detects drift, not secret content (see
    [Bundle integrity](#bundle-integrity)). The scanner is itself covered by a

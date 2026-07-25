@@ -85,14 +85,31 @@ MAX_HIT_LEN=200
 # not theoretical) — and a terminal escape reaching a CI log is its own hazard.
 #
 # Three stages: map every byte outside printable ASCII + tab to '?', strip grep's
-# leading "./", then cap only the MATCHED TEXT, never the "path:line:" locator —
-# so the locator is structurally guaranteed to survive no matter how long the
-# match or the path is. Because the tr stage has already reduced everything to
-# ASCII, awk's substr/length are byte- and character-identical here, so this
-# cannot split a multi-byte sequence the way a raw byte-slice would. The
-# truncation marker is ASCII "..." rather than a "…" glyph for the same reason:
-# re-introducing a multi-byte sequence would contradict the C-locale guarantee
-# the tr stage exists to provide.
+# leading "./", then split off the "path:line:" locator and cap only the text
+# after it, so an ordinary long path cannot truncate the locator away.
+#
+# That split is a HEURISTIC, not a guarantee, and the cap is what makes up the
+# difference. match() takes the LEFTMOST ":<digits>:" in the record, and the path
+# always sits to the left of grep's own "path:line:" delimiter — so a path that
+# itself contains ":<digits>:" (git will happily track one; none exist in this
+# tree) hijacks the split every time. The locator then ends up a path fragment
+# and the "matched text" is rest-of-path + the real ":<line>:" + the match.
+#
+# Hence the cap keeps the HEAD *and* the TAIL of that text rather than a prefix.
+# Under -o the match is always the record's SUFFIX, so keeping the tail is what
+# makes the report's guarantee unconditional: the end of the matched shape
+# survives no matter where the split landed or how long the path is. A prefix-only
+# cap re-opened exactly the redaction defect -o was added to close — on a
+# mis-anchored split the prefix is all path and the secret falls off the end
+# (correct exit 1, zero indication of WHAT matched). Keeping the head as well
+# preserves the readable start of PAT_PEM's unbounded match ("-----BEGIN AAA...").
+#
+# Because the tr stage has already reduced everything to ASCII, awk's
+# substr/length are byte- and character-identical here, so this cannot split a
+# multi-byte sequence the way a raw byte-slice would. The truncation marker is
+# ASCII "..." rather than a "…" glyph for the same reason: re-introducing a
+# multi-byte sequence would contradict the C-locale guarantee the tr stage exists
+# to provide.
 sanitize_hits() {
   LC_ALL=C tr -c '\11\12\40-\176' '?' \
     | LC_ALL=C sed 's#^\./##' \
@@ -111,7 +128,12 @@ sanitize_hits() {
             loc = ""
             txt = $0
           }
-          if (length(txt) > max) txt = substr(txt, 1, max) "..."
+          # Head-and-tail: int() because an odd max would otherwise hand substr a
+          # fractional length. Bounded at max + 3 ("..."), same as a prefix cap.
+          if (length(txt) > max) {
+            half = int(max / 2)
+            txt = substr(txt, 1, half) "..." substr(txt, length(txt) - half + 1)
+          }
           print loc txt
         }'
 }
