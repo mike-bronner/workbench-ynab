@@ -252,7 +252,10 @@ test_escape_timed_timeout_leaves_no_orphan() {
   # shellcheck disable=SC2064  # expanding at trap-set time is the point, see above
   trap "rm -f $(printf '%q' "$marker")" EXIT
 
-  # shellcheck disable=SC2329  # reached indirectly, by name, via escape_timed → watchdog_run
+  # Reached indirectly, by name, via escape_timed → watchdog_run, so shellcheck
+  # cannot see the call. Both codes are listed on purpose: the shadow trips
+  # SC2329 on shellcheck >= 0.11 and SC2317 on the older release CI runs.
+  # shellcheck disable=SC2329,SC2317
   escape_ynab_string() { orphan_probe_tick_forever "$1"; }
 
   escape_timed 1 "$marker" >/dev/null 2>&1 || rc=$?
