@@ -176,26 +176,46 @@ nul_scan() {
 # Files examined across every perl batch, and the offenders found.
 scan_count() { printf '%s\n' "$1" | awk -F'\t' '$1 == "CNT" { n += $2 } END { print n + 0 }'; }
 scan_hits()  { printf '%s\n' "$1" | awk -F'\t' '$1 == "NUL" { print $2 }'; }
+# A count is only usable when it is a plain non-negative integer. These helpers run
+# OUTSIDE nul_scan's pipefail subshell, so a broken awk yields empty output with no
+# non-zero status to notice — and `[ "" -eq 0 ]` does not evaluate false, it ERRORS
+# (status 2). That skips every failure branch below and lands on the ✓, certifying a
+# clean tree while having inspected nothing: the exact fail-open shape this file
+# exists to eliminate. Validate the shape before any integer test.
+is_count()   { case "$1" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 
 # Positive control FIRST: prove the detector actually detects before letting it
 # certify the tree. A known-NUL sentinel is planted inside the real scan root, so
 # this exercises the traversal, the exclude list and the perl match together — the
 # failure modes that previously all collapsed into a silent ✓. The sentinel is
 # removed immediately and is also on the EXIT trap.
+#
+# The control certifies BOTH readers of the scan output — scan_hits (a planted NUL
+# must be reported) and scan_count (the tally must be a sane positive integer) — so
+# neither helper is left as an unvalidated seam feeding the verdict below.
 echo "Self-test: the NUL detector detects (positive control)"
 SENTINEL_DIR="$SELF_DIR/../.nul-selftest-sentinel.$$"
 mkdir -p "$SENTINEL_DIR"
 printf 'plain\000text\n' > "$SENTINEL_DIR/sentinel.bin"
 ctl_rc=0
 ctl_out="$(nul_scan)" || ctl_rc=$?
+ctl_count="$(scan_count "$ctl_out")"
 ctl_hits="$(scan_hits "$ctl_out")"
 rm -rf "$SENTINEL_DIR"
 SENTINEL_DIR=""
 if [ "$ctl_rc" -ne 0 ]; then
   echo "  ✖ detector pipeline FAILED (exit $ctl_rc) — its clean verdict means nothing"
   fail=$((fail + 1))
+elif ! is_count "$ctl_count"; then
+  echo "  ✖ the file counter returned \"$ctl_count\", not a number — the count path is"
+  echo "    broken, so the tree verdict below could not tell 'clean' from 'never ran'."
+  fail=$((fail + 1))
+elif [ "$ctl_count" -eq 0 ]; then
+  echo "  ✖ the file counter reported 0 files with a sentinel planted — the count path"
+  echo "    is broken, so the tree verdict below could not be trusted."
+  fail=$((fail + 1))
 elif printf '%s\n' "$ctl_hits" | grep -q 'sentinel\.bin$'; then
-  echo "  ✓ planted NUL sentinel was found (the detector works)"
+  echo "  ✓ planted NUL sentinel was found across $ctl_count counted files (the detector works)"
   pass=$((pass + 1))
 else
   echo "  ✖ planted NUL sentinel was NOT found — the detector is blind, so its"
@@ -212,6 +232,11 @@ nul_files="$(scan_hits "$nul_out")"
 if [ "$nul_rc" -ne 0 ]; then
   echo "  ✖ NUL scan FAILED to run (exit $nul_rc) — failing closed rather than"
   echo "    reporting a clean tree the scan never actually inspected."
+  fail=$((fail + 1))
+elif ! is_count "$nul_count"; then
+  echo "  ✖ NUL scan file counter returned \"$nul_count\", not a number — the count"
+  echo "    pipeline is broken, so this run cannot tell 'inspected the tree and found"
+  echo "    nothing' from 'inspected nothing'. Failing closed."
   fail=$((fail + 1))
 elif [ "$nul_count" -eq 0 ]; then
   echo "  ✖ NUL scan examined 0 files — the scan root or exclude list is broken,"
