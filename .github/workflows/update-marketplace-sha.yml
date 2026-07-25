@@ -5,6 +5,10 @@ name: Update marketplace SHA
 # installable by SHA rather than floating on the default branch.
 #
 # CROSS-REPO WRITE: this workflow pushes to mike-bronner/claude-workbench.
+# That marketplace is SHARED with every other workbench plugin repo, and the
+# `concurrency` group below only serializes runs within this one — so the push
+# rebases onto the marketplace tip and retries, bounded, when a sibling repo's
+# pin lands first (issue #203).
 #
 # Runs automatically on every published release. Also supports manual
 # backfill via workflow_dispatch (pass a tag to pin that release's SHA;
@@ -140,4 +144,36 @@ jobs:
           fi
 
           git commit -m "chore: pin $PLUGIN_NAME to $TAG ($SHA)"
-          git push
+
+          # Cross-repo push race (issue #203): the `update-marketplace-sha`
+          # concurrency group only serializes runs within THIS repo, but every
+          # sibling workbench plugin pins its own entry in the SAME shared
+          # marketplace. A sibling's pin commit landing between our clone and
+          # our push makes ours non-fast-forward, and an unguarded `git push`
+          # would simply fail the release's pin with no recovery. Re-sync onto
+          # the new tip and retry, bounded — jq only rewrites this plugin's own
+          # entry, so a sibling's edit rebases cleanly. Exhausting the budget
+          # is a hard failure, never a silent skip.
+          MAX_PUSH_ATTEMPTS=5
+          attempt=1
+          while true; do
+            if git push; then
+              echo "Pinned $PLUGIN_NAME to $TAG ($SHA)"
+              exit 0
+            fi
+            if [ "$attempt" -ge "$MAX_PUSH_ATTEMPTS" ]; then
+              echo "::error::Marketplace push still rejected after $MAX_PUSH_ATTEMPTS attempts — another repo may be pinning continuously. Re-run this workflow to retry."
+              exit 1
+            fi
+            echo "::warning::Marketplace push rejected (attempt $attempt/$MAX_PUSH_ATTEMPTS) — rebasing onto the marketplace tip and retrying"
+            sleep "$(( attempt * 5 ))"
+            # A conflict means the marketplace moved in a way we cannot replay
+            # (history rewrite, or a concurrent edit to our own entry). Abort
+            # and fail loudly — never force a pin over someone else's write.
+            if ! git pull --rebase; then
+              git rebase --abort || true
+              echo "::error::Rebase onto the marketplace tip conflicted — refusing to force the pin. Re-run this workflow, or pin $PLUGIN_NAME to $SHA manually."
+              exit 1
+            fi
+            attempt=$(( attempt + 1 ))
+          done

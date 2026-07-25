@@ -26,7 +26,9 @@ name: Release
 # Idempotency: re-running with a version that already exists fails on the
 # tag-exists guard, and the monotonicity guard rejects any version that is
 # not strictly greater than the current plugin.json version. Versions go
-# forward only.
+# forward only. Because those guards make a same-version re-run impossible,
+# main and the tag are pushed in a SINGLE atomic push (issue #203) — a
+# partial push would strand the release with no automated way back.
 
 on:
   workflow_dispatch:
@@ -52,12 +54,23 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
+      # persist-credentials: false is a supply-chain guard (issue #203), not a
+      # style choice. By default checkout writes the job's GITHUB_TOKEN —
+      # carrying this workflow's `contents: write` + `actions: write` — into
+      # .git/config as an http.extraheader, where it stays for the whole job.
+      # `npm --prefix assets ci` runs third-party install scripts in that same
+      # job, so a compromised transitive dep of assets/ could read the header
+      # and push to main or dispatch workflows. With nothing persisted there is
+      # no credential on disk for untrusted code to find; the release push
+      # authenticates explicitly instead, at push time, after every test has
+      # already run. Local git (rev-parse, tag, commit) needs no credential.
       - name: Checkout main
         uses: actions/checkout@v4
         with:
           ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+          persist-credentials: false
 
       # Guard rails first — both checks run BEFORE any write occurs.
       - name: Validate version
@@ -99,9 +112,16 @@ jobs:
       # a node_modules-free sandbox. tests/lib/bundle-integrity.sh is the
       # single source of truth for both assertions; a mismatch fails the
       # release here, before any commit or tag exists.
+      #
+      # Shell flags: Actions runs every `run:` under `bash -e {0}`, so `-e` is
+      # already active and `set` can only ADD flags — `set -euo pipefail` here
+      # states that accurately (it is not the `-e`-less step an earlier comment
+      # claimed). A failed `source` therefore aborts on `-e`; the guard below
+      # is what converts a drifted-bundle return — non-zero, but `-e`-exempt
+      # because it is an `if !` condition — into a polished ::error:: abort.
       - name: Verify vendored bundle integrity (checksum + offline boot)
         run: |
-          set -uo pipefail
+          set -euo pipefail
           source tests/lib/bundle-integrity.sh
           if ! bi_assert_integrity "$PWD"; then
             echo "::error::Vendored bundle integrity check failed — the committed bundle has drifted from vendored.json or no longer boots offline. Re-vendor deliberately via bin/revendor.sh; never hand-edit the bundle."
@@ -129,7 +149,11 @@ jobs:
 
       # The assets/ integration suite needs its own deps (ajv, ajv-formats) —
       # run it AFTER the dependency-free suite so node_modules never exists
-      # while the offline-boot proof runs (mirrors test.yml's job split).
+      # while the offline-boot proof runs (mirrors ci.yml's assets-tests job).
+      # This is the untrusted-code window the checkout step's
+      # persist-credentials: false exists for: third-party install scripts and
+      # module top-level code run here, and there is deliberately no push
+      # credential anywhere on disk or in this step's env while they do.
       - name: Run the assets integration suite
         run: |
           set -euo pipefail
@@ -138,6 +162,7 @@ jobs:
 
       - name: Commit, tag, push
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEW_VERSION: ${{ inputs.version }}
           DESC: ${{ inputs.description }}
         run: |
@@ -154,8 +179,23 @@ jobs:
 
           git commit -m "chore: 🔖 Release v${NEW_VERSION} — ${DESC}"
           git tag -a "v${NEW_VERSION}" -m "v${NEW_VERSION} — ${DESC}"
-          git push origin main
-          git push origin "v${NEW_VERSION}"
+
+          # ONE atomic push for both refs (issue #203). Two sequential pushes
+          # are not atomic: if the tag push failed after main was already
+          # bumped, the release would be stranded half-done — and a re-run at
+          # the same version is then rejected by the monotonicity guard above
+          # ($NEW_VERSION = $CURRENT), so there is no automated way to backfill
+          # the missing tag. --atomic makes the server apply both ref updates
+          # in a single transaction: either main and v$NEW_VERSION both land,
+          # or neither does and a plain re-run is a clean retry.
+          #
+          # The credential is supplied here, in the URL, rather than persisted
+          # in .git/config by checkout — see the checkout step. Every untrusted
+          # assets/ dependency has already installed and run by this point.
+          git push --atomic \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "refs/heads/main:refs/heads/main" \
+            "refs/tags/v${NEW_VERSION}:refs/tags/v${NEW_VERSION}"
 
       - name: Create GitHub release
         env:
