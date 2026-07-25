@@ -137,17 +137,26 @@ echo "Self-test: NUL handling leaves the vendor/ hex scoping intact"
 run_nul_case "64-hex digest beside a NUL under vendor/ stays ignored" 0 "vendor/x.json" '{"sha256": "\000%s"}\n' "$SYNTH_HEX"
 run_nul_case "cleartext token beside a NUL under vendor/ IS caught"   1 "vendor/run.sh" "lead\\000ing ${ENV_NAME}=%s\\n" "$SYNTH_HEX"
 
-# Scanning as text means grep prints the matched line verbatim, so a NUL sitting
-# on that line reaches stdout raw unless the guard sanitizes it (it does, via
-# sanitize_hits). Assert on BYTES, and never through a bash variable — command
-# substitution drops NULs, so a variable-based check would report "clean" even
-# with sanitization removed, i.e. pass vacuously. Deleting the sanitize_hits call
-# from bin/secret-scan.sh turns this red.
-echo "Self-test: a NUL-carrying hit is reported as text, never raw bytes"
+# The guard reports with grep -o, so only bytes INSIDE the match can reach the
+# report — but that does not make the report safe on its own. PAT_HEX's
+# [^0-9a-f] boundary class matches ANY non-hex byte, so a NUL placed directly
+# against the 64-hex run lands inside the matched text itself and reaches stdout
+# raw unless sanitize_hits renders it (measured: 1 raw byte survives with the
+# sanitizer removed, 0 with it in place). The byte must therefore be adjacent to
+# the run, not merely on the same line — a NUL elsewhere on the line is outside
+# the match and never printed at all.
+#
+# Assert on BYTES read back from a FILE. The file capture is not about NUL
+# laundering — bin/secret-scan.sh already funnels every hit through its own
+# found="$(...)" command substitution, so no raw NUL survives to the guard's
+# stdout regardless of how this harness captures it. It is simply the honest way
+# to count raw bytes: `wc -c` over a file measures what a CI log would actually
+# receive, with no shell layer in between to quietly reshape it.
+echo "Self-test: a NUL inside the matched text is rendered, never emitted raw"
 reset_sandbox
 REPORT="$(mktemp)"
 mkdir -p "$SANDBOX/src"
-printf "lead\\000ing ${ENV_NAME}=%s tail\\n" "$SYNTH_HEX" > "$SANDBOX/src/nul-report.sh"
+printf 'x\000%s\n' "$SYNTH_HEX" > "$SANDBOX/src/nul-report.txt"
 report_rc=0
 ( cd "$SANDBOX" && bash bin/secret-scan.sh ) > "$REPORT" 2>&1 || report_rc=$?
 # Delete tab, newline, printable ASCII, and every high byte (the guard's own
@@ -158,25 +167,24 @@ raw_bytes="$(LC_ALL=C tr -d '\11\12\40-\176\200-\377' < "$REPORT" | wc -c | tr -
 # The NUL must be RENDERED, not merely dropped: the hit has to stay readable and
 # actionable. Pin the substituted form, so replacing sanitize_hits with something
 # that silently deletes the byte (or the whole line) also fails here.
-if [ "$report_rc" -eq 1 ] && [ "$raw_bytes" -eq 0 ] && grep -q 'lead?ing' "$REPORT"; then
+if [ "$report_rc" -eq 1 ] && [ "$raw_bytes" -eq 0 ] && grep -q "?${SYNTH_HEX}" "$REPORT"; then
   echo "  ✓ hit reported (exit 1), NUL rendered as '?', 0 raw control bytes"
   pass=$((pass + 1))
 else
-  echo "  ✖ expected exit 1, a 'lead?ing' hit, and 0 raw control bytes —" \
+  echo "  ✖ expected exit 1, a '?<hex>' hit, and 0 raw control bytes —" \
        "got exit $report_rc, $raw_bytes control byte(s)"
   fail=$((fail + 1))
 fi
 
-# NUL is not the only byte scanning-as-text can push into a log, and it is the
-# LEAST dangerous: bash command substitution happens to drop NULs on its own, so
-# the case above leans on the rendered-'?' assertion. Terminal escapes do NOT get
-# dropped — an ESC sequence reaching a CI log is escape-injection, and a bare CR
-# can rewrite the reported line. This case pins the sanitizer's actual load:
-# without it, the two bytes below arrive in the report verbatim (measured).
-echo "Self-test: terminal-escape bytes in a hit never reach the report"
+# NUL is not the only byte that can ride inside a match, and it is the least
+# dangerous: an ESC reaching a CI log is escape-injection, and a bare CR can
+# rewrite the reported line. Same adjacency requirement as above — the ESC is the
+# [^0-9a-f] boundary character, so it is part of the matched text (measured: 1
+# raw byte survives with sanitize_hits removed).
+echo "Self-test: an escape byte inside the matched text never reaches the report"
 reset_sandbox
 mkdir -p "$SANDBOX/src"
-printf "lead\\033[31m\\015ing ${ENV_NAME}=%s\\n" "$SYNTH_HEX" > "$SANDBOX/src/esc-report.sh"
+printf 'y\033%s\n' "$SYNTH_HEX" > "$SANDBOX/src/esc-report.txt"
 esc_rc=0
 ( cd "$SANDBOX" && bash bin/secret-scan.sh ) > "$REPORT" 2>&1 || esc_rc=$?
 esc_bytes="$(LC_ALL=C tr -d '\11\12\40-\176\200-\377' < "$REPORT" | wc -c | tr -d ' ')"
@@ -189,25 +197,102 @@ else
   fail=$((fail + 1))
 fi
 
-# Scanning every file as text is what makes the guard NUL-proof, but it also
-# means a genuinely binary file is now read as text — and there, "lines" end
-# wherever a 0x0a happens to fall, so one match could print most of the file into
-# the CI log. That volume hazard is introduced BY the flag change, so the cap
-# belongs to this fix. The report's hit lines carry a 4-space indent, hence the
-# +4 allowance. Removing the `cut` from sanitize_hits turns this red.
-echo "Self-test: an over-long hit line is capped, not dumped whole"
+# -o bounds the hex and cleartext-token matches to their pattern shapes, but
+# PAT_PEM's [A-Z0-9 ]* is UNBOUNDED — a crafted header matches arbitrarily far,
+# so one hit could still dump kilobytes into the CI log. That is what MAX_HIT_LEN
+# stops. The report's hit lines carry a 4-space indent, and the cap appends a
+# 3-char "..." marker, hence the allowance below. Removing the cap from
+# sanitize_hits turns this red.
+echo "Self-test: an over-long match is capped, not dumped whole"
 reset_sandbox
 mkdir -p "$SANDBOX/src"
-{ printf 'x%.0s' $(seq 1 5000); printf " ${ENV_NAME}=%s\\n" "$SYNTH_HEX"; } > "$SANDBOX/src/huge.bin"
+{ printf '%s ' "$BEGIN_FRAG"; printf 'A%.0s' $(seq 1 5000); printf ' %s\n' "$KEY_FRAG"; } > "$SANDBOX/src/huge.bin"
 huge_rc=0
 ( cd "$SANDBOX" && bash bin/secret-scan.sh ) > "$REPORT" 2>&1 || huge_rc=$?
 longest="$(awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }' "$REPORT")"
-if [ "$huge_rc" -eq 1 ] && [ "$longest" -le 204 ]; then
-  echo "  ✓ over-long hit capped (longest report line: $longest chars)"
+if [ "$huge_rc" -eq 1 ] && [ "$longest" -le 300 ]; then
+  echo "  ✓ over-long match capped (longest report line: $longest chars)"
   pass=$((pass + 1))
 else
-  echo "  ✖ expected exit 1 and every line <= 204 chars —" \
+  echo "  ✖ expected exit 1 and every line <= 300 chars —" \
        "got exit $huge_rc, longest line $longest"
+  fail=$((fail + 1))
+fi
+
+# THE REGRESSION THIS CASE EXISTS FOR: a secret sitting far past the cap on a
+# single enormous line. Scanning as text means a minified bundle is one physical
+# line — vendor/ynab-mcp/index.cjs is 523,669 characters — so a guard that
+# reports the LINE and then keeps its first MAX_HIT_LEN characters emits
+# unrelated code and silently redacts the secret that tripped the rule: correct
+# exit 1, correct path:line, zero indication of what matched. Reporting the match
+# itself (grep -o) makes that structurally impossible. Reverting GREP_BASE from
+# -rnoE to -rnE turns this red.
+echo "Self-test: a secret far past the cap is still shown in the report"
+reset_sandbox
+mkdir -p "$SANDBOX/src"
+{ printf 'var a=1;junk%.0s' $(seq 1 200); printf '%s RSA %s\n' "$BEGIN_FRAG" "$KEY_FRAG"; } > "$SANDBOX/src/minified.js"
+far_rc=0
+( cd "$SANDBOX" && bash bin/secret-scan.sh ) > "$REPORT" 2>&1 || far_rc=$?
+if [ "$far_rc" -eq 1 ] && grep -qF -e "${BEGIN_FRAG} RSA ${KEY_FRAG}" "$REPORT"; then
+  echo "  ✓ match past char 2400 still visible in the report"
+  pass=$((pass + 1))
+else
+  echo "  ✖ expected exit 1 and the matched PEM header present in the report —" \
+       "got exit $far_rc"
+  fail=$((fail + 1))
+fi
+
+# The locator is capped SEPARATELY from the matched text, so no path length can
+# truncate away path:line. A guard that capped the whole "path:line:match" record
+# as one string would report a hit whose locator had itself been sliced off —
+# bounded, but unlocatable, and therefore just as unactionable as the redaction
+# the case above pins.
+#
+# This needs a DEEP path to discriminate: with a short path the locator sits well
+# inside the first MAX_HIT_LEN characters, so whole-record capping preserves it by
+# accident and the case would pass against the very defect it exists to catch
+# (confirmed by mutation — it did exactly that before the path was lengthened).
+# The path below is >200 characters, so record-capping would cut mid-locator.
+# Longest real path in this repo is 76 characters, so this is a synthetic
+# boundary probe, not a scenario the tree reaches today.
+echo "Self-test: a long path never truncates away the path:line locator"
+reset_sandbox
+LONG_DIR="src/$(printf 'd%.0s' $(seq 1 120))/$(printf 'e%.0s' $(seq 1 90))"
+mkdir -p "$SANDBOX/$LONG_DIR"
+printf '%s RSA %s\n' "$BEGIN_FRAG" "$KEY_FRAG" > "$SANDBOX/$LONG_DIR/k.pem"
+loc_rc=0
+( cd "$SANDBOX" && bash bin/secret-scan.sh ) > "$REPORT" 2>&1 || loc_rc=$?
+if [ "$loc_rc" -eq 1 ] && grep -q "$LONG_DIR/k.pem:1:" "$REPORT"; then
+  echo "  ✓ path:line locator survives a >200-char path (${#LONG_DIR} chars)"
+  pass=$((pass + 1))
+else
+  echo "  ✖ expected exit 1 and the full '$LONG_DIR/k.pem:1:' locator in the" \
+       "report — got exit $loc_rc"
+  fail=$((fail + 1))
+fi
+
+# The locator split has a fallback for a record carrying no "path:line:" prefix,
+# and that fallback is reachable: a NEWLINE in a filename splits grep's output
+# mid-record, so the first half arrives as a bare path fragment with no locator.
+# awk variables persist across records, so without the fallback explicitly
+# resetting them, that orphan record would be printed carrying the PREVIOUS hit's
+# locator — a report line that points at the wrong file. Deleting the `else`
+# branch from sanitize_hits turns this red.
+echo "Self-test: a record with no locator is emitted intact, not stale-prefixed"
+reset_sandbox
+mkdir -p "$SANDBOX/src"
+printf '%s\n' "$SYNTH_HEX" > "$SANDBOX/src/aaa.txt"
+printf '%s\n' "$SYNTH_HEX" > "$SANDBOX/$(printf 'src/we\nird.txt')"
+nl_rc=0
+( cd "$SANDBOX" && bash bin/secret-scan.sh ) > "$REPORT" 2>&1 || nl_rc=$?
+# The orphan half must stand alone on its own line (4-space report indent), with
+# no locator from the preceding record glued onto it.
+if [ "$nl_rc" -eq 1 ] && grep -qx '    src/we' "$REPORT"; then
+  echo "  ✓ locator-less record emitted intact (no stale locator)"
+  pass=$((pass + 1))
+else
+  echo "  ✖ expected exit 1 and a bare 'src/we' report line —" \
+       "got exit $nl_rc, report: $(grep -c . "$REPORT") line(s)"
   fail=$((fail + 1))
 fi
 

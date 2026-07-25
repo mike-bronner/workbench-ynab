@@ -89,11 +89,15 @@ Two layers keep credentials out of version control:
    classify the whole file as binary and skip it, which would hide a credential
    in that file from all three rules above — and this scan is the repo's only
    content-scanning CI gate, so one stray byte would silently shrink it to
-   nothing (issue #255). Because scanning as text means a matched line is printed
-   verbatim, reported hits are sanitized before they reach stdout or the CI log:
-   bytes outside printable ASCII become `?` and each line is capped, so a finding
-   stays actionable (`path:line:match`) without raw bytes or terminal escape
-   sequences leaking into a log. Bundle *integrity* verification
+   nothing (issue #255). Scanning as text means grep would otherwise print raw
+   file bytes, so reported hits are **sanitized and reported as `grep -o`
+   matches**: a hit shows the matched shape rather than the whole physical line,
+   bytes outside printable ASCII become `?`, and the matched text — never the
+   `path:line:` locator — is capped at 200 characters with a `...` marker. That
+   keeps a finding actionable (`path:line:match`) on a minified bundle, where the
+   whole file can be one 500,000-character line and reporting the *line* would
+   show unrelated code while silently truncating away the secret that tripped the
+   rule. Bundle *integrity* verification
    is a **complementary** control, not a substitute for this scan:
    `verify-bundle.sh` detects drift, not secret content (see
    [Bundle integrity](#bundle-integrity)). The scanner is itself covered by a

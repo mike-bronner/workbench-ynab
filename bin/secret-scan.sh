@@ -43,9 +43,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 # Common grep flags: recurse, show line numbers, extended regex, scan every file
-# as text, and prune the directories that are never committed. vendor/ is NOT
-# pruned here — it is excluded only for the hex rule below (see the per-rule note
-# above), so the cleartext-token and PEM rules still reach into the bundle.
+# as text, report ONLY the matched text, and prune the directories that are never
+# committed. vendor/ is NOT pruned here — it is excluded only for the hex rule
+# below (see the per-rule note above), so the cleartext-token and PEM rules still
+# reach into the bundle.
 #
 # --binary-files=text, and NO -I: a single NUL byte anywhere in a file makes grep
 # classify the WHOLE file as binary and skip it, so a credential in that file is
@@ -56,23 +57,63 @@ cd "$ROOT"
 # relying on grep's last-flag-wins ordering to cancel an earlier -I would make
 # this guard's coverage depend on an implementation detail. With no -I present
 # there is nothing to override, on GNU and BSD grep alike.
-GREP_BASE=(-rnE --binary-files=text
+#
+# -o reports the MATCHED TEXT instead of the whole line, and it is what keeps a
+# finding actionable now that binary files are scanned. Without it grep prints
+# the entire physical line, which in a minified bundle is the entire file:
+# vendor/ynab-mcp/index.cjs is one 523,669-character line, so any cap applied to
+# that line keeps its first N characters — unrelated minified code — and silently
+# discards the secret that actually tripped the rule. The result was a correct
+# exit 1 with correct path:line and zero indication of WHAT matched. With -o the
+# matched shape is the report, so it can never be the part that gets truncated
+# away, regardless of where on the line it sits. Detection and exit status are
+# unaffected: -o changes only what is printed (verified on GNU grep 3.12 and BSD
+# grep 2.6.0-FreeBSD).
+GREP_BASE=(-rnoE --binary-files=text
   --exclude-dir=.git --exclude-dir=node_modules)
 
-# Cap on a single reported hit line. Under --binary-files=text grep prints the
-# matched line verbatim, and in a genuinely binary file "lines" are delimited by
-# whatever newlines happen to occur — so one hit could otherwise dump most of a
-# file into the CI log.
+# Cap on the matched text of a single reported hit. -o bounds most matches to
+# their pattern's shape, but PAT_PEM's [A-Z0-9 ]* is unbounded, so a crafted
+# header still matches arbitrarily far (measured: 5,043 bytes). The cap is what
+# stops one hit dumping that into the CI log.
 MAX_HIT_LEN=200
 
-# Render raw grep output safe to print. Scanning as text means a matched line can
-# carry raw control bytes straight out of the scanned file (a NUL sitting on the
-# same line as a match reaches stdout verbatim — verified, not theoretical), and
-# terminal escape sequences in a log are their own hazard. Map every byte outside
-# printable ASCII + tab to '?', then cap the line: a finding stays actionable
-# (path:line:match) without any raw byte reaching stdout, stderr, or CI logs.
+# Render raw grep output safe to print. Scanning as text means grep emits bytes
+# straight out of the scanned file, and -o does not make that safe on its own:
+# PAT_HEX's [^0-9a-f] boundary class matches ANY non-hex byte, so a NUL or an ESC
+# sitting directly against a 64-hex run lands inside the match itself (verified,
+# not theoretical) — and a terminal escape reaching a CI log is its own hazard.
+#
+# Three stages: map every byte outside printable ASCII + tab to '?', strip grep's
+# leading "./", then cap only the MATCHED TEXT, never the "path:line:" locator —
+# so the locator is structurally guaranteed to survive no matter how long the
+# match or the path is. Because the tr stage has already reduced everything to
+# ASCII, awk's substr/length are byte- and character-identical here, so this
+# cannot split a multi-byte sequence the way a raw byte-slice would. The
+# truncation marker is ASCII "..." rather than a "…" glyph for the same reason:
+# re-introducing a multi-byte sequence would contradict the C-locale guarantee
+# the tr stage exists to provide.
 sanitize_hits() {
-  LC_ALL=C tr -c '\11\12\40-\176' '?' | cut -c "1-$MAX_HIT_LEN"
+  LC_ALL=C tr -c '\11\12\40-\176' '?' \
+    | LC_ALL=C sed 's#^\./##' \
+    | LC_ALL=C awk -v max="$MAX_HIT_LEN" '
+        {
+          if (match($0, /:[0-9]+:/)) {
+            loc = substr($0, 1, RSTART + RLENGTH - 1)
+            txt = substr($0, RSTART + RLENGTH)
+          } else {
+            # No "path:line:" in this record. Reachable: a NEWLINE in a filename
+            # splits the grep output mid-record, so the first half arrives as a
+            # bare path fragment. awk variables persist across records, so these
+            # two assignments are load-bearing — without them the orphan would be
+            # printed carrying the locator of the PREVIOUS hit, pointing at the
+            # wrong file. Capping the whole record also keeps it bounded.
+            loc = ""
+            txt = $0
+          }
+          if (length(txt) > max) txt = substr(txt, 1, max) "..."
+          print loc txt
+        }'
 }
 
 # 1. Standalone 64-char lowercase-hex run (the YNAB PAT shape). The surrounding
@@ -91,7 +132,7 @@ hits=""
 # Rule 1 (hex) excludes vendor/: vendored.json carries legitimate 64-char-hex
 # SHA-256 digests indistinguishable from a YNAB PAT. The exclusion is scoped to
 # THIS rule alone.
-found="$(grep "${GREP_BASE[@]}" --exclude-dir=vendor -e "$PAT_HEX" . 2>/dev/null | sanitize_hits | sed 's#^\./##' || true)"
+found="$(grep "${GREP_BASE[@]}" --exclude-dir=vendor -e "$PAT_HEX" . 2>/dev/null | sanitize_hits || true)"
 [ -n "$found" ] && hits="${hits}${found}"$'\n'
 
 # Rules 2 (cleartext token) and 3 (PEM) scan the WHOLE tree, vendor/ included —
@@ -99,7 +140,7 @@ found="$(grep "${GREP_BASE[@]}" --exclude-dir=vendor -e "$PAT_HEX" . 2>/dev/null
 # smuggled under vendor/ is caught. -e "$pat" is required: the PEM pattern starts
 # with '-', which grep would otherwise parse as an option flag.
 for pat in "$PAT_ENV" "$PAT_PEM"; do
-  found="$(grep "${GREP_BASE[@]}" -e "$pat" . 2>/dev/null | sanitize_hits | sed 's#^\./##' || true)"
+  found="$(grep "${GREP_BASE[@]}" -e "$pat" . 2>/dev/null | sanitize_hits || true)"
   [ -n "$found" ] && hits="${hits}${found}"$'\n'
 done
 hits="$(printf '%s' "$hits" | sed '/^[[:space:]]*$/d' | sort -u || true)"
