@@ -18,6 +18,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PERSONA_SH="${REPO_ROOT}/bin/persona.sh"
 
+# Shared poll-and-kill timeout helper for the DoS/hang guards below. It kills the
+# whole process GROUP on a timeout, so no command-substitution grandchild is left
+# orphaned and burning CPU (issue #188).
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/watchdog.sh"
+
 TMPDIR_TEST="$(mktemp -d)"
 trap 'rm -rf "${TMPDIR_TEST}"' EXIT
 
@@ -231,25 +237,29 @@ assert_contains "smuggled token stays verbatim in the name slot (_render_templat
 # BASH_SOURCE==$0 (same pattern as tests/unit/audit-log.test.sh sourcing
 # bin/audit-log.sh) so sourcing defines the functions without running the CLI.
 
+# _render_template_sourced <template> <key> <val> [...] — the payload
+# render_tmpl_timed runs under the watchdog. A named function (rather than an
+# inline subshell) is what lets watchdog_run background it as argv.
+_render_template_sourced() {
+  # shellcheck source=/dev/null
+  source "$PERSONA_SH"
+  _render_template "$@"
+}
+
 # render_tmpl_timed <secs> <template> <key> <val> [<key> <val>...]
-# Runs _render_template under a portable watchdog (macOS ships no timeout(1);
-# poll-until-exit mirrors tests/lib/bundle-integrity.sh) so a regressed hang
-# fails cleanly instead of stalling CI. Prints the render on stdout; returns 124
-# if the call overran (hung), else the call's own exit code.
+# Runs _render_template under the shared portable watchdog (macOS ships no
+# timeout(1) — see tests/lib/watchdog.sh) so a regressed hang fails cleanly
+# instead of stalling CI. Prints the render on stdout; returns 124 if the call
+# overran (hung), else the call's own exit code.
 render_tmpl_timed() {
   local secs="$1"; shift
   local out_file; out_file="$(mktemp "${TMPDIR_TEST}/rt.XXXXXX")"
-  # shellcheck source=/dev/null
-  ( source "$PERSONA_SH"; _render_template "$@" ) >"$out_file" 2>/dev/null &
-  local pid=$! waited=0
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge "$secs" ]; then
-      kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
-      return 124
-    fi
-    sleep 1; waited=$((waited + 1))
-  done
-  wait "$pid"; local rc=$?
+  local rc=0
+  watchdog_run "$secs" _render_template_sourced "$@" >"$out_file" 2>/dev/null || rc=$?
+  # On a timeout there is no render to print — return the 124 contract only.
+  if [ "$rc" -eq 124 ]; then
+    return 124
+  fi
   cat "$out_file"
   return "$rc"
 }
@@ -621,17 +631,16 @@ run_voice_timed() {
   local secs="$1" cfg="$2" sub="${3:-voice}"
   shift 2; [ "$#" -gt 0 ] && shift   # anything left is extra argv for the subcommand
   local out_file="${TMPDIR_TEST}/voice-timed-out" err_file="${TMPDIR_TEST}/voice-timed-err"
-  YNAB_CONFIG_FILE="$cfg" WORKBENCH_CORE_CONFIG_FILE="$NO_FILE" \
-    bash "$PERSONA_SH" "$sub" "$@" >"$out_file" 2>"$err_file" &
-  local pid=$! waited=0
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge "$secs" ]; then
-      kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
-      return 124
-    fi
-    sleep 1; waited=$((waited + 1))
-  done
-  wait "$pid"; local rc=$?
+  local rc=0
+  # `env` carries the config overrides into the watchdog's argv form; the
+  # watchdog kills the whole process group on a timeout (issue #188), so
+  # persona.sh's own command substitutions cannot outlive it.
+  watchdog_run "$secs" \
+    env YNAB_CONFIG_FILE="$cfg" WORKBENCH_CORE_CONFIG_FILE="$NO_FILE" \
+      bash "$PERSONA_SH" "$sub" "$@" >"$out_file" 2>"$err_file" || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    return 124
+  fi
   cat "$out_file"
   return "$rc"
 }

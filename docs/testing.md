@@ -115,6 +115,36 @@ if any test failed — **and also if the file defines zero `test_*` functions**,
 a naming typo (`mytest_foo`) is a loud failure, never a silent pass. All bash
 scripts must pass `shellcheck` (CI #16 lints them).
 
+### Timeouts: `tests/lib/watchdog.sh`
+
+macOS ships no `timeout(1)`, so any test that must bound a potential hang or
+super-linear DoS path uses the shared helper instead of hand-rolling a
+poll-and-kill loop:
+
+```bash
+source "$ROOT/tests/lib/watchdog.sh"
+
+rc=0
+watchdog_run 20 my_payload arg >"$out_file" 2>"$err_file" || rc=$?
+if [ "$rc" -eq 124 ]; then fail "payload overran the watchdog"; fi
+```
+
+`watchdog_run <secs> <command> [args...]` returns **124** if the command
+overran, else the command's own exit status; stdout/stderr are inherited, so
+redirect at the call site. `<command>` is argv, so a payload that needs env
+overrides goes through `env VAR=… cmd`, and a shell *function* payload is passed
+by name — define such fixtures at **top level**, not nested inside a `test_*`
+function, or shellcheck flags them SC2329 (it cannot see the indirect call).
+
+On a timeout it kills the whole **process group**, not just the backgrounded
+child. That is the point: the expensive work usually runs inside a nested
+command substitution — a *grandchild* — and killing only the child stranded it
+as a CPU-burning `PPID 1` orphan, on exactly the path the watchdog exists to
+contain (issue #188). Because the kill path runs only on a FAILED watchdog,
+green CI never exercises it; `tests/unit/watchdog.test.sh` pins the behaviour
+directly, and runs in the bash-3.2 lane as well as the main suite because job
+control differs across bash majors.
+
 ## Node test approach — decision: **`node:test` built-in**
 
 We use Node's **built-in test runner** (`node --test`) with `node:assert/strict`
