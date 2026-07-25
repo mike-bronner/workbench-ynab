@@ -76,6 +76,11 @@ Two layers keep credentials out of version control:
      flagged);
    - a **PEM / private-key header** — any `BEGIN … PRIVATE KEY` block.
 
+   Every file is scanned **as text** (`--binary-files=text`), so a file is never
+   skipped for "looking binary". This matters: a single NUL byte anywhere in a
+   file otherwise makes `grep` classify the whole file as binary and skip it,
+   which would let a credential in that file pass this gate unscanned.
+
    The `vendor/` exclusion is **scoped to the hex rule only**: the bundle marker
    `vendor/ynab-mcp/vendored.json` legitimately carries 64-char-hex SHA-256
    digests that are indistinguishable from a YNAB PAT, so the hex rule skips

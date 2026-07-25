@@ -28,6 +28,8 @@
 #     secret shapes, with no false positives.
 #   * .git/ and node_modules/ — VCS internals and (never-committed) deps — are
 #     skipped by every rule.
+#   * NOTHING is skipped for "looking binary". Every other file is scanned as
+#     text, by every rule — see the --binary-files=text note on GREP_BASE below.
 #
 # Note: vendor/ynab-mcp/verify-bundle.sh is a COMPLEMENTARY control, not a
 # substitute for scanning — it pins the bundle's SHA-256 to detect drift, but it
@@ -42,12 +44,40 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# Common grep flags: recurse, show line numbers, extended regex, skip binaries,
-# and prune the directories that are never committed. vendor/ is NOT pruned here
-# — it is excluded only for the hex rule below (see the per-rule note above), so
-# the cleartext-token and PEM rules still reach into the vendored bundle.
-GREP_BASE=(-rInE --binary-files=without-match
+# Common grep flags: recurse, show line numbers, extended regex, scan every file
+# as TEXT, and prune the directories that are never committed. vendor/ is NOT
+# pruned here — it is excluded only for the hex rule below (see the per-rule note
+# above), so the cleartext-token and PEM rules still reach into the vendored
+# bundle.
+#
+# --binary-files=text, and note the ABSENCE of -I (this was -rInE
+# --binary-files=without-match until issue #255): a single NUL byte anywhere in a
+# file makes grep classify the WHOLE file as binary and skip it, so a credential
+# in that file — or merely in the same file as some unrelated NUL — was never
+# scanned by what SECURITY.md documents as the repo's only content-scanning CI
+# gate. That is not hypothetical: assets/allocate-handler.js carries a raw NUL as
+# a cache-key separator, and this scanner was blind to every byte of it. The
+# sibling guard bin/check-tool-name-sources.sh closed the same hole (issue #216)
+# after that exact NUL hid an unhardened call site from three sweeps.
+#
+# -I is DROPPED rather than merely overridden by a later --binary-files=text:
+# grep's last-flag-wins ordering does make the override work (verified on GNU
+# grep 3.12 and BSD grep 2.6.0-FreeBSD), but coverage of the credential gate
+# should not hinge on flag order surviving a future edit to this array.
+GREP_BASE=(-rnE --binary-files=text
   --exclude-dir=.git --exclude-dir=node_modules)
+
+# Render grep's raw output for the report. Scanning as text means grep prints a
+# matching line verbatim, so a hit inside a genuinely binary file would otherwise
+# spray raw control bytes into stdout and CI logs (and, on bash >= 4.4, make the
+# command substitutions below warn about dropped NUL bytes). So: replace every C0
+# control byte and DEL with '.', strip grep's leading "./", and cap each line —
+# in a binary file the "line" holding a match can be the entire file, since it
+# may contain no newline at all. Bytes >= 0x80 are left alone, so UTF-8 in a real
+# finding stays readable.
+render_hits() {
+  LC_ALL=C tr '\000-\010\013-\037\177' '.' | LC_ALL=C sed 's#^\./##' | cut -b1-200
+}
 
 # 1. Standalone 64-char lowercase-hex run (the YNAB PAT shape). The surrounding
 #    [^0-9a-f] / anchors stop a longer hex blob from matching a 64-char window.
@@ -65,7 +95,7 @@ hits=""
 # Rule 1 (hex) excludes vendor/: vendored.json carries legitimate 64-char-hex
 # SHA-256 digests indistinguishable from a YNAB PAT. The exclusion is scoped to
 # THIS rule alone.
-found="$(grep "${GREP_BASE[@]}" --exclude-dir=vendor -e "$PAT_HEX" . 2>/dev/null | sed 's#^\./##' || true)"
+found="$(grep "${GREP_BASE[@]}" --exclude-dir=vendor -e "$PAT_HEX" . 2>/dev/null | render_hits || true)"
 [ -n "$found" ] && hits="${hits}${found}"$'\n'
 
 # Rules 2 (cleartext token) and 3 (PEM) scan the WHOLE tree, vendor/ included —
@@ -73,7 +103,7 @@ found="$(grep "${GREP_BASE[@]}" --exclude-dir=vendor -e "$PAT_HEX" . 2>/dev/null
 # smuggled under vendor/ is caught. -e "$pat" is required: the PEM pattern starts
 # with '-', which grep would otherwise parse as an option flag.
 for pat in "$PAT_ENV" "$PAT_PEM"; do
-  found="$(grep "${GREP_BASE[@]}" -e "$pat" . 2>/dev/null | sed 's#^\./##' || true)"
+  found="$(grep "${GREP_BASE[@]}" -e "$pat" . 2>/dev/null | render_hits || true)"
   [ -n "$found" ] && hits="${hits}${found}"$'\n'
 done
 hits="$(printf '%s' "$hits" | sed '/^[[:space:]]*$/d' | sort -u || true)"
