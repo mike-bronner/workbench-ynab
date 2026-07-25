@@ -43,28 +43,43 @@ CONFIG_FILE="$CONFIG_DIR/config.json"
 
 ## Step 1 — Verify prerequisites
 
-### 1a. CLI tools (hard-stop on a miss)
+### 1a. Prerequisites (hard-stop on a miss)
 
-Run a single Bash check for the host tools the rest of the command needs:
+Run a single Bash check for the four prerequisites the rest of the command (and
+the plugin at large) needs — the three host CLI tools plus the `workbench-core`
+plugin. **All four hard-stop**: a miss exits non-zero here, before Step 1b's
+probe, before Step 2's token prompt, and before any config write. This is
+deliberately stricter than Step 1b, which only *reports*: the scheduled-tasks
+MCP being unreachable costs you one optional deploy, whereas a missing
+prerequisite silently degrades the whole install (a missing `workbench-core`
+drops the persona name to its `Hobbes` fallback and takes the shared memory
+vault and session lifecycle with it), so it is caught up front rather than
+discovered later.
 
 ```bash
 missing=()
 for cmd in node jq security; do
   command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
 done
+# workbench-core is a Claude Code plugin, not a CLI: assert its install
+# footprint under the plugins cache (marketplace install and local checkout
+# both land there).
+ls -d "$HOME"/.claude/plugins/cache/*/workbench-core >/dev/null 2>&1 \
+  || missing+=("workbench-core")
 if [ ${#missing[@]} -gt 0 ]; then
   echo "❌ Missing prerequisites: ${missing[*]}"
   for m in "${missing[@]}"; do
     case "$m" in
-      jq)       echo "   • jq — install with: brew install jq" ;;
-      node)     echo "   • node — install via your preferred path (nvm, brew install node, …)" ;;
-      security) echo "   • security — ships with macOS; this command is macOS-only" ;;
+      jq)             echo "   • jq — install with: brew install jq" ;;
+      node)           echo "   • node — install via your preferred path (nvm, brew install node, …)" ;;
+      security)       echo "   • security — ships with macOS; this command is macOS-only" ;;
+      workbench-core) echo "   • workbench-core — install with: claude plugin install workbench-core@claude-workbench" ;;
     esac
   done
-  echo "   Install the missing tool(s) and re-run /workbench-ynab:setup."
+  echo "   Install the missing prerequisite(s) and re-run /workbench-ynab:setup."
   exit 1
 fi
-echo "✅ node, jq, security all present"
+echo "✅ node, jq, security, workbench-core all present"
 
 # node being ON PATH is not enough — it must also be NEW ENOUGH for the
 # vendored bundle (issue #3). bin/node-floor.sh compares `node --version`
