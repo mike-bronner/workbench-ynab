@@ -33,7 +33,10 @@ CONCRETE="${PREFIX}ynab_list_budgets"               # a real, matchable name
 GLOB="${PREFIX}ynab_*"                              # family glob — never matched
 
 SANDBOX="$(mktemp -d)"
-trap 'rm -rf "$SANDBOX"' EXIT
+# Set when the NUL positive control plants its sentinel inside the real repo
+# root (see below); cleaned up on every exit path, including a failed assertion.
+SENTINEL_DIR=""
+trap 'rm -rf "$SANDBOX" ${SENTINEL_DIR:+"$SENTINEL_DIR"}' EXIT
 
 pass=0
 fail=0
@@ -98,6 +101,25 @@ run_case "concrete name inside .git/ is ignored"         0 ".git/probe.md"      
 run_case "concrete name inside node_modules/ is ignored" 0 "node_modules/pkg/index.js"    "$CONCRETE"
 run_case "clean tree passes"                             0 ""                              ""
 
+# A NUL byte used to make grep classify a file as binary and skip it whole, so a
+# concrete name inside it was invisible to the guard (issue #216 — exactly how
+# assets/allocate-handler.js hid an unhardened resolution site). The guard now
+# greps --binary-files=text; pin that, because reverting the flag turns this case
+# green-to-red. run_case can't carry the payload — a shell string cannot hold a
+# NUL — so the file is written directly here.
+echo "Self-test: a NUL byte cannot hide a concrete name from the guard"
+reset_sandbox
+printf 'const k = "%s\000month"; // %s\n' 'budget' "$CONCRETE" > "$SANDBOX/assets/nul-probe.js"
+nul_guard_rc=0
+( cd "$SANDBOX" && bash bin/check-tool-name-sources.sh ) >/dev/null 2>&1 || nul_guard_rc=$?
+if [ "$nul_guard_rc" -eq 1 ]; then
+  echo "  ✓ concrete name inside a NUL-carrying file is caught (exit 1)"
+  pass=$((pass + 1))
+else
+  echo "  ✖ concrete name inside a NUL-carrying file is NOT caught — expected exit 1, got $nul_guard_rc"
+  fail=$((fail + 1))
+fi
+
 # The sandbox cases prove the guard's MECHANICS; this case proves the INVARIANT
 # itself — the real repository tree is clean (issue #131: the guard failed on
 # main and no CI job noticed, because this self-test only ever exercised a
@@ -116,31 +138,93 @@ else
   fail=$((fail + 1))
 fi
 
-# The guard greps with --binary-files=without-match, so ANY file containing a NUL
-# byte is silently SKIPPED — a hard-coded tool name inside it would never be seen,
-# and neither would any other tree-wide grep sweep of that file. That is not
-# hypothetical: assets/allocate-handler.js carried a raw NUL as a cache-key
-# separator, which hid an unhardened write-tool resolution site from three separate
-# `ALLOWED_TOOLS.find(` sweeps (issue #216) and from this guard. The byte is now
-# written as a backslash-u-0000 escape — same string at runtime, plain text on disk.
-# Pin the property:
-# repo-authored source must stay greppable, or the guard's coverage is a fiction.
-echo "Self-test: no repo-authored file carries a NUL byte (which would make the guard skip it)"
-# $ARGV is perl's, not the shell's — single quotes are deliberate.
+# The guard now greps --binary-files=text, so a NUL byte no longer hides a file
+# from IT (pinned by the sandbox case above). But every OTHER tree-wide sweep —
+# plain `grep -rn`, an editor search, a reviewer's ripgrep — still classifies a
+# NUL-carrying file as binary and skips it silently. That is not hypothetical:
+# assets/allocate-handler.js carried a raw NUL as a cache-key separator, which hid
+# an unhardened write-tool resolution site from three separate `ALLOWED_TOOLS.find(`
+# sweeps (issue #216). The byte is now written as a backslash-u-0000 escape — same
+# string at runtime, plain text on disk. So this assertion is braces to the guard
+# flag's belt, and it pins the broader property the flag cannot: repo-authored
+# source must stay greppable by ANY tool, or every sweep over it is a fiction.
+#
+# The detector below is shared by the positive control and the real assertion, so
+# the control certifies the EXACT pipeline the assertion relies on. It emits one
+# "CNT<TAB>n" line per perl batch and one "NUL<TAB>path" line per offending file,
+# and it fails LOUDLY: pipefail plus an explicit cd guard mean a missing perl, a
+# broken xargs or a bad scan root return non-zero instead of an empty stdout that
+# reads identically to "the tree is clean". Diagnostics go to stderr, not
+# /dev/null. An assertion that cannot tell "scanned nothing" from "found nothing"
+# is the same fail-open shape issue #216 exists to eliminate.
+#
+# $ARGV/$c are perl's, not the shell's — single quotes are deliberate.
 # shellcheck disable=SC2016
-nul_files="$( (cd "$SELF_DIR/.." && \
-  find . -type f \
-    -not -path './.git/*' -not -path './vendor/*' -not -path './node_modules/*' \
-    -not -path '*/node_modules/*' -print0 \
-  | xargs -0 perl -0777 -ne 'print "$ARGV\n" if /\x00/') 2>/dev/null )"
-if [ -z "$nul_files" ]; then
-  echo "  ✓ every scanned file is plain text (the guard sees all of them)"
+nul_scan() {
+  (
+    set -o pipefail
+    cd "$SELF_DIR/.." || exit 3
+    find . -type f \
+      -not -path './.git/*' \
+      -not -path './vendor/*'       -not -path '*/vendor/*' \
+      -not -path './node_modules/*' -not -path '*/node_modules/*' \
+      -print0 \
+    | xargs -0 perl -0777 -ne \
+        'BEGIN { $c = 0 } $c++; print "NUL\t$ARGV\n" if /\x00/; END { print "CNT\t$c\n" }'
+  )
+}
+# Files examined across every perl batch, and the offenders found.
+scan_count() { printf '%s\n' "$1" | awk -F'\t' '$1 == "CNT" { n += $2 } END { print n + 0 }'; }
+scan_hits()  { printf '%s\n' "$1" | awk -F'\t' '$1 == "NUL" { print $2 }'; }
+
+# Positive control FIRST: prove the detector actually detects before letting it
+# certify the tree. A known-NUL sentinel is planted inside the real scan root, so
+# this exercises the traversal, the exclude list and the perl match together — the
+# failure modes that previously all collapsed into a silent ✓. The sentinel is
+# removed immediately and is also on the EXIT trap.
+echo "Self-test: the NUL detector detects (positive control)"
+SENTINEL_DIR="$SELF_DIR/../.nul-selftest-sentinel.$$"
+mkdir -p "$SENTINEL_DIR"
+printf 'plain\000text\n' > "$SENTINEL_DIR/sentinel.bin"
+ctl_rc=0
+ctl_out="$(nul_scan)" || ctl_rc=$?
+ctl_hits="$(scan_hits "$ctl_out")"
+rm -rf "$SENTINEL_DIR"
+SENTINEL_DIR=""
+if [ "$ctl_rc" -ne 0 ]; then
+  echo "  ✖ detector pipeline FAILED (exit $ctl_rc) — its clean verdict means nothing"
+  fail=$((fail + 1))
+elif printf '%s\n' "$ctl_hits" | grep -q 'sentinel\.bin$'; then
+  echo "  ✓ planted NUL sentinel was found (the detector works)"
   pass=$((pass + 1))
 else
+  echo "  ✖ planted NUL sentinel was NOT found — the detector is blind, so its"
+  echo "    'no NUL bytes' verdict below would be worthless. Files flagged:"
+  printf '%s\n' "${ctl_hits:-<none>}" | sed 's/^/    /'
+  fail=$((fail + 1))
+fi
+
+echo "Self-test: no repo-authored file carries a NUL byte (which would make the guard skip it)"
+nul_rc=0
+nul_out="$(nul_scan)" || nul_rc=$?
+nul_count="$(scan_count "$nul_out")"
+nul_files="$(scan_hits "$nul_out")"
+if [ "$nul_rc" -ne 0 ]; then
+  echo "  ✖ NUL scan FAILED to run (exit $nul_rc) — failing closed rather than"
+  echo "    reporting a clean tree the scan never actually inspected."
+  fail=$((fail + 1))
+elif [ "$nul_count" -eq 0 ]; then
+  echo "  ✖ NUL scan examined 0 files — the scan root or exclude list is broken,"
+  echo "    so an empty result proves nothing. Failing closed."
+  fail=$((fail + 1))
+elif [ -n "$nul_files" ]; then
   echo "  ✖ file(s) contain a NUL byte and are INVISIBLE to the guard:"
   printf '%s\n' "$nul_files" | sed 's/^/    /'
   printf '    Write the byte as an escape sequence instead of embedding it literally.\n'
   fail=$((fail + 1))
+else
+  echo "  ✓ all $nul_count scanned files are plain text (the guard sees all of them)"
+  pass=$((pass + 1))
 fi
 
 echo
