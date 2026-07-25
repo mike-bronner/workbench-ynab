@@ -116,6 +116,33 @@ else
   fail=$((fail + 1))
 fi
 
+# The guard greps with --binary-files=without-match, so ANY file containing a NUL
+# byte is silently SKIPPED — a hard-coded tool name inside it would never be seen,
+# and neither would any other tree-wide grep sweep of that file. That is not
+# hypothetical: assets/allocate-handler.js carried a raw NUL as a cache-key
+# separator, which hid an unhardened write-tool resolution site from three separate
+# `ALLOWED_TOOLS.find(` sweeps (issue #216) and from this guard. The byte is now
+# written as a backslash-u-0000 escape — same string at runtime, plain text on disk.
+# Pin the property:
+# repo-authored source must stay greppable, or the guard's coverage is a fiction.
+echo "Self-test: no repo-authored file carries a NUL byte (which would make the guard skip it)"
+# $ARGV is perl's, not the shell's — single quotes are deliberate.
+# shellcheck disable=SC2016
+nul_files="$( (cd "$SELF_DIR/.." && \
+  find . -type f \
+    -not -path './.git/*' -not -path './vendor/*' -not -path './node_modules/*' \
+    -not -path '*/node_modules/*' -print0 \
+  | xargs -0 perl -0777 -ne 'print "$ARGV\n" if /\x00/') 2>/dev/null )"
+if [ -z "$nul_files" ]; then
+  echo "  ✓ every scanned file is plain text (the guard sees all of them)"
+  pass=$((pass + 1))
+else
+  echo "  ✖ file(s) contain a NUL byte and are INVISIBLE to the guard:"
+  printf '%s\n' "$nul_files" | sed 's/^/    /'
+  printf '    Write the byte as an escape sequence instead of embedding it literally.\n'
+  fail=$((fail + 1))
+fi
+
 echo
 echo "Passed: $pass   Failed: $fail"
 [ "$fail" -eq 0 ] || exit 1

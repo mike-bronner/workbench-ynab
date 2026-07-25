@@ -54,12 +54,15 @@
  *    pass-through: the name path is the documented fallback the M4-10 proposal
  *    SHOULD make unnecessary. An unresolvable name never reaches the executor — it
  *    becomes an `error` result here (never a thrown exception).
- *  - NO HARD-CODED TOOL NAMES. The write tool names are resolved from the guardrail's
- *    exported `ALLOWED_TOOLS` by suffix, so no concrete
+ *  - NO HARD-CODED TOOL NAMES, AND NO AMBIGUOUS ONES. The write tool names are
+ *    resolved from the guardrail's exported `ALLOWED_TOOLS` by suffix, so no concrete
  *    `mcp__plugin_workbench-ynab_ynab__*` string lives in this file (the swap-ready
  *    single-source-of-truth invariant, issue #87). Only the family glob — explicitly
  *    safe to mention anywhere — appears, for the ToolSearch select. Bare
- *    `mcp__ynab__*` names are never produced.
+ *    `mcp__ynab__*` names are never produced. Resolution goes through the shared
+ *    fail-closed `resolveUniqueTool` (issue #216), which asserts each suffix matches
+ *    EXACTLY ONE allow-list entry and throws otherwise — a suffix collision can never
+ *    silently route a write to the wrong tool, as an unchecked `.find()` would.
  *  - SHARED RESULT CONTRACT. Per-op results reuse the executor's `STATUS` constants,
  *    extended with the categorize-specific `transaction_id` / `before` / `after` the
  *    M4-5 command renders (AC8).
@@ -84,6 +87,7 @@
 const { STATUS, OUTCOME, applyChangeset } = require('./apply-executor');
 const { validateChangeset } = require('./validate-changeset');
 const { ALLOWED_TOOLS } = require('./write-safety-guardrail');
+const { resolveUniqueTool } = require('./resolve-tool');
 const { throwOnErrorResult } = require('./write-error');
 const { HUMAN_REVIEW_REASONS, isSplitTransaction, isTransferLeg } = require('./transaction-shape');
 
@@ -100,21 +104,38 @@ const TOOL_FAMILY_GLOB = 'mcp__plugin_workbench-ynab_ynab__ynab_*';
 
 /**
  * Resolve the two write tools this path uses from the guardrail's allow-list by
- * suffix — never a hard-coded namespaced name. `endsWith('_update_transaction')`
- * matches only the singular (the plural ends in `s`); `_update_transactions`
- * matches only the bulk tool.
+ * suffix — never a hard-coded namespaced name — asserting UNIQUENESS on each
+ * (issue #216). The previous `.find()` spelling failed OPEN twice over: it took the
+ * first match, so a future allow-list entry sharing a suffix (say
+ * `..._bulk_update_transaction`) would silently receive single-transaction writes;
+ * and its `if (!single || !bulk)` guard could only catch the zero-match case, never
+ * ambiguity. `resolveUniqueTool` throws on both, so an ambiguous or missing update
+ * tool is never resolved to a guess.
+ *
+ * The two suffixes NEST (`_update_transaction` is a substring of
+ * `_update_transactions`), which is safe only because matching is anchored
+ * `endsWith`, not a substring scan: the plural ends in `s`, so the singular suffix
+ * never matches the bulk tool and a single-transaction write can never be routed to
+ * it. `tests/unit/resolve-tool.test.mjs` and the categorize suite pin that in both
+ * array orders.
+ * @param {readonly string[]} [allowedTools] the allow-list to resolve against;
+ *   defaults to the guardrail's exported single source of truth. Overridable so the
+ *   fail-closed contract can be tested against hostile allow-lists (the delete
+ *   path's `resolveDeleteTool` takes it the same way).
  * @returns {{single: string, bulk: string}}
+ * @throws {Error} when either suffix matches zero or more than one tool.
  */
-function resolveTools() {
-  const single = ALLOWED_TOOLS.find((t) => t.endsWith('_update_transaction'));
-  const bulk = ALLOWED_TOOLS.find((t) => t.endsWith('_update_transactions'));
-  if (!single || !bulk) {
-    throw new Error(
-      'categorize handler: update-transaction tool(s) not found on the guardrail allow-list — ' +
-        'the ledger-only allow-list must enumerate ynab_update_transaction(s).',
-    );
-  }
-  return { single, bulk };
+function resolveTools(allowedTools = ALLOWED_TOOLS) {
+  return {
+    single: resolveUniqueTool(allowedTools, '_update_transaction', {
+      context: 'categorize handler',
+      subject: 'the single-transaction update tool',
+    }),
+    bulk: resolveUniqueTool(allowedTools, '_update_transactions', {
+      context: 'categorize handler',
+      subject: 'the bulk update-transactions tool',
+    }),
+  };
 }
 
 /**
