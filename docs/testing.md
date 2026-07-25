@@ -145,6 +145,42 @@ green CI never exercises it; `tests/unit/watchdog.test.sh` pins the behaviour
 directly, and runs in the bash-3.2 lane as well as the main suite because job
 control differs across bash majors.
 
+### No-orphan probes: `tests/lib/orphan-probe.sh`
+
+Pinning the helper pins the *mechanism*, but the reap only reaps what stays
+inside the job's process group — so each call site's own topology needs its own
+committed check, or a future `setsid` / `disown` / `nohup` / double-fork in a
+production script would silently bring orphans back with nothing to catch it
+(issue #251). `tests/lib/orphan-probe.sh` is the shared fixture that makes those
+checks cheap:
+
+```bash
+source "$ROOT/tests/lib/orphan-probe.sh"
+
+marker="$SANDBOX/ticks"; : >"$marker"
+orphan_probe_write_script "$fixture" "$marker" [fn_name]   # a never-ending stand-in script
+rc=0; watchdog_run 1 my_real_wrapper … >/dev/null 2>&1 || rc=$?
+assert_eq "124" "$rc" "the payload must overrun"
+orphan_probe_no_survivors "$marker" || fail "a descendant survived the reap"
+```
+
+`orphan_probe_tick_forever <marker>` is the payload body (it ticks from inside a
+nested command substitution, so the ticker is a **grandchild**);
+`orphan_probe_write_script <path> <marker> [fn]` generates the same body as a
+script carrying the production `BASH_SOURCE == $0` guard, so one fixture serves
+both the *source-it-then-call-a-function* and the *`bash` the script*
+topologies; `orphan_probe_no_survivors <marker> [settle]` is the assertion — it
+requires the marker to have ticked **and** then stayed flat, so a fixture that
+never ran fails instead of passing on a vacuous `0 → 0`.
+
+Each per-site test keeps that site's **real** wrapper and **real** process
+topology and swaps only the innermost payload body (by repointing the site's
+existing script variable, or shadowing the payload function inside the test's
+own subshell). That swap is necessary: the production bodies are correctly
+bounded and can no longer be made to hang, and inducing a hang would mean
+regressing production code. **No production file is touched.** All five timeout
+tests — the helper's own plus one per call site — use this one fixture.
+
 ## Node test approach — decision: **`node:test` built-in**
 
 We use Node's **built-in test runner** (`node --test`) with `node:assert/strict`
