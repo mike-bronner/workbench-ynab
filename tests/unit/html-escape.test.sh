@@ -19,6 +19,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 # shellcheck source=/dev/null
 source "$REPO_ROOT/tests/lib/assert.sh"
+# Shared poll-and-kill timeout helper: kills the whole process GROUP on a
+# timeout, so no command-substitution grandchild is stranded (issue #188).
+# shellcheck source=/dev/null
+source "$REPO_ROOT/tests/lib/watchdog.sh"
 
 MODULE="$REPO_ROOT/bin/html-escape.sh"
 # Source the module for direct function access. The CLI block inside it is guarded
@@ -198,27 +202,19 @@ test_giant_multibyte_value_is_bounded_and_truncated() {
   assert_eq "${expected}…" "$out"
 }
 
-# escape_timed <secs> <value> — run escape_ynab_string under a portable
-# poll-and-kill watchdog (macOS ships no timeout(1); same idiom as
-# tests/persona-loader.test.sh's render_tmpl_timed / run_voice_timed), so a
-# regressed super-linear scan fails the test cleanly instead of stalling CI.
+# escape_timed <secs> <value> — run escape_ynab_string under the shared portable
+# poll-and-kill watchdog (macOS ships no timeout(1) — see tests/lib/watchdog.sh),
+# so a regressed super-linear scan fails the test cleanly instead of stalling CI.
 # Prints the sanitized value on stdout; returns 124 if the call overran (hung),
 # else the call's own exit code.
 escape_timed() {
-  local secs="$1" value="$2" out_file pid waited=0 rc=0
+  local secs="$1" value="$2" out_file rc=0
   out_file="$(mktemp)"
-  ( escape_ynab_string "$value" ) >"$out_file" 2>/dev/null &
-  pid=$!
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge "$secs" ]; then
-      kill -9 "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
-      rm -f "$out_file"
-      return 124
-    fi
-    sleep 1; waited=$((waited + 1))
-  done
-  wait "$pid" || rc=$?
+  watchdog_run "$secs" escape_ynab_string "$value" >"$out_file" 2>/dev/null || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    rm -f "$out_file"
+    return 124
+  fi
   cat "$out_file"
   rm -f "$out_file"
   return "$rc"

@@ -23,6 +23,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 # shellcheck source=/dev/null
 source "$REPO_ROOT/tests/lib/assert.sh"
+# Shared poll-and-kill timeout helper: kills the whole process GROUP on a
+# timeout, so no command-substitution grandchild is stranded (issue #188).
+# shellcheck source=/dev/null
+source "$REPO_ROOT/tests/lib/watchdog.sh"
 
 WRITER="$REPO_ROOT/bin/report-writer.sh"
 REAL_TEMPLATE="$REPO_ROOT/assets/report/template.html"
@@ -68,6 +72,15 @@ run_writer_fixture() {
   while IFS= read -r -d '' a; do args+=("$a"); done < <(fixture_slots)
   YNAB_CONFIG_FILE="${YNAB_CONFIG_FILE:-$SANDBOX/none.json}" \
     bash "$WRITER" --template "$FIXTURE_TEMPLATE" "$@" "${args[@]}"
+}
+
+# overlong_writer_run <config> — the payload the output-dir watchdog runs.
+# run_writer_fixture is a shell function, so it is wrapped here rather than
+# passed through `env`. Defined at top level (not inside its test_* function)
+# because watchdog_run invokes it indirectly, by name, which trips SC2329 when
+# the definition is nested.
+overlong_writer_run() {
+  YNAB_CONFIG_FILE="$1" run_writer_fixture --tier Weekly --date 2026-06-22
 }
 
 # (a) AC: default path applied when .report.output_dir is absent from config.
@@ -285,20 +298,14 @@ JSON
 # so an over-1024-byte out_dir is refused loudly BEFORE either pass can run on
 # it. Watchdog-wrapped: a regression would otherwise peg the suite for minutes.
 test_overlong_output_dir_is_rejected_in_bounded_time() {
-  local cfg="$SANDBOX/overlong-dir.json" flood="" i=0 rc=0 pid waited=0
+  local cfg="$SANDBOX/overlong-dir.json" flood="" i=0 rc=0
   while [ "$i" -lt 4096 ]; do flood+='&&&&&&&&'; i=$((i + 1)); done   # ~32 KB of '&'
   printf '{ "report": { "output_dir": "/tmp/%s" } }' "$flood" > "$cfg"
-  ( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 \
-      >"$SANDBOX/overlong-out" 2>"$SANDBOX/overlong-err" ) &
-  pid=$!
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge 20 ]; then
-      kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
-      fail "overlong output_dir overran the 20 s watchdog (unbounded scan regressed)"
-    fi
-    sleep 1; waited=$((waited + 1))
-  done
-  wait "$pid" || rc=$?
+  watchdog_run 20 overlong_writer_run "$cfg" \
+    >"$SANDBOX/overlong-out" 2>"$SANDBOX/overlong-err" || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    fail "overlong output_dir overran the 20 s watchdog (unbounded scan regressed)"
+  fi
   assert_eq "2" "$rc" "over-1024-byte output dir → usage error (exit 2)"
   assert_contains "$(cat "$SANDBOX/overlong-err")" "longer than 1024 bytes" "error names the bound"
   assert_contains "$(cat "$SANDBOX/overlong-err")" ".report.output_dir" "error names the field"

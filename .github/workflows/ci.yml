@@ -125,8 +125,13 @@ jobs:
               ;;
           esac
 
+      # tests/unit/watchdog.test.sh joins this lane because the shared watchdog's
+      # process-group kill (issue #188) is job-control behaviour, and job control
+      # differs across bash majors — its TIMEOUT path must be proven on 3.2, not
+      # just on the ubuntu runner's bash 5.x. The other two files exercise the
+      # helper's pass path via render_tmpl_timed / run_voice_timed / escape_timed.
       - name: Run the persona footer-escaping tests under bash 3.2
-        run: bash scripts/test.sh tests/persona-loader.test.sh tests/unit/html-escape.test.sh
+        run: bash scripts/test.sh tests/persona-loader.test.sh tests/unit/html-escape.test.sh tests/unit/watchdog.test.sh
 
   # The assets/ change-set integration suites (M4) exercise the real apply
   # executor and the Ajv-backed validator end to end (assets/test/*.test.js),
