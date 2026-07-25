@@ -253,12 +253,35 @@ test('(#240) computeTaxSummary throws — never reads the host clock — when as
   );
 });
 
-test('(#240) computeTaxSummary throws on a malformed asOfDate rather than mis-comparing it', () => {
+test('(#240) computeTaxSummary throws on a malformed or impossible asOfDate rather than mis-comparing it', () => {
   // The due-date search is a LEXICOGRAPHIC compare (`d.date >= asOfDate`), so a
-  // non-'YYYY-MM-DD' anchor does not error on its own — it silently selects the
-  // wrong (or no) next quarterly payment. Each shape below must fail closed.
+  // bad anchor does not error on its own — it silently selects the wrong (or no)
+  // next quarterly payment. Two classes must fail closed, not one:
+  //   * wrong SHAPE ('5/1/2025', a Date, a number, or a full ISO timestamp whose
+  //     'YYYY-MM-DD' prefix is real) — not comparable with the profile's bare
+  //     'YYYY-MM-DD' due dates, which is why the exact shape is pinned separately
+  //     from the calendar check;
+  //   * IMPOSSIBLE-but-well-shaped ('2025-13-45', '2025-02-30', '0000-00-00',
+  //     '2025-02-29' in a non-leap year) — these compare happily, which is worse.
+  //     A shape-only guard let '2025-13-45' through, and because '1' > '0' in the
+  //     month position it sorts after every real 2025 due date: the search skipped
+  //     Q1–Q3 and returned Q4 (2026-01-15) with no error. Caught by epochDay()
+  //     (lib/tax/civilDate.mjs), which round-trips through Date.UTC.
   const profile = loadFixtureProfile();
-  for (const asOfDate of ['5/1/2025', '2025-5-1', '', 20250501, new Date('2025-05-01'), null]) {
+  for (const asOfDate of [
+    '5/1/2025',
+    '2025-5-1',
+    '',
+    20250501,
+    new Date('2025-05-01'),
+    null,
+    '2025-05-01T00:00:00Z',
+    '2025-13-45',
+    '2025-02-30',
+    '0000-00-00',
+    '2025-02-29',
+    '2025-04-31',
+  ]) {
     assert.throws(
       () => computeTaxSummary(profile, { taxYear: 2025, filingStatus: 'single', asOfDate }),
       /ytdData\.asOfDate/,

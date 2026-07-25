@@ -62,7 +62,7 @@ those plain objects to the engine, which resolves everything tax-shaped from
 the data-dir profile. The engine performs no fetch, no MCP call, and no
 network I/O of its own.
 
-The engine is composed of four modules behind one facade
+The engine is composed of five modules behind one facade
 ([`lib/tax/index.mjs`](../lib/tax/index.mjs), issue #27):
 
 | Module | Issue | Job |
@@ -71,6 +71,7 @@ The engine is composed of four modules behind one facade
 | [`lib/tax/classifyTransaction.mjs`](../lib/tax/classifyTransaction.mjs) | #23 (M3-4) | Map one transaction to a suggested tax line. |
 | [`lib/tax/confidence.mjs`](../lib/tax/confidence.mjs) | #19 | Turn a confidence score into a routing band. |
 | [`lib/tax/estimatedTax.mjs`](../lib/tax/estimatedTax.mjs) | #25/#82 (M3-6) | Threshold math and quarterly estimated-tax dates. |
+| [`lib/tax/civilDate.mjs`](../lib/tax/civilDate.mjs) | #240 | Parse a `YYYY-MM-DD` civil date, rejecting dates the calendar doesn't have. |
 
 ## 2. Schema reference
 
@@ -534,9 +535,12 @@ The flow:
    AGI floor, SE tax, next quarterly payment) from the M3-6 primitives, with
    every rate and date coming from the resolved profile. `ytdData` **must**
    carry an explicit `asOfDate` (`'YYYY-MM-DD'`): the engine never reads the
-   host clock, and **throws** when the anchor is missing or malformed, so a
-   caller can't silently anchor the summary on the wrong day — or the wrong
-   tax year — near midnight or outside UTC (#240). The quarterly
+   host clock, and **throws** when the anchor is missing, misshapen, or an
+   impossible calendar date (`'2025-13-45'`, `'2025-02-30'` — validated by
+   [`lib/tax/civilDate.mjs`](../lib/tax/civilDate.mjs), so a well-shaped
+   non-date can't quietly sort past every real due date), so a caller can't
+   silently anchor the summary on the wrong day — or the wrong tax year —
+   near midnight or outside UTC (#240). The quarterly
    estimated-tax tracker ([`/ynab-tax`](../commands/ynab-tax.md),
    [`docs/estimated-tax-tracker.md`](estimated-tax-tracker.md)) consumes the
    same profile data.
