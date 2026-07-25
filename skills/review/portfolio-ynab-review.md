@@ -244,23 +244,39 @@ the rollup:
 | `section-7-accounts` | Accounts across all budgets, grouped by budget. |
 | `section-12-tax-summary` | The **single** consolidated YTD tax picture from §4 — never one fragment per budget. |
 | `section-11-recommendations` | The ordered cross-budget action list (§6 ordering). |
-| `section-1-classification`, `section-6-categories`, `section-8-goals`, `section-10-anomalies` | The **collapsible per-budget detail**: one `<details><summary>{budget label}</summary><div class="details__body">…</div></details>` per budget, so the rollup reads as a summary on screen and prints in full. |
+| `section-1-classification`, `section-6-categories`, `section-8-goals`, `section-10-anomalies` | The **collapsible per-budget detail**: one `<details><summary>{escaped budget label}</summary><div class="details__body">…</div></details>` per budget, so the rollup reads as a summary on screen and prints in full. The label is config-sourced and lands in markup — it goes through the escaper below like every other string, no exceptions. |
 | `footer-persona` | `bash "${CLAUDE_PLUGIN_ROOT}/bin/persona.sh" html-name` — inject verbatim. |
 
 Every slot the template declares must be supplied; a section with nothing to say
 is passed as the literal `no findings`.
 
-**Escape every YNAB string, and every formatted amount.** Budget labels come from
-config, but payee / category / account names — and the `currency_symbol` embedded
-in a `formatRollupMoney` / `formatMoney` result — are untrusted external data
-(`formatRollupMoney` delegates to `formatMoney`, which embeds the off-the-wire
-symbol and separators verbatim and does **not** pre-escape). Route each through the
-one shared escaper before it enters a fragment, exactly as the universal
-protocol's §8 requires:
+**Escape every string that reaches the markup — the budget `label` included.**
+Three sources, one rule, no carve-outs:
+
+- **Budget labels** come from config, and this repo has already ruled that config
+  strings are a **trust boundary, not trusted input**: `persona.name` is bounded
+  and pre-escaped before it reaches the report for exactly this reason (issue #28
+  / GAP-13, [`../../bin/persona.sh`](../../bin/persona.sh)). A label carrying
+  `</summary><script>…` would otherwise reach the file as live markup, because
+  [`../../bin/report-writer.sh`](../../bin/report-writer.sh) treats every block
+  slot as an opaque, **pre-escaped** fragment and never re-processes it. Nothing
+  downstream will save you here.
+- **Payee / category / account names** are untrusted data straight off the wire.
+- **The `currency_symbol`** embedded in a `formatRollupMoney` / `formatMoney`
+  result is equally off-the-wire (`formatRollupMoney` delegates to `formatMoney`,
+  which embeds the symbol and separators verbatim and does **not** pre-escape).
+
+Route **every one** of them through the one shared escaper before it enters a
+fragment, exactly as the universal protocol's §8 requires:
 
 ```bash
 safe="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" -- "$raw")"
+safe_label="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" -- "$label")"
 ```
+
+The default (sanitize) mode is **self-bounding** — it byte-gates and truncates
+before any scan — so an unbounded config value is safe to hand it. Never reach for
+`--raw` with a label; that mode is for caller-owned, already-bounded values only.
 
 Then assemble with the report writer as the **final** step, using the
 `Portfolio` tier:

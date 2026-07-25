@@ -136,6 +136,19 @@ dashboard, and the collapsible per-budget sections survived into the HTML.
 Per-budget detail goes in `<details>/<summary>` blocks so the report reads as a
 summary on screen and prints in full.
 
+> **The budget `label` is escaped, not trusted.** It comes from the user's own
+> config, but config is a **trust boundary** in this repo, not a safe input —
+> `persona.name` is bounded and pre-escaped for precisely this reason (issue #28
+> / GAP-13, [`../bin/persona.sh`](../bin/persona.sh)). The label lands inside a
+> `<summary>`, and the writer treats every block slot as an opaque, pre-escaped
+> fragment it never re-processes, so the skill's escaping rule is the only thing
+> between a label and the browser. Every label therefore goes through
+> [`../bin/html-escape.sh`](../bin/html-escape.sh) like any YNAB-sourced string;
+> its default sanitize mode byte-gates and truncates before it scans, so an
+> unbounded config value is safe to pass. `tests/unit/portfolio-report.test.sh`
+> renders a hostile `</summary><script>…` label and asserts it arrives as inert
+> text.
+
 ## Dispatch ordering
 
 `orderFindings(findings)` ranks cross-budget findings **most-severe first**

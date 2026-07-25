@@ -10,7 +10,16 @@
 # non-zero exit when anything fails. Auto-discovered by scripts/test.sh.
 #
 # The command and skill are static markdown assets, so their assertions are
-# structural string checks — the regression guard for the AC: the slash command
+# structural string checks — but SECTION-SCOPED ones (skill_section /
+# assert_in_section*) wherever the needle is a word or identifier the skill
+# mentions more than once. The skill's intro lists every module identifier by
+# name, so a whole-file grep for `selectBudgets` (or any sibling) is satisfied by
+# that prose list even when the owning section has stopped calling the function —
+# vacuous, and proven so by mutation. Scope to the section that must carry the
+# behaviour; whole-file checks are reserved for genuinely document-level claims
+# (the not-tax-advice banner) and marked as such.
+#
+# The regression guard for the AC: the slash command
 # exists with valid frontmatter (AC#1), the skill resolves budgets from config
 # with no hardcoded budget (AC#2), fetches per budget via the namespaced tools
 # and reuses before re-fetching (AC#3), names all four rollup dimensions (AC#4),
@@ -21,7 +30,12 @@
 # The template/print assertions (AC#7/#8) are NOT string checks against the
 # skill: they RENDER a real Portfolio report through the actual report writer
 # and inspect the resulting HTML, which is what "verified by inspecting rendered
-# HTML" requires. Dispatch ordering (AC#9) is proven by the module's unit tests
+# HTML" requires. That render also carries the ESCAPING case: a hostile,
+# config-sourced budget label (`</summary><script>…`) is routed through
+# bin/html-escape.sh exactly as the skill instructs and asserted to arrive as
+# inert text — config is a trust boundary (issue #28 / GAP-13), and the writer
+# never re-escapes a block slot, so the skill's rule is the only defense.
+# Dispatch ordering (AC#9) is proven by the module's unit tests
 # (tests/unit/portfolio-rollup.test.mjs); asserted here only as the wiring that
 # the skill calls that ranking rather than improvising one.
 #
@@ -38,6 +52,7 @@ COMMAND_FILE="${REPO_ROOT}/commands/ynab-portfolio.md"
 SKILL_FILE="${REPO_ROOT}/skills/review/portfolio-ynab-review.md"
 WRITER="${REPO_ROOT}/bin/report-writer.sh"
 TEMPLATE="${REPO_ROOT}/assets/report/template.html"
+ESCAPER="${REPO_ROOT}/bin/html-escape.sh"
 
 PREFIX='mcp__plugin_workbench-ynab_ynab__'   # bare prefix — guard-safe
 
@@ -170,14 +185,21 @@ for f in "$COMMAND_FILE" "$SKILL_FILE"; do
 done
 
 # ── AC#2 — budgets come from config, nothing is hardcoded ─────────────────────
+# Scoped to §1 ("Resolve the budget set from config"), the step that must carry
+# the resolution. The skill's intro (:27-29) LISTS every module identifier —
+# `selectBudgets`, `businessBudgets`, `aggregatePortfolio`, `aggregateScheduleC`,
+# `orderFindings` — so a whole-file grep for any of them is satisfied by that one
+# prose list even after the owning section stops calling the function. Proven, not
+# assumed: deleting the real `selectBudgets(budgets)` call from §1 left the
+# unscoped assertion green.
 echo "AC#2: the budget set is resolved from the M6-6 config"
 FILE="$SKILL_FILE"
-assert_present "skill sources the shared config loader" 'bin/config.sh'
-assert_present "skill reads the budgets array via _cfg_budgets" '_cfg_budgets'
-assert_present "skill selects budgets through the tested module" 'selectBudgets'
-assert_present_re "skill reads each entry's role/tag" 'role'
-assert_present_re "skill names the business role tag" 'business'
-assert_present_flat_re "skill forbids hardcoding a budget" \
+assert_in_section 1 "skill sources the shared config loader" 'bin/config.sh'
+assert_in_section 1 "skill reads the budgets array via _cfg_budgets" '_cfg_budgets'
+assert_in_section 1 "skill selects budgets through the tested module" 'selectBudgets'
+assert_in_section_re 1 "skill reads each entry's role/tag" 'role'
+assert_in_section_re 1 "skill names the business role tag" 'business'
+assert_in_section_flat_re 1 "skill forbids hardcoding a budget" \
   "no budget id|never hardcode a budget|No hardcoded budget"
 # A UUID-shaped literal would be a hardcoded budget id — the exact AC violation.
 assert_absent_re "skill contains no literal budget UUID" \
@@ -214,6 +236,10 @@ assert_in_section_re 3 "skill states milliunits convert exactly once" \
 assert_in_section_flat_re 3 "skill forbids summing raw milliunits" \
   "[Nn]ever sum raw +milliunits|never add a raw +milliunit"
 assert_present "skill delegates the arithmetic to the tested module" 'portfolio-rollup.js'
+# The primary aggregation entry point — previously asserted nowhere at all, so
+# §3 could have stopped calling it without a single test noticing. Scoped, for
+# the same reason as every other identifier the intro pre-mentions.
+assert_in_section 3 "skill aggregates through the module entry point" 'aggregatePortfolio'
 # THE RENDER BOUNDARY. The module's outputs are already in currency units, but
 # `formatMoney` takes RAW MILLIUNITS and divides again — instructing the plain
 # helper here renders every figure 1000× too small. The skill must name
@@ -227,23 +253,29 @@ assert_in_section_flat_re 3 "skill forbids hand-scaling an amount at a call site
   "never .{0,40}multiplying by 1000"
 
 # ── AC#6 — consolidated Schedule C into the M6-4 tracker ──────────────────────
+# Scoped to §4 ("Consolidated tax view"), which must carry the whole chain.
 echo "AC#6: one consolidated YTD tax picture"
-assert_present_re "skill aggregates Schedule C"            'Schedule C'
-assert_present "skill selects the business-tagged budgets" 'businessBudgets'
-assert_present "skill aggregates them into one figure set" 'aggregateScheduleC'
-assert_present "skill feeds the M6-4 tracker library"      'lib/tax/estimatedTax.mjs'
-assert_present_flat_re "skill demands one picture, not per-budget fragments" \
+assert_in_section_re 4 "skill aggregates Schedule C"            'Schedule C'
+assert_in_section 4 "skill selects the business-tagged budgets" 'businessBudgets'
+assert_in_section 4 "skill aggregates them into one figure set" 'aggregateScheduleC'
+assert_in_section 4 "skill feeds the M6-4 tracker library"      'lib/tax/estimatedTax.mjs'
+assert_in_section_flat_re 4 "skill demands one picture, not per-budget fragments" \
   "not per-budget fragments|never one fragment per budget"
-assert_present_flat_re "skill forbids hardcoded tax constants" \
+assert_in_section_flat_re 4 "skill forbids hardcoded tax constants" \
   "No tax constant is ever written here|no hardcoded tax"
+# Deliberately WHOLE-FILE, unlike its neighbours: the disclaimer is a
+# document-level banner (the callout above §1, restated in Hard rules), not a
+# step inside §4. Scoping it to §4 would assert a placement the skill does not —
+# and should not — have.
 assert_present "skill carries the not-tax-advice disclaimer" 'Not tax advice'
 
 # ── AC#9 — dispatch is severity-prefixed, most-severe first ───────────────────
+# Scoped to §6 ("Dispatch summary"), the step that must carry the ordering.
 echo "AC#9: dispatch ordering"
-assert_present "skill orders findings through the tested ranking" 'orderFindings'
-assert_present_re "skill states most-severe-first ordering" 'most-severe first'
-assert_present "skill follows the frozen dispatch contract" 'docs/dispatch-format.md'
-assert_present_re "skill spans all budgets in the dispatch" 'every.{0,20}budget|all budgets'
+assert_in_section 6 "skill orders findings through the tested ranking" 'orderFindings'
+assert_in_section_re 6 "skill states most-severe-first ordering" 'most-severe first'
+assert_in_section 6 "skill follows the frozen dispatch contract" 'docs/dispatch-format.md'
+assert_in_section_flat_re 6 "skill spans all budgets in the dispatch" 'every.{0,20}budget|all budgets'
 
 # ── AC#7/#8 — RENDER a Portfolio report and inspect the HTML ──────────────────
 # Not a prose check: build a real report through the real writer and assert the
@@ -278,6 +310,31 @@ assert_in_section_flat_re 5 "skill names the shipped warning token" '--coral: #e
 assert_in_section_flat_re 5 "skill explicitly forbids the AC's stale #e74c3c" \
   "do not use .{0,10}#e74c3c"
 
+# THE ESCAPING RULE MUST NOT CARVE OUT THE BUDGET LABEL. The label is
+# config-sourced, and this repo already ruled config strings are a trust boundary
+# (issue #28 / GAP-13: persona.name is bounded AND pre-escaped for exactly this
+# reason). It lands in a `<details><summary>` in §5's slot table, and
+# bin/report-writer.sh treats every block slot as opaque, pre-escaped markup it
+# never re-processes — so nothing downstream compensates for an unescaped label.
+# Pin the actual CALL LINE an agent copies, not a prose claim about it. A loose
+# prose regex is not good enough here and this was proven, not assumed: an
+# earlier draft of this assertion matched the very carve-out text it was meant to
+# forbid, passing green against the unescaped-label version of §5.
+# shellcheck disable=SC2016
+assert_in_section 5 "skill shows the budget label going through the escaper" \
+  'safe_label="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" -- "$label")"'
+# The sink must itself name the ESCAPED value, so an agent reading the slot table
+# without reading the rule underneath it still cannot inject a raw label.
+assert_in_section 5 "slot table names the escaped label at the sink" '{escaped budget label}'
+assert_in_section 5 "skill names the one shared escaper" 'bin/html-escape.sh'
+# The carve-out phrasing this blocker was about: labels set AGAINST the untrusted
+# list rather than included in it. Goes red if the exemption is ever reinstated.
+if skill_section 5 | flatten | grep -qiE "budget labels come from config, but"; then
+  no "skill does not exempt budget labels from escaping (the 'come from config, but' carve-out is back)"
+else
+  ok "skill does not exempt budget labels from escaping"
+fi
+
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -287,6 +344,25 @@ slot_args=()
 while IFS= read -r name; do
   [ -n "$name" ] && slot_args+=(--slot "${name}=<div class=\"card\"><h2>${name}</h2></div>")
 done < <(grep -oE '<!-- SLOT:[a-z0-9-]+ -->' "$TEMPLATE" | sed -E 's/^<!-- SLOT:([a-z0-9-]+) -->$/\1/' | sort -u)
+
+# A HOSTILE, CONFIG-SOURCED BUDGET LABEL — the trust-boundary case. A user's
+# config is not a safe input: the label lands in a `<details><summary>`, and the
+# writer never re-escapes a block slot. This is the label routed through the one
+# shared escaper exactly as §5 instructs; the assertions after the render prove
+# the payload arrives as inert TEXT, not live markup.
+HOSTILE_LABEL='</summary><script>alert(1)</script><img src=x onerror=alert(2)>'
+HOSTILE_LABEL_ESCAPED="$(bash "$ESCAPER" -- "$HOSTILE_LABEL")"
+# The escaper must actually have neutralized it before it is ever embedded —
+# otherwise the render assertions below would be testing the fixture, not the
+# escaper. Fail loudly here rather than silently injecting live markup.
+case "$HOSTILE_LABEL_ESCAPED" in
+  *'<script>'*|*'</summary>'*|*'<img'*)
+    no "the escaper neutralizes a hostile budget label (raw markup survived: $HOSTILE_LABEL_ESCAPED)" ;;
+  *'&lt;script&gt;'*)
+    ok "the escaper neutralizes a hostile budget label" ;;
+  *)
+    no "the escaper neutralizes a hostile budget label (unexpected output: $HOSTILE_LABEL_ESCAPED)" ;;
+esac
 
 # Give two slots the shapes the AC names: a KPI dashboard and a collapsible
 # per-budget detail section.
@@ -302,7 +378,7 @@ for i in "${!slot_args[@]}"; do
     # rendering that is the whole point — nor the print rule that must force
     # EVERY collapsible open, not just the first.
     section-10-anomalies=*)
-      slot_args[i]='section-10-anomalies=<div class="card"><h2>Per-budget detail</h2><details><summary>Personal</summary><div class="details__body">personal detail</div></details><details><summary>Business</summary><div class="details__body">business detail</div></details></div>' ;;
+      slot_args[i]="section-10-anomalies=<div class=\"card\"><h2>Per-budget detail</h2><details><summary>Personal</summary><div class=\"details__body\">personal detail</div></details><details><summary>Business</summary><div class=\"details__body\">business detail</div></details><details><summary>${HOSTILE_LABEL_ESCAPED}</summary><div class=\"details__body\">hostile detail</div></details></div>" ;;
   esac
 done
 
@@ -353,10 +429,27 @@ if [ -f "$report_path" ]; then
   # the template's own comments discuss `<details>/<summary>` in prose, which a
   # looser count would tally as rendered collapsibles.
   details_count="$(grep -oF -- '<details><summary>' "$report_path" | wc -l | tr -d ' ')"
-  if [ "$details_count" -eq 2 ]; then
-    ok "both per-budget collapsibles survive assembly (2 <details>)"
+  if [ "$details_count" -eq 3 ]; then
+    ok "every per-budget collapsible survives assembly (3 <details>)"
   else
-    no "both per-budget collapsibles survive assembly (expected 2 <details>, got $details_count)"
+    no "every per-budget collapsible survives assembly (expected 3 <details>, got $details_count)"
+  fi
+
+  # THE TRUST BOUNDARY, AT THE SINK. A hostile config-sourced label must reach
+  # the file as inert text. The writer documents block slots as opaque and
+  # pre-escaped (bin/report-writer.sh), so this proves the ONLY defense — the
+  # skill's escaping rule — actually holds end to end.
+  assert_present "hostile budget label renders as escaped text" '&lt;script&gt;alert(1)&lt;/script&gt;'
+  assert_absent_re "hostile budget label injects no live script element" '<script'
+  assert_absent_re "hostile budget label injects no live img/onerror element" '<img[^>]*onerror'
+  # The `</summary>` half of the payload is the one that would break OUT of the
+  # summary element. The template legitimately contains no `</summary>` of its
+  # own beyond the three fixtures', so an escaped payload leaves exactly three.
+  close_summary_count="$(grep -oF -- '</summary>' "$report_path" | wc -l | tr -d ' ')"
+  if [ "$close_summary_count" -eq 3 ]; then
+    ok "hostile label does not break out of its <summary> (3 </summary>)"
+  else
+    no "hostile label does not break out of its <summary> (expected 3 </summary>, got $close_summary_count)"
   fi
   assert_present "rendered HTML reports the Portfolio tier" 'Portfolio YNAB Review'
   # The disclaimer is hardcoded in the template, so the rollup inherits it too.
