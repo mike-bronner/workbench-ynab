@@ -82,7 +82,18 @@ Two layers keep credentials out of version control:
    `vendor/` to avoid false positives. The **cleartext-token and PEM rules still
    scan `vendor/`** — those shapes never legitimately appear in the bundle, so
    the ~1.46 MB vendored artifact (the repo's highest-risk supply-chain surface)
-   is scanned for the unambiguous secret shapes. Bundle *integrity* verification
+   is scanned for the unambiguous secret shapes.
+
+   **Every file is scanned as text.** The scan deliberately does *not* skip
+   "binary" files: a single NUL byte anywhere in a file is enough for `grep` to
+   classify the whole file as binary and skip it, which would hide a credential
+   in that file from all three rules above — and this scan is the repo's only
+   content-scanning CI gate, so one stray byte would silently shrink it to
+   nothing (issue #255). Because scanning as text means a matched line is printed
+   verbatim, reported hits are sanitized before they reach stdout or the CI log:
+   bytes outside printable ASCII become `?` and each line is capped, so a finding
+   stays actionable (`path:line:match`) without raw bytes or terminal escape
+   sequences leaking into a log. Bundle *integrity* verification
    is a **complementary** control, not a substitute for this scan:
    `verify-bundle.sh` detects drift, not secret content (see
    [Bundle integrity](#bundle-integrity)). The scanner is itself covered by a

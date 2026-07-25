@@ -42,12 +42,38 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# Common grep flags: recurse, show line numbers, extended regex, skip binaries,
-# and prune the directories that are never committed. vendor/ is NOT pruned here
-# — it is excluded only for the hex rule below (see the per-rule note above), so
-# the cleartext-token and PEM rules still reach into the vendored bundle.
-GREP_BASE=(-rInE --binary-files=without-match
+# Common grep flags: recurse, show line numbers, extended regex, scan every file
+# as text, and prune the directories that are never committed. vendor/ is NOT
+# pruned here — it is excluded only for the hex rule below (see the per-rule note
+# above), so the cleartext-token and PEM rules still reach into the bundle.
+#
+# --binary-files=text, and NO -I: a single NUL byte anywhere in a file makes grep
+# classify the WHOLE file as binary and skip it, so a credential in that file is
+# invisible to all three rules below — this guard is the repo's only
+# content-scanning CI gate, and one stray byte silently shrinks it to nothing
+# (issue #255). Note -I is the short form of --binary-files=without-match and was
+# baked into the old -rInE cluster, so it is DROPPED rather than overridden here:
+# relying on grep's last-flag-wins ordering to cancel an earlier -I would make
+# this guard's coverage depend on an implementation detail. With no -I present
+# there is nothing to override, on GNU and BSD grep alike.
+GREP_BASE=(-rnE --binary-files=text
   --exclude-dir=.git --exclude-dir=node_modules)
+
+# Cap on a single reported hit line. Under --binary-files=text grep prints the
+# matched line verbatim, and in a genuinely binary file "lines" are delimited by
+# whatever newlines happen to occur — so one hit could otherwise dump most of a
+# file into the CI log.
+MAX_HIT_LEN=200
+
+# Render raw grep output safe to print. Scanning as text means a matched line can
+# carry raw control bytes straight out of the scanned file (a NUL sitting on the
+# same line as a match reaches stdout verbatim — verified, not theoretical), and
+# terminal escape sequences in a log are their own hazard. Map every byte outside
+# printable ASCII + tab to '?', then cap the line: a finding stays actionable
+# (path:line:match) without any raw byte reaching stdout, stderr, or CI logs.
+sanitize_hits() {
+  LC_ALL=C tr -c '\11\12\40-\176' '?' | cut -c "1-$MAX_HIT_LEN"
+}
 
 # 1. Standalone 64-char lowercase-hex run (the YNAB PAT shape). The surrounding
 #    [^0-9a-f] / anchors stop a longer hex blob from matching a 64-char window.
@@ -65,7 +91,7 @@ hits=""
 # Rule 1 (hex) excludes vendor/: vendored.json carries legitimate 64-char-hex
 # SHA-256 digests indistinguishable from a YNAB PAT. The exclusion is scoped to
 # THIS rule alone.
-found="$(grep "${GREP_BASE[@]}" --exclude-dir=vendor -e "$PAT_HEX" . 2>/dev/null | sed 's#^\./##' || true)"
+found="$(grep "${GREP_BASE[@]}" --exclude-dir=vendor -e "$PAT_HEX" . 2>/dev/null | sanitize_hits | sed 's#^\./##' || true)"
 [ -n "$found" ] && hits="${hits}${found}"$'\n'
 
 # Rules 2 (cleartext token) and 3 (PEM) scan the WHOLE tree, vendor/ included —
@@ -73,7 +99,7 @@ found="$(grep "${GREP_BASE[@]}" --exclude-dir=vendor -e "$PAT_HEX" . 2>/dev/null
 # smuggled under vendor/ is caught. -e "$pat" is required: the PEM pattern starts
 # with '-', which grep would otherwise parse as an option flag.
 for pat in "$PAT_ENV" "$PAT_PEM"; do
-  found="$(grep "${GREP_BASE[@]}" -e "$pat" . 2>/dev/null | sed 's#^\./##' || true)"
+  found="$(grep "${GREP_BASE[@]}" -e "$pat" . 2>/dev/null | sanitize_hits | sed 's#^\./##' || true)"
   [ -n "$found" ] && hits="${hits}${found}"$'\n'
 done
 hits="$(printf '%s' "$hits" | sed '/^[[:space:]]*$/d' | sort -u || true)"
