@@ -12,13 +12,18 @@
 #
 # WHAT IT CHECKS (two invariants)
 #
-#   1. NO WRITE VERB IS CALLABLE from an M2 read-only surface. The ten YNAB
+#   1. NO WRITE VERB IS CALLABLE from an M2 read-only surface. The thirteen YNAB
 #      write tools are (this list is pinned against the money gate's
 #      authoritative inventory — see the WRITE_VERBS definition below):
 #        ynab_update_transaction   ynab_update_transactions  ynab_update_category
 #        ynab_create_transaction   ynab_create_transactions
 #        ynab_create_receipt_split_transaction               ynab_delete_transaction
 #        ynab_reconcile_account    ynab_create_account       ynab_set_default_budget
+#        ynab_create_scheduled_transaction  ynab_update_scheduled_transaction
+#        ynab_delete_scheduled_transaction
+#      The last three arrived with the 0.27.1 re-vendor (#157) — the bundle bump
+#      taken for the scheduled-transactions READ also registered three
+#      scheduled-transaction MUTATIONS, which this gate must know about.
 #
 #      A write tool is only ever CALLABLE in its fully-namespaced form,
 #      `mcp__plugin_workbench-ynab_ynab__<verb>` — that is the only string Claude
@@ -71,7 +76,7 @@ NS_PREFIX='mcp__plugin_workbench-ynab_ynab__'
 # copies of one invariant is how a guard quietly stops guarding: a verb dropped
 # here would silently widen M2's write surface across every scanned file. Add a
 # write tool to the money gate and this list must grow with it, and vice versa.
-WRITE_VERBS='ynab_update_transactions|ynab_update_transaction|ynab_update_category|ynab_create_transactions|ynab_create_receipt_split_transaction|ynab_create_transaction|ynab_create_account|ynab_delete_transaction|ynab_reconcile_account|ynab_set_default_budget'
+WRITE_VERBS='ynab_update_transactions|ynab_update_transaction|ynab_update_category|ynab_create_transactions|ynab_create_receipt_split_transaction|ynab_create_transaction|ynab_create_account|ynab_delete_transaction|ynab_reconcile_account|ynab_set_default_budget|ynab_create_scheduled_transaction|ynab_update_scheduled_transaction|ynab_delete_scheduled_transaction'
 
 # The callable-write pattern: the namespace prefix immediately followed by a
 # forbidden verb. This is what a real invocation looks like; bare deny-prose

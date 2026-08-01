@@ -206,14 +206,14 @@ Every command is namespaced under `/workbench-ynab:`. The plugin is mid-build; t
 
 ## Versioning
 
-**The plugin and its vendored YNAB MCP bundle are pinned together in git.** The bundle is [`@dizzlkheinz/ynab-mcpb`](https://www.npmjs.com/package/@dizzlkheinz/ynab-mcpb), **version-frozen at `0.26.10`** and vendored as a self-contained `vendor/ynab-mcp/index.cjs` — no `npx`-on-demand, no floating dependency. The pinned version, tarball hash, and provenance are recorded in [`vendor/ynab-mcp/vendored.json`](vendor/ynab-mcp/vendored.json); the bundle is only ever updated via the re-vendor script (`bin/revendor.sh`), never by hand. See [`docs/vendoring.md`](docs/vendoring.md) for how to update the bundle, verify the result, and the version-marker format.
+**The plugin and its vendored YNAB MCP bundle are pinned together in git.** The bundle is [`@dizzlkheinz/ynab-mcpb`](https://www.npmjs.com/package/@dizzlkheinz/ynab-mcpb), **version-frozen at `0.27.1`** and vendored as a self-contained `vendor/ynab-mcp/index.cjs` — no `npx`-on-demand, no floating dependency. The pinned version, tarball hash, and provenance are recorded in [`vendor/ynab-mcp/vendored.json`](vendor/ynab-mcp/vendored.json); the bundle is only ever updated via the re-vendor script (`bin/revendor.sh`), never by hand. See [`docs/vendoring.md`](docs/vendoring.md) for how to update the bundle, verify the result, and the version-marker format.
 
 Pinning both versions in git means a given `workbench-ynab` commit always runs against the exact MCP bundle it was tested with — boot is offline, frozen, and reproducible.
 
 Two version numbers live in this repo. They track different things, are deliberately **independent**, and are **never co-bumped**.
 
 - **The plugin's own version** lives in [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json) (currently `0.1.0`). This is the **only** version release automation bumps — the release workflow's sole bump target is `.claude-plugin/plugin.json`, and no other manifest, JSON, or config file in the repo carries a release version. It starts at `0.1.0` and is cut to `1.0.0` at first release.
-- **The vendored YNAB MCP version** is recorded in [`vendor/ynab-mcp/vendored.json`](vendor/ynab-mcp/vendored.json) (`@dizzlkheinz/ynab-mcpb@0.26.10`). It is **frozen, provenance-only** — a record of exactly which upstream bundle is checked into git, not a number this plugin releases against. Release automation **never** touches it; it changes only when the bundle is deliberately re-vendored.
+- **The vendored YNAB MCP version** is recorded in [`vendor/ynab-mcp/vendored.json`](vendor/ynab-mcp/vendored.json) (`@dizzlkheinz/ynab-mcpb@0.27.1`). It is **frozen, provenance-only** — a record of exactly which upstream bundle is checked into git, not a number this plugin releases against. Release automation **never** touches it; it changes only when the bundle is deliberately re-vendored.
 
 The two schemes do not move together: bumping the plugin version leaves the vendored bundle version untouched, and re-vendoring the bundle leaves the plugin version untouched.
 

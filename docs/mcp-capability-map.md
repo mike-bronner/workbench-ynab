@@ -59,11 +59,12 @@ path and the one the swap procedure below assumes by default.
 
 ## Capability map
 
-The 16 logical operations the rituals need, each mapped to its current concrete
+The 17 logical operations the rituals need, each mapped to its current concrete
 namespaced tool. `R` = read (safe, pre-approved in the read-only phase);
 `W` = write (ledger-only mutation, gated behind the write-safety guardrail and
 approved in Sprint 4). Operations 15–16 were added for the Sprint 4 delete-duplicate
-write path (M4-8).
+write path (M4-8); operation 17 arrived with the 0.27.1 re-vendor (#157), which is
+what first gave the plugin a read path to scheduled transactions.
 
 | # | Logical operation | Concrete tool | Kind | What it does |
 |---|---|---|---|---|
@@ -83,15 +84,22 @@ write path (M4-8).
 | 14 | `reconcile_account` | `mcp__plugin_workbench-ynab_ynab__ynab_reconcile_account` | W | Reconcile an account to a statement balance |
 | 15 | `get_transaction` | `mcp__plugin_workbench-ynab_ynab__ynab_get_transaction` | R | Get one transaction — the M4-8 delete path re-reads the victim for drift detection |
 | 16 | `compare_transactions` | `mcp__plugin_workbench-ynab_ynab__ynab_compare_transactions` | R | Compare two transactions — corroborates the duplicate pairing in the M4-8 dry-run preview |
+| 17 | `list_scheduled_transactions` | `mcp__plugin_workbench-ynab_ynab__ynab_list_scheduled_transactions` | R | List scheduled (upcoming) transactions — the forecast / bills-due source, cached by the read path (#157) |
 
 > **None of these move real money.** Write-back is strictly ledger-only
 > (categorize / allocate / dedup / reconcile). The plugin never initiates
 > transfers or payments — see the write-safety guardrail (Sprint 4).
 
 > **Suffixes confirmed against the vendored bundle.** The vendored MCP
-> (`@dizzlkheinz/ynab-mcpb` v0.26.10, in `vendor/ynab-mcp/`) exposes ~30 tools;
-> the rituals need the 16 above. All 16 concrete suffixes were verified to be
-> registered tool ids in that bundle. On a future re-vendor or MCP swap,
+> (`@dizzlkheinz/ynab-mcpb` v0.27.1, in `vendor/ynab-mcp/`) registers 35 tools;
+> the rituals need the 17 above. All 17 concrete suffixes were verified to be
+> registered tool ids in that bundle. The 0.27.1 bump was purely additive over
+> 0.26.10's 28 tools — nothing was removed, so no existing call site changed. Of
+> the 7 additions the rituals take one (`list_scheduled_transactions`, row 17);
+> three more reads (`get_scheduled_transaction`, `analyze_spending`,
+> `compare_spending_periods`) are unused, and the three scheduled-transaction
+> **mutations** are deny-listed in the write-safety guardrail. On a future
+> re-vendor or MCP swap,
 > re-confirm each suffix against the new bundle and correct any drift **here, in
 > [`ynab-tools.md`](../skills/protocol/ynab-tools.md), and (for a changed suffix
 > the orchestrator actually wires) in the orchestrator's `tools:` list** —
