@@ -14,6 +14,11 @@ name: Update marketplace SHA
 # backfill via workflow_dispatch (pass a tag to pin that release's SHA;
 # omit to use the latest release).
 #
+# Credential handling (issue #252): the marketplace is cloned WITHOUT
+# credentials, so the long-lived PAT is never persisted into
+# marketplace/.git/config; it is supplied only in the push URL, at push time.
+# Same posture release.yml uses for its own push.
+#
 # Prerequisites (documented in docs/ci.md):
 # - Secret `DEVELOPER_SETTINGS_TOKEN` set at the repo or org level.
 #   Fine-grained PAT with Contents: Read and write on
@@ -105,8 +110,18 @@ jobs:
             exit 1
           fi
 
+          # Clone UNAUTHENTICATED (issue #252). An embedded credential in the
+          # clone URL is written straight into marketplace/.git/config as the
+          # origin remote, leaving this long-lived, non-expiring PAT — Contents:
+          # write on the SHARED marketplace repo, materially higher-value than a
+          # job-scoped GITHUB_TOKEN — readable on disk for the rest of the step.
+          # The marketplace is public, so anonymous clone and the retry loop's
+          # `git pull --rebase` both work; were it ever made private this fails
+          # here, loudly, rather than degrading to a silent skip. The credential
+          # is supplied only at push time, via PUSH_URL below — the same posture
+          # release.yml uses for its own push.
           git clone --depth 1 \
-            "https://x-access-token:${GH_TOKEN}@github.com/mike-bronner/claude-workbench.git" \
+            "https://github.com/mike-bronner/claude-workbench.git" \
             marketplace
           cd marketplace
 
@@ -154,10 +169,30 @@ jobs:
           # the new tip and retry, bounded — jq only rewrites this plugin's own
           # entry, so a sibling's edit rebases cleanly. Exhausting the budget
           # is a hard failure, never a silent skip.
+          #
+          # The credential lives only in this URL, only for the push itself —
+          # never in .git/config (issue #252). Pushing by explicit URL means
+          # `origin` stays unauthenticated, so the rebase-and-retry path below
+          # re-fetches anonymously and no `git` invocation after this step can
+          # reach the PAT. HEAD is pushed to the branch the clone checked out
+          # (the marketplace's default), read once rather than hardcoded.
+          PUSH_URL="https://x-access-token:${GH_TOKEN}@github.com/mike-bronner/claude-workbench.git"
+          PUSH_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+          # Naming the ref explicitly means naming it correctly: a detached
+          # HEAD resolves to the literal "HEAD" and would push refs/heads/HEAD,
+          # a junk branch on a repo shared with every other workbench plugin.
+          # A plain clone never detaches, so this is a broken assumption —
+          # abort rather than write something nobody asked for.
+          if [ -z "$PUSH_BRANCH" ] || [ "$PUSH_BRANCH" = "HEAD" ]; then
+            echo "::error::Marketplace clone is not on a named branch (detached HEAD) — refusing to push a ref nobody asked for."
+            exit 1
+          fi
+
           MAX_PUSH_ATTEMPTS=5
           attempt=1
           while true; do
-            if git push; then
+            if git push "$PUSH_URL" "HEAD:refs/heads/$PUSH_BRANCH"; then
               echo "Pinned $PLUGIN_NAME to $TAG ($SHA)"
               exit 0
             fi

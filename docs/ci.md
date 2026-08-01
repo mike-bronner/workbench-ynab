@@ -127,7 +127,8 @@ The workflow then, in order:
    (issue #75; see the README's Versioning section). The vendored bundle's
    version marker is provenance-only and is never touched;
 3. runs the full test suite (`scripts/test.sh`, which includes the
-   offline-boot proof) and the `assets/` integration suite;
+   offline-boot proof). The `assets/` integration suite has already gated the
+   release from its own `assets-tests` job — see below;
 4. commits as `github-actions[bot]`, creates the annotated tag `v<version>`,
    pushes `main` **and** the tag in a single `git push --atomic` — both refs
    land or neither does, because the monotonicity guard makes a same-version
@@ -137,20 +138,52 @@ The workflow then, in order:
    releases created with `GITHUB_TOKEN` emit sterile events that do **not**
    auto-trigger `on: release` workflows (GitHub's anti-recursion rule).
 
-The job checks out with **`persist-credentials: false`**. The release runs
-`npm --prefix assets ci` — third-party packages and their install scripts —
-in the same job that holds `contents: write` and `actions: write`, so leaving
-checkout's credential in `.git/config` would put a `main`-push and
-workflow-dispatch capability within reach of any compromised transitive
-dependency of `assets/`. Nothing is persisted; step 4's push supplies the
-token in its URL instead, after every test has already run.
+### Why the release is two jobs
+
+The `assets/` integration suite runs `npm --prefix assets ci` — third-party
+packages and their install scripts — followed by their module top-level code.
+It therefore lives in its **own `assets-tests` job**, scoped to
+`permissions: contents: read`, which overrides the workflow-level
+`contents: write` + `actions: write`. The `release` job gates on it via
+`needs: assets-tests`, so the suite still blocks the tag; as a job dependency
+that ordering is stronger than the step ordering it replaced, and "no
+`node_modules` on the resolution path while the offline-boot proof runs"
+becomes a separate-VM guarantee rather than a step-ordering one.
+
+Two jobs mean two checkouts of a moving `main`, so `assets-tests` publishes the
+commit it actually tested and `release` re-checks it against its own `HEAD`
+before bumping anything. If `main` advanced in between — or the output is
+missing — the release aborts with an `::error::` rather than tagging a tree the
+assets suite never saw.
+
+Sharing a runner is the exposure, not merely a credential on disk. Actions
+does not reap detached children at step boundaries, so a compromised
+transitive dependency can background a process that outlives its own step and
+read a push token out of another step's `/proc/<pid>/cmdline` **or**
+`/proc/<pid>/environ` — same VM, same UID. Neither `--ignore-scripts`,
+scrubbing the credential, nor moving it from the command line into `env:`
+closes that; only never minting a write-scoped token on that runner does.
+
+The `release` job additionally checks out with **`persist-credentials: false`**,
+so checkout's `contents: write` + `actions: write` token is never written into
+`.git/config`; step 4's push supplies the token in its URL instead, at push
+time. With the untrusted install now on a different runner this is defence in
+depth rather than the sole barrier.
 
 ## The marketplace SHA pin (cross-repo write)
 
 `update-marketplace-sha.yml` clones
 [`mike-bronner/claude-workbench`](https://github.com/mike-bronner/claude-workbench),
 sets `source.sha` for this plugin's entry in `.claude-plugin/marketplace.json`,
-and pushes the commit. It reads the plugin name from
+and pushes the commit. The clone is **unauthenticated**: an embedded
+credential in the clone URL is written into `marketplace/.git/config` as the
+`origin` remote, which would leave `DEVELOPER_SETTINGS_TOKEN` — a long-lived,
+non-expiring PAT with `Contents: write` on the *shared* marketplace repo —
+readable on disk for the rest of the step. It is supplied only in the push
+URL, at push time, mirroring the posture `release.yml` uses for its own push.
+(The marketplace is public, so the anonymous clone and the retry loop's
+`git pull --rebase` both work; were it ever made private, the clone fails
+loudly rather than degrading to a silent skip.) It reads the plugin name from
 `.claude-plugin/plugin.json` (never hardcoded) and resolves the release tag to
 a commit SHA, dereferencing annotated tags.
 
