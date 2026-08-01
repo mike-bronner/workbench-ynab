@@ -92,9 +92,15 @@ run_case() {
 
 echo "Self-test: guard catches committed-secret shapes (exit 1)"
 run_case "64-char-hex YNAB PAT shape is caught"         1 "src/leak.txt"  "token: $SYNTH_HEX"
-run_case "bare cleartext token assignment is caught"    1 "src/run.sh"    "${ENV_NAME}=${SYNTH_HEX}"
-run_case "double-quoted cleartext token is caught"      1 "src/run.sh"    "${ENV_NAME}=\"${SYNTH_HEX}\""
-run_case "single-quoted cleartext token is caught"      1 "src/run.sh"    "${ENV_NAME}='${SYNTH_HEX}'"
+# These three isolate rule 2 (the cleartext-token rule), so their value must NOT
+# be the 64-hex shape: with $SYNTH_HEX the file trips rule 1 as well, on a
+# SEPARATE grep call site, and all three report exit 1 even if rule 2 is gone
+# entirely. Measured — dropping PAT_ENV from the scanning loop left all three
+# green with the hex value, and reddens all three with the value below.
+ENV_VALUE='s3cretvalue'
+run_case "bare cleartext token assignment is caught"    1 "src/run.sh"    "${ENV_NAME}=${ENV_VALUE}"
+run_case "double-quoted cleartext token is caught"      1 "src/run.sh"    "${ENV_NAME}=\"${ENV_VALUE}\""
+run_case "single-quoted cleartext token is caught"      1 "src/run.sh"    "${ENV_NAME}='${ENV_VALUE}'"
 run_case "PEM private-key header is caught"             1 "src/id_rsa"    "${BEGIN_FRAG} RSA ${KEY_FRAG}"
 
 echo "Self-test: legitimate, non-secret content passes (exit 0)"
@@ -125,9 +131,18 @@ run_case "PEM header under vendor/ IS caught"          1 "vendor/id_ec"   "${BEG
 # behavioral difference here for a test to pin.
 # Each plants the NUL on the SAME line as the secret — the worst case,
 # since the NUL must not break the match itself, only the binary classification.
+#
+# The cleartext fixture's value is deliberately NOT the 64-hex shape its
+# neighbours use, for the same reason the invalid-UTF-8 section's cleartext case
+# avoids it. Rules 2 and 3 run on their OWN grep call site (the loop at
+# bin/secret-scan.sh:181), separate from rule 1's (:173) — so a hex-shaped value
+# makes the file trip rule 1 as well, and the case reports exit 1 whether or not
+# the loop's own NUL-handling works. Measured: with the hex value, appending
+# --binary-files=without-match to the LOOP's grep alone left this case green
+# while its PEM and vendor-scoped siblings correctly reddened.
 echo "Self-test: a NUL byte cannot hide a secret from any rule"
 run_nul_case "hex PAT shape beside a NUL is caught"       1 "src/leak.txt" 'lead\000ing token: %s\n' "$SYNTH_HEX"
-run_nul_case "cleartext token beside a NUL is caught"     1 "src/run.sh"   "lead\\000ing ${ENV_NAME}=%s\\n"  "$SYNTH_HEX"
+run_nul_case "cleartext token beside a NUL is caught"     1 "src/run.sh"   "lead\\000ing ${ENV_NAME}=%s\\n"  "$ENV_VALUE"
 run_nul_case "PEM header beside a NUL is caught"          1 "src/id_rsa"   "lead\\000ing ${BEGIN_FRAG} RSA %s\\n" "$KEY_FRAG"
 
 # The vendor/ scoping is orthogonal to the binary-classification fix, and must
@@ -226,7 +241,7 @@ run_utf8_case "hex PAT shape beside an invalid UTF-8 byte is caught" 1 "src/leak
 # strength of a rule it is not testing. Measured: with the hex value, dropping
 # the pin on the loop alone left this case green on BSD grep.
 echo "Self-test: the cleartext/PEM call site is pinned too (discriminates on BSD grep)"
-run_utf8_case "cleartext token beside an invalid UTF-8 byte is caught" 1 "src/run.sh"   "x\\200${ENV_NAME}=%s\\n" "s3cretvalue"
+run_utf8_case "cleartext token beside an invalid UTF-8 byte is caught" 1 "src/run.sh"   "x\\200${ENV_NAME}=%s\\n" "$ENV_VALUE"
 run_utf8_case "PEM header beside an invalid UTF-8 byte is caught"      1 "src/id_rsa"   "x\\200${BEGIN_FRAG} RSA %s\\n" "$KEY_FRAG"
 
 # The guard reports with grep -o, so only bytes INSIDE the match can reach the
@@ -417,23 +432,44 @@ fi
 # mid-record, so the first half arrives as a bare path fragment with no locator.
 # awk variables persist across records, so without the fallback explicitly
 # resetting them, that orphan record would be printed carrying the PREVIOUS hit's
-# locator — a report line that points at the wrong file. Deleting the `else`
-# branch from sanitize_hits turns this red.
+# locator — a report line that points at the wrong file.
+#
+# THE FIXTURE MUST FORCE THE ORDER, and this is the whole design of the case.
+# A stale locator can only leak into an orphan that is PRECEDED by a
+# locator-bearing record, so the guarantee is order-dependent — and grep's
+# traversal order across separate files is not something this test controls. A
+# two-file fixture that happens to emit the orphan first passes even with the
+# `loc = ""` reset deleted, because there is no preceding locator to go stale.
+#
+# So both records come from the SAME file, on consecutive lines, where grep's
+# order IS guaranteed. One file with the shape on two lines emits:
+#
+#     ./src/we            <- orphan 1 (no locator; loc is still "" here anyway)
+#     ird.txt:1:<match>   <- sets loc
+#     ./src/we            <- orphan 2: THIS is the one a stale loc leaks into
+#     ird.txt:2:<match>
+#
+# Hence the assertion is a PAIR. The bare line alone is not discriminating —
+# orphan 1 emits it whether or not the reset exists — so the case also asserts
+# the stale-prefixed form is absent. Deleting the `else` branch, or just the
+# `loc = ""` line inside it, turns this red on the second assertion.
 echo "Self-test: a record with no locator is emitted intact, not stale-prefixed"
 reset_sandbox
 mkdir -p "$SANDBOX/src"
-printf '%s\n' "$SYNTH_HEX" > "$SANDBOX/src/aaa.txt"
-printf '%s\n' "$SYNTH_HEX" > "$SANDBOX/$(printf 'src/we\nird.txt')"
+printf '%s\n%s\n' "$SYNTH_HEX" "$SYNTH_HEX" > "$SANDBOX/$(printf 'src/we\nird.txt')"
 nl_rc=0
 ( cd "$SANDBOX" && bash bin/secret-scan.sh ) > "$REPORT" 2>&1 || nl_rc=$?
 # The orphan half must stand alone on its own line (4-space report indent), with
 # no locator from the preceding record glued onto it.
-if [ "$nl_rc" -eq 1 ] && grep -qx '    src/we' "$REPORT"; then
+nl_bare=0; nl_stale=0
+grep -qx '    src/we' "$REPORT" && nl_bare=1
+grep -qE '^    ird\.txt:[0-9]+:src/we$' "$REPORT" && nl_stale=1
+if [ "$nl_rc" -eq 1 ] && [ "$nl_bare" -eq 1 ] && [ "$nl_stale" -eq 0 ]; then
   echo "  ✓ locator-less record emitted intact (no stale locator)"
   pass=$((pass + 1))
 else
-  echo "  ✖ expected exit 1 and a bare 'src/we' report line —" \
-       "got exit $nl_rc, report: $(grep -c . "$REPORT") line(s)"
+  echo "  ✖ expected exit 1, a bare 'src/we' report line, and no stale-prefixed" \
+       "'ird.txt:<n>:src/we' line — got exit $nl_rc, bare=$nl_bare, stale=$nl_stale"
   fail=$((fail + 1))
 fi
 
