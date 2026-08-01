@@ -45,9 +45,13 @@
 #   resolver the writer uses (bin/path-expand.sh's expand_path) expands a leading
 #   `~` and any `$VAR`/`${VAR}` references and REFUSES a path that does not fully
 #   resolve — so prune scans exactly the directory the writer wrote to, never a
-#   different one. A symlinked directory is normalized to its physical target so
-#   the scan descends it. If the resolved directory does not exist there is
-#   nothing to prune — the helper says so and exits 0 (a no-op, never an error).
+#   different one. A RELATIVE resolved path is absolutized against $PWD, matching
+#   the writer's own handling, so a relative `.report.output_dir` (legal per the
+#   config schema) stays prunable rather than becoming a directory the writer can
+#   write but prune can never sweep. A symlinked directory is normalized to its
+#   physical target so the scan descends it. If the resolved directory does not
+#   exist there is nothing to prune — the helper says so and exits 0 (a no-op,
+#   never an error).
 #
 # USAGE
 #   ynab-prune.sh                 # dry-run: preview reports older than the threshold
@@ -57,7 +61,8 @@
 #
 # EXIT CODES
 #   0  success (preview printed, or deletion completed, or nothing to do)
-#   2  usage error (bad flag, non-numeric --days, unsafe output dir), OR a PARTIAL
+#   2  usage error (bad flag, non-numeric --days, an output dir that does not fully
+#      resolve, or one that resolves to the filesystem root), OR a PARTIAL
 #      --apply deletion — one or more matched reports could not be removed (e.g.
 #      denied by directory permissions); the rest WERE deleted and each failure
 #      was reported on stderr. A caller scripting these codes must not read a 2 as
@@ -137,12 +142,23 @@ fi
 output_dir="$(expand_path "$output_dir")" \
   || usage_err "output directory did not fully resolve (a leading ~ or a \$VAR that could not settle — e.g. a self-referential value): check --output-dir / .report.output_dir"
 
-# Never operate on the filesystem root or a relative/empty path — deletion must
-# be scoped to a real, absolute report directory.
+# Never operate on the filesystem root or an empty path — deletion must be scoped
+# to a real report directory.
+#
+# A RELATIVE resolved path is absolutized against $PWD, byte-for-byte the way
+# bin/report-writer.sh does it (see its `case "$out_dir" in /*) : ;; *) …` block).
+# This mirroring is load-bearing, not cosmetic: `.report.output_dir` has no
+# "must be absolute" constraint in assets/config.schema.json and setup.md never
+# normalizes it, so a relative value is a legal, reachable config — and the writer
+# happily writes to it. Refusing it here instead would break the guarantee this
+# whole tool exists for (see OUTPUT DIRECTORY above): prune must scan exactly the
+# directory the writer wrote to. Sharing bin/path-expand.sh gets the two scripts
+# to the same resolved string; only matching each other's edge-case handling gets
+# them to the same DIRECTORY.
 case "$output_dir" in
   "/"|"") usage_err "refusing to prune the filesystem root or an empty path" ;;
   /*)     : ;;
-  *)      usage_err "output directory must be an absolute path, got: $output_dir" ;;
+  *)      output_dir="${PWD}/${output_dir}" ;;
 esac
 
 # A missing directory is a clean no-op, not an error — there is simply nothing to

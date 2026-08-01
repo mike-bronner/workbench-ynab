@@ -39,6 +39,18 @@ seed_reports() {
   : > "$dir/notes.txt"                             # non-report — must always survive
 }
 
+# age_file <path> <days> — set <path>'s mtime to exactly <days> * 86400 seconds
+# before now, so a fixture can sit at a precise distance from a `--days N`
+# threshold. `touch -t` needs a preformatted stamp and the two `date` dialects
+# disagree on relative arithmetic (BSD `-v-Nd` vs GNU `-d "N days ago"`), so use
+# perl's utime — already a test-harness dependency (report-writer.test.sh's
+# watchdog) and identical on macOS and Linux.
+age_file() {
+  perl -e 'my ($f, $d) = @ARGV;
+           my $t = time - int($d * 86400);
+           utime($t, $t, $f) or die "utime $f: $!\n";' "$1" "$2"
+}
+
 # Dry run is the DEFAULT: it previews the old reports and deletes NOTHING.
 test_dry_run_is_default_and_deletes_nothing() {
   local dir="$SANDBOX/dry" out rc=0
@@ -190,13 +202,64 @@ test_root_output_dir_is_refused() {
   assert_contains "$err" "filesystem root" "error explains the root refusal"
 }
 
-# A relative output dir is refused (exit 2) — prune only operates on an absolute
-# path, so it can never delete under an unexpected CWD.
-test_relative_output_dir_is_refused() {
-  local rc=0 err
-  err="$( cd "$SANDBOX" && bash "$PRUNE" --output-dir "relative-dir" --days 30 2>&1 )" || rc=$?
-  assert_eq "2" "$rc" "a relative output dir → exit 2"
-  assert_contains "$err" "absolute path" "error explains the absolute-path requirement"
+# A relative output dir is RESOLVED against $PWD (not refused), exactly as
+# bin/report-writer.sh resolves it — see that suite's
+# `test_relative_output_dir_is_made_absolute`. `.report.output_dir` carries no
+# "must be absolute" constraint in the config schema, so a relative value is a
+# legal config the writer will happily write to; if prune refused it, those
+# reports could never be swept. Assert prune actually finds and deletes them.
+test_relative_output_dir_resolves_against_cwd() {
+  local dir="$SANDBOX/relcwd" out rc=0
+  mkdir -p "$dir"
+  seed_reports "$dir/reports"
+  # Run from inside $dir so "reports" resolves to the seeded directory.
+  out="$( cd "$dir" && bash "$PRUNE" --output-dir "reports" --days 30 --apply )" || rc=$?
+  assert_eq "0" "$rc" "a relative output dir is accepted"
+  assert_contains "$out" "removed 2 of 2 report(s)" "prune swept the relative dir's old reports"
+  # The emitted path is absolute, so a caller that cd's away still reads it right.
+  assert_contains "$out" "$dir/reports" "prune reports the absolutized path"
+  [ -e "$dir/reports/YNAB-Weekly-Review-2020-01-01.html" ] && fail "old report under a relative dir was not deleted"
+  assert_file_exists "$dir/reports/YNAB-Weekly-Review-2099-01-01.html"  # fresh survives
+  return 0
+}
+
+# Writer/prune parity on a relative `.report.output_dir` — the guarantee this
+# tool's OUTPUT DIRECTORY header makes ("prune scans exactly the directory the
+# writer wrote to, never a different one"). Sourcing the same path-expand.sh gets
+# both scripts to the same resolved STRING; this test pins that they land on the
+# same DIRECTORY. Drive the REAL writer, then the REAL pruner, through one
+# relative config value and one CWD, and assert prune sees what the writer wrote.
+test_relative_output_dir_writer_prune_parity() {
+  local dir="$SANDBOX/parity" cfg="$SANDBOX/parity.json" written out rc=0
+  local writer="$REPO_ROOT/bin/report-writer.sh" tpl="$SANDBOX/parity-template.html"
+  mkdir -p "$dir"
+  printf '{"report":{"output_dir":"rel-reports"}}\n' > "$cfg"
+  # A minimal template with one block slot + the scalar slots, mirroring the
+  # report-writer suite's fixture. Keeps this test coupled to the writer's real
+  # path resolution, not to the shipped template's full slot list.
+  cat > "$tpl" <<'HTML'
+<!DOCTYPE html><html><head>
+<title>{{tier}} YNAB Review — {{report_date}}</title>
+<meta name="report-output-path" content="{{output_path}}">
+</head><body><section><!-- SLOT:body --></section></body></html>
+HTML
+  # Writer: same config, same CWD, relative output_dir.
+  written="$( cd "$dir" && YNAB_CONFIG_FILE="$cfg" bash "$writer" \
+                --template "$tpl" --tier Weekly --date 2020-01-01 \
+                --slot 'body=<p>x</p>' )" || rc=$?
+  assert_eq "0" "$rc" "the writer accepts a relative .report.output_dir"
+  assert_file_exists "$written"
+  assert_eq "$dir/rel-reports/YNAB-Weekly-Review-2020-01-01.html" "$written" \
+    "the writer resolved the relative dir against its CWD"
+  # Age it past the threshold so prune is entitled to remove it.
+  age_file "$written" 400
+  # Pruner: same config, same CWD. It must find the writer's file.
+  out="$( cd "$dir" && YNAB_CONFIG_FILE="$cfg" bash "$PRUNE" --days 30 --apply )" || rc=$?
+  assert_eq "0" "$rc" "prune accepts the same relative .report.output_dir"
+  assert_contains "$out" "removed 1 of 1 report(s)" \
+    "prune found and removed the very file the writer wrote"
+  [ -e "$written" ] && fail "prune reported success but the writer's report is still there"
+  return 0
 }
 
 # A partial --apply (a file that can't be removed) surfaces non-zero rather than
