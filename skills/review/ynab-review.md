@@ -154,9 +154,17 @@ token + native env — see the [capability map](../../docs/mcp-capability-map.md
 **No hardcoded tax constants anywhere.** Every rate, threshold, standard
 deduction, due date, and Schedule C/A/SE/1 mapping is a read from the tax-profile
 loader. If the loader returns `!ok` (schema/parse/io/depth failure), do **not**
-guess a value — render the tax sections as "tax profile unavailable: <error
-path>" and add a `tax_profile_error` note to the dispatch summary. A wrong tax
-constant corrupts every downstream number; failing loud is correct.
+guess a value — render the tax sections as
+`tax profile unavailable (<error.kind>)` and add a `tax_profile_error` note to the
+dispatch summary. A wrong tax constant corrupts every downstream number; failing
+loud is correct.
+
+**Report only `error.kind` + `error.message`** — never the `error.errors[]`
+detail. That per-violation array is intentionally raw for programmatic callers,
+and every entry's `path` / `params` embeds the offending JSON property name
+verbatim, which can itself be secret-shaped; a report is human-facing output, so
+quoting, paraphrasing, or summarizing an entry discloses it (#235). Same rule,
+same reasoning as [`../estimated-tax/SKILL.md`](../estimated-tax/SKILL.md) step 1.
 
 ---
 

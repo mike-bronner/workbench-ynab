@@ -125,6 +125,16 @@ a content-disclosure channel. Direct callers keep the full validation detail; th
 boundary does not. This is a distinct content class from the home-directory path
 masking above (`redact()`), which is left untouched.
 
+**The direct caller's obligation (#235).** Because `errors[]` stays raw, "direct
+caller" carries a duty: **a caller that renders to a human must forward only
+`error.kind` + `error.message`.** Those two are the human-safe surface; every
+`errors[]` entry is not, and quoting, paraphrasing, or summarizing one puts the
+offending property name in front of a person just as surely as the old boundary
+message did. A skill-following agent is a direct caller, so this is a *skill*
+obligation, not something the loader can enforce — see
+[`skills/estimated-tax/SKILL.md`](../skills/estimated-tax/SKILL.md) step 1 for
+the wording, guarded by `tests/estimated-tax-skill.test.sh`.
+
 Validation is **dependency-free**: a compact, purpose-built JSON-Schema-subset
 validator built on `node:` built-ins only — no `ajv`, no `node_modules`. This keeps
 the loader faithful to the plugin's "nothing to install" premise and the recorded

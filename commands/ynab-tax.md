@@ -14,8 +14,10 @@ tested `lib/tax/loadProfile.mjs` and `lib/tax/estimatedTax.mjs` modules.
 
 ## What this command does
 
-1. Loads the effective tax profile; stops with the structured error if it is
-   invalid (never produce a silently-wrong tax number).
+1. Loads the effective tax profile; if it is invalid, stops and reports **only**
+   the redacted `error.kind` + `error.message` (never produce a silently-wrong
+   tax number, and never surface the raw `error.errors[]` detail — see the
+   skill's step 1).
 2. Determines the target quarter (the quarter **today** falls in, unless the
    user names one — e.g. "Q2" or "second quarter" in `$ARGUMENTS`).
 3. Fetches YTD business transactions via the namespaced YNAB tools, computes the
