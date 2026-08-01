@@ -165,7 +165,7 @@ nul_scan() {
     set -o pipefail
     cd "$SELF_DIR/.." || exit 3
     find . -type f \
-      -not -path './.git/*' \
+      -not -path './.git/*'         -not -path '*/.git/*' \
       -not -path './vendor/*'       -not -path '*/vendor/*' \
       -not -path './node_modules/*' -not -path '*/node_modules/*' \
       -print0 \
@@ -222,6 +222,51 @@ else
   echo "    'no NUL bytes' verdict below would be worthless. Files flagged:"
   printf '%s\n' "${ctl_hits:-<none>}" | sed 's/^/    /'
   fail=$((fail + 1))
+fi
+
+# Negative control: the exclude list must skip a NESTED .git directory, not just a
+# root-level one. The guard this scan mirrors (bin/check-tool-name-sources.sh) uses
+# `grep --exclude-dir=.git`, which excludes at ANY depth by construction; a
+# root-anchored `-not -path './.git/*'` alone does not. A submodule, a vendored repo
+# copy or a CI checkout artifact puts a .git directory below the root, and git's own
+# internals (pack files, HEAD, index) routinely carry NUL bytes — so without the
+# `*/.git/*` arm this scan fails the build over git plumbing, for a reason that has
+# nothing to do with the invariant it exists to check.
+#
+# This case is discriminating: drop `-not -path '*/.git/*'` from nul_scan and the
+# planted HEAD is reported as an offender, turning this assertion red. The same
+# fail-closed rc/count checks as the real assertion run first, so a broken pipeline
+# cannot pass this by reporting nothing.
+echo "Self-test: a NESTED .git directory is excluded from the NUL scan"
+SENTINEL_DIR="$SELF_DIR/../.nul-selftest-nested.$$"
+mkdir -p "$SENTINEL_DIR/.git"
+printf 'ref: refs/heads/\000main\n' > "$SENTINEL_DIR/.git/HEAD"
+nested_rc=0
+nested_out="$(nul_scan)" || nested_rc=$?
+nested_count="$(scan_count "$nested_out")"
+nested_hits="$(scan_hits "$nested_out")"
+rm -rf "$SENTINEL_DIR"
+SENTINEL_DIR=""
+if [ "$nested_rc" -ne 0 ]; then
+  echo "  ✖ detector pipeline FAILED (exit $nested_rc) — cannot tell an excluded"
+  echo "    nested .git from a scan that never ran."
+  fail=$((fail + 1))
+elif ! is_count "$nested_count"; then
+  echo "  ✖ the file counter returned \"$nested_count\", not a number — the count path"
+  echo "    is broken, so this exclusion verdict proves nothing."
+  fail=$((fail + 1))
+elif [ "$nested_count" -eq 0 ]; then
+  echo "  ✖ the file counter reported 0 files — the scan root is broken, so an empty"
+  echo "    offender list proves nothing."
+  fail=$((fail + 1))
+elif printf '%s\n' "$nested_hits" | grep -q '/\.git/HEAD$'; then
+  echo "  ✖ a NUL byte inside a NESTED .git directory was reported as an offender —"
+  echo "    the exclude list only skips .git at the repo root. Files flagged:"
+  printf '%s\n' "$nested_hits" | sed 's/^/    /'
+  fail=$((fail + 1))
+else
+  echo "  ✓ nested .git internals are excluded across $nested_count counted files"
+  pass=$((pass + 1))
 fi
 
 echo "Self-test: no repo-authored file carries a NUL byte (which would make the guard skip it)"
