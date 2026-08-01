@@ -92,8 +92,9 @@ fi
 # The confirmation line names all four together — a single discriminating needle
 # that goes red if any prereq is dropped from the check.
 assert_contains "prereq step confirms all four prereqs" "node, jq, security, workbench-core all present"
-# workbench-core is the prereq setup itself omits — pin its concrete detection so
-# it can't be quietly weakened to a three-tool check.
+# workbench-core is the prereq setup itself originally omitted (issue #230, since
+# fixed) — pin its concrete detection so it can't be quietly weakened back to a
+# three-tool check.
 assert_contains "prereq step detects workbench-core via the plugins cache" "cache/*/workbench-core"
 # Fail-fast on a miss — mirrors the dev-team setup Step 2 pattern. Pin BOTH the
 # message AND the non-zero exit: the message alone stayed green when `exit 1` was
