@@ -287,11 +287,25 @@ if [ -f "$CONFIG_FILE" ]; then
   fi
 fi
 
+# Stage the merged config. The `( umask 077; … )` subshell is what makes the
+# .tmp owner-only AT CREATION TIME: the `>` redirect happens inside the subshell,
+# so the file is born 0600 and there is NO window in which it is world-readable
+# (issue #65 AC #2 — "no window where a file is world-readable before the
+# chmod... not a post-write chmod"). config.json holds your tax profile and
+# business identity, so that window would expose real financial detail. This is
+# the same creation-time pattern every other artifact class uses: `mktemp` (the
+# report writer), a tightened-umask subshell (bin/audit-log.sh), or an explicit
+# `mode:0o600` (the monitor-state and tax-tracker writers). The umask only
+# constrains a NEWLY created file, so the explicit `chmod 600` further down stays
+# as defense-in-depth — it re-tightens a .tmp left over from an earlier run at
+# looser permissions, which `>` truncates but never re-modes.
+#
 # Check the merge's exit code explicitly: on failure the > redirect has already
-# truncated the .tmp, so drop it instead of letting it near the real path.
-if ! printf '%s\n' "$EXISTING" \
+# truncated the .tmp, so drop it instead of letting it near the real path. The
+# subshell's exit status is the pipeline's, so `if !` still sees a jq failure.
+if ! ( umask 077; printf '%s\n' "$EXISTING" \
   | jq --argjson new "$NEW_JSON" '. * $new' \
-  > "$CONFIG_FILE.tmp"; then
+  > "$CONFIG_FILE.tmp" ); then
   rm -f "$CONFIG_FILE.tmp"
   echo "❌ jq merge failed — $CONFIG_FILE left untouched." >&2
   exit 1
@@ -326,14 +340,14 @@ elif [ "$TOKEN_SCAN" -ne 1 ]; then
   exit 1
 fi
 
-# config.json holds your tax profile and business identity — restrict it to
-# owner-only (mode 0600) BEFORE publishing, so the file at its final path is never
-# world-readable, even briefly (mirrors bin/ynab-migrate.sh:231 and the report
-# writer). The jq `>` redirect created the .tmp under the caller's umask (0644 by
-# default) — the chmod makes the 0600 guarantee independent of that umask, and the
-# atomic mv carries it onto the real path, tightening an existing 0644 config too.
-# Fail CLOSED like every gate above: on a chmod failure drop the staged file and
-# leave the real config untouched rather than publish a world-readable one.
+# Defense-in-depth on the 0600 guarantee. The staging subshell above already
+# CREATED the .tmp owner-only via `umask 077`, so this chmod is a second layer,
+# not the only one: it re-tightens a .tmp that survived an interrupted run at
+# looser permissions (the `>` redirect truncates such a file but leaves its mode
+# alone), making 0600 hold no matter how the .tmp came to exist. The atomic mv
+# then carries that mode onto the real path, tightening an existing 0644 config
+# too. Fail CLOSED like every gate above: on a chmod failure drop the staged file
+# and leave the real config untouched rather than publish a world-readable one.
 if ! chmod 600 "$CONFIG_FILE.tmp"; then
   rm -f "$CONFIG_FILE.tmp"
   echo "❌ Could not restrict config.json to owner-only (mode 0600) — $CONFIG_FILE left untouched." >&2

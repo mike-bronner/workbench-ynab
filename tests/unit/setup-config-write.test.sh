@@ -177,10 +177,11 @@ test_data_dir_tightened_to_0700_when_preexisting_loose() {
 # business identity, so a world-readable one leaks financial detail to every
 # local user.
 #
-# Both cases run under `umask 022`, which is what makes them discriminating: the
-# jq `>` redirect stages `$CONFIG_FILE.tmp` at 0644, so only Step 4's explicit
-# `chmod 600 "$CONFIG_FILE.tmp"` (pre-`mv`) can bring the published file to 0600.
-# Mutation-checked: deleting that chmod turns both assertions red (644 != 600).
+# Both cases run under `umask 022`, which is what makes them discriminating: an
+# ambient 022 would stage `$CONFIG_FILE.tmp` at 0644, so the published file only
+# reaches 0600 if Step 4's own hardening runs. This test pins the END STATE (both
+# layers together); `test_config_json_is_0600_at_creation_without_the_chmod`
+# below pins that the FIRST layer alone is sufficient, which is what AC2 asks for.
 #
 #   * fresh install  — no pre-existing file; the staged 0644 tmp must publish 0600.
 #   * pre-privacy    — a config left 0644 by an older install must be TIGHTENED,
@@ -202,6 +203,42 @@ test_config_json_is_owner_only_0600() {
     || fail "write over a pre-existing 0644 config exited non-zero: $out"
   assert_eq "600" "$(mode_of "$dir/config.json")" \
     "a pre-existing 0644 config.json is tightened to owner-only 0600"
+  rm -rf "$dir"
+}
+
+# AC2 — "permissions are applied at file-creation time; no window where a file is
+# world-readable before the chmod... not a post-write chmod."
+#
+# The test above proves the PUBLISHED file ends up 0600, but it cannot tell WHICH
+# layer got it there: a bare `>` redirect plus a later `chmod 600` produces the
+# same end state while leaving exactly the window AC2 forbids. The staged .tmp is
+# also unobservable from outside — Step 4 `mv`s it away before returning.
+#
+# So prove the first layer in isolation: neutralize the `chmod 600` (rewrite it to
+# a `:` no-op, which keeps the surrounding fail-closed `if` intact) and run under
+# `umask 022`. If the jq `>` redirect were staging the .tmp at the ambient umask,
+# the published file would now be 0644 and this goes red. It can only be 0600 if
+# the `( umask 077; … )` staging subshell made it so AT CREATION — no window.
+#
+# This is the standing mutation test for the creation-time guarantee: deleting the
+# `umask 077` from the staging subshell reddens THIS test while every other test
+# in this file stays green (the chmod still covers them).
+test_config_json_is_0600_at_creation_without_the_chmod() {
+  local dir out block
+  dir="$(mktemp -d)"
+  block="$(extract_step4_block | sed 's/chmod 600 /: /')"
+  # The sed must actually have found its target — otherwise this test silently
+  # degrades into a duplicate of the one above and proves nothing.
+  case "$block" in
+    *"chmod 600 "*) fail "the chmod-neutralizing sed did not fire — test would be vacuous" ;;
+  esac
+  out="$( umask 022; CONFIG_DIR="$dir" CONFIG_FILE="$dir/config.json" \
+          NEW_JSON='{"schema_version":1,"budget":{"name":"Test"}}' \
+          bash -c "$block" 2>&1 )" \
+    || fail "Step 4 with the chmod neutralized exited non-zero: $out"
+  assert_contains "$out" "✅ Wrote" "the write still succeeds with the chmod neutralized"
+  assert_eq "600" "$(mode_of "$dir/config.json")" \
+    "config.json is 0600 from creation — the umask 077 staging subshell, not the chmod"
   rm -rf "$dir"
 }
 
