@@ -171,4 +171,62 @@ test_data_dir_tightened_to_0700_when_preexisting_loose() {
   rm -rf "$dir"
 }
 
+# AC1/AC2: the PUBLISHED config.json is owner-only (0600) — asserted on the real
+# file's mode bits, not on the presence of `chmod 600` in the command's source.
+# config.json carries the tax profile (filing status, rates, thresholds) and
+# business identity, so a world-readable one leaks financial detail to every
+# local user.
+#
+# Both cases run under `umask 022`, which is what makes them discriminating: the
+# jq `>` redirect stages `$CONFIG_FILE.tmp` at 0644, so only Step 4's explicit
+# `chmod 600 "$CONFIG_FILE.tmp"` (pre-`mv`) can bring the published file to 0600.
+# Mutation-checked: deleting that chmod turns both assertions red (644 != 600).
+#
+#   * fresh install  — no pre-existing file; the staged 0644 tmp must publish 0600.
+#   * pre-privacy    — a config left 0644 by an older install must be TIGHTENED,
+#                      which is the claim Step 4's comment makes. `mv` carries the
+#                      staged file's own mode onto the real path, replacing the
+#                      loose one, so this holds without a post-publish chmod.
+test_config_json_is_owner_only_0600() {
+  local dir out
+  dir="$(mktemp -d)"
+  out="$( umask 022; run_step4 "$dir" '{"schema_version":1,"budget":{"name":"Test"}}' )" \
+    || fail "fresh write exited non-zero: $out"
+  assert_eq "600" "$(mode_of "$dir/config.json")" \
+    "a freshly published config.json is owner-only 0600"
+
+  # A pre-privacy install left the config world-readable — the re-run tightens it.
+  chmod 644 "$dir/config.json"
+  assert_eq "644" "$(mode_of "$dir/config.json")" "the config pre-exists loose (0644)"
+  out="$( umask 022; run_step4 "$dir" '{"budget":{"name":"Again"}}' )" \
+    || fail "write over a pre-existing 0644 config exited non-zero: $out"
+  assert_eq "600" "$(mode_of "$dir/config.json")" \
+    "a pre-existing 0644 config.json is tightened to owner-only 0600"
+  rm -rf "$dir"
+}
+
+# The data-dir creation gate fails CLOSED. This PR wrapped a previously-bare
+# `mkdir -p "$CONFIG_DIR"` in an explicit guard, so the failure branch is new
+# code with no coverage — the permission tests above only prove the happy path.
+#
+# Force the failure the same way tests/unit/report-writer.test.sh's
+# `test_write_failure_gate` does: plant a REGULAR FILE where the parent directory
+# must be, so `mkdir -p` cannot create the target. No elevated privileges needed.
+#
+# Mutation-checked: reverting the guard to a bare `mkdir -p "$CONFIG_DIR"` makes
+# Step 4 roll on to the jq merge and exit 0 — reddening the exit-code assertion.
+test_data_dir_creation_failure_aborts_setup() {
+  local dir blocker out rc=0
+  dir="$(mktemp -d)"
+  blocker="$dir/not-a-dir"
+  : > "$blocker"                      # a regular file where a directory is needed
+  out="$(run_step4 "$blocker/sub" '{"schema_version":1,"budget":{"name":"Test"}}')" || rc=$?
+  [ "$rc" -ne 0 ] || fail "setup must exit non-zero when the data dir can't be created: $out"
+  assert_contains "$out" "Could not create the data directory" \
+    "the abort names the data-dir failure"
+  case "$out" in *"✅ Wrote"*) fail "a failed data-dir creation must not print the success line" ;; esac
+  [ ! -e "$blocker/sub/config.json" ] || fail "a config was published despite a failed data-dir creation"
+  rm -rf "$dir"
+}
+
 run_tests

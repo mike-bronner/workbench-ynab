@@ -390,6 +390,26 @@ test_seed_config_creates_data_dir_owner_only() {
   rm -rf "$sb"
 }
 
+# The data-dir creation above is a fail-CLOSED gate (`( umask 077; mkdir -p ) &&
+# chmod 700 || return 2`), added with the 0700 hardening — a new error branch the
+# happy-path test never reaches. Force the mkdir failure by planting a REGULAR
+# FILE where the parent directory must be (the technique
+# tests/unit/report-writer.test.sh's `test_write_failure_gate` already uses), and
+# pin that seed-config aborts with 2 and writes nothing.
+#
+# Mutation-checked: dropping the `|| return 2` lets the seed roll on to `mktemp`
+# and the `mv`, which reddens the exit-code assertion.
+test_seed_config_fails_closed_when_data_dir_cannot_be_created() {
+  local sb blocker cfg out rc=0
+  sb="$(mktemp -d)"; blocker="$sb/not-a-dir"; cfg="$blocker/data/config.json"
+  : > "$blocker"                      # a regular file where a directory is needed
+  out="$(bash "$MIGRATE" seed-config "$cfg" 2>&1)" || rc=$?
+  assert_eq 2 "$rc" "seed-config must fail closed (exit 2) when the data dir can't be created"
+  case "$out" in *Seeded*) fail "a failed data-dir creation must not report a successful seed" ;; esac
+  [ ! -e "$cfg" ] || fail "a config was seeded despite a failed data-dir creation"
+  rm -rf "$sb"
+}
+
 test_seed_config_is_idempotent() {
   local sb cfg before after out rc=0
   sb="$(mktemp -d)"; cfg="$sb/config.json"
