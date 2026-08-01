@@ -14,6 +14,11 @@
 #      author deferring to the map lands on a wrong-but-map-conformant name. Each
 #      row is checked against the wiring `assets/test/e2e-write-back.test.js`
 #      actually drives through the real executor.
+#
+# Assertions about the document are scoped to the row or callout they name, never
+# a whole-file grep. Every verb in the tie-breaker table is also discussed in the
+# prose below it, so an unscoped search stays green through a straight cell swap —
+# the very drift class 1 exists to catch.
 #   2. Fail-closed premises. The document's reconcile vacuity argument rests on
 #      `reconcileOp.before`/`.after` having no `required` array in the schema, and
 #      on `isReconcileStale` existing to delegate to. Both are read from source.
@@ -45,12 +50,14 @@ ok() { PASS=$((PASS + 1)); echo "  ✅ $1"; }
 no() { FAIL=$((FAIL + 1)); echo "  ❌ $1"; }
 
 # has <file> <literal> — literal (non-regex) match anywhere in the file.
+# Whole-file scope is only sound for a needle the file mentions in ONE place. For
+# anything the document also discusses in prose, extract the row or callout first
+# (see sections 1 and 3) — otherwise the prose keeps the assertion green while the
+# pinned row drifts.
 has() { grep -qF -- "$2" "$REPO_ROOT/$1" 2>/dev/null; }
 
-# assert_in <file> <desc> <literal>
-assert_in() {
-  if has "$1" "$3"; then ok "$2"; else no "$2"; fi
-}
+# in_text <text> <literal> — literal match inside an already-extracted fragment.
+in_text() { printf '%s\n' "$1" | grep -qF -- "$2"; }
 
 echo "write-back-idempotency-doc.test.sh — doc claims vs. the code they describe"
 
@@ -63,37 +70,77 @@ else
   exit 1
 fi
 
-# --- 1. tie-breaker verbs: doc row  <->  real e2e wiring ---------------------
-# Each pair is (verb, op type it serves). The verb must appear BOTH in the doc's
-# table AND in the wiring the e2e harness drives through the real applyChangeset.
-# Checking only the doc would pass on a fabricated name; checking only the code
-# would pass while the doc named something else entirely.
+# --- 1. tie-breaker verbs: doc ROW  <->  real e2e wiring ---------------------
+# Each triple is (verb, the table row that must name it, op label). The verb must
+# appear BOTH in that row of the doc's tie-breaker table AND in the wiring the e2e
+# harness drives through the real applyChangeset. Checking only the doc would pass
+# on a fabricated name; checking only the code would pass while the doc named
+# something else entirely.
+#
+# The doc side is scoped to a single table ROW, never the whole document. Every
+# verb in this table is also discussed in the prose under it, so a whole-document
+# grep stays green even when two table cells are swapped — and a swapped cell is
+# the exact drift this section exists to catch.
 echo "  -- live-read verbs cross-checked against $E2E"
-for pair in "get_transaction:categorize" "get_category:allocate" "get_account:reconcile"; do
-  verb="${pair%%:*}"
-  optype="${pair##*:}"
-  if ! has "$DOC" "$verb"; then
-    no "doc names \`$verb\` as the $optype tie-breaker verb"
-  elif ! has "$E2E" "TOOLS.$verb"; then
-    no "e2e wiring really resolves \`$verb\` (doc claims it for $optype)"
-  else
-    ok "$optype tie-breaker \`$verb\` — named in doc AND wired in e2e"
-  fi
-done
 
-# The two verbs above that the capability map cannot resolve must be flagged as
-# such, with the tracking issue cited — otherwise a reader silently substitutes a
-# map-conformant wrong answer, which is how this defect recurred.
-assert_in "$DOC" "capability-map gap cites issue #247" "#247"
+# The tie-breaker table alone: its header row through the blank line ending it.
+# The header is unique in the document; the three other tables use different ones.
+table="$(awk '/^\| Op type \| Logical read verb \|/{f=1} f&&/^$/{exit} f' "$REPO_ROOT/$DOC")"
+if [ -z "$table" ]; then
+  no "the tie-breaker table is locatable in $DOC"
+fi
+
+# row <first-cell> — the one table row whose leading cell is <first-cell>.
+row() { printf '%s\n' "$table" | grep -F -- "| $1 |"; }
+
+while IFS='@' read -r verb rowcell optype; do
+  [ -n "$verb" ] || continue
+  this_row="$(row "$rowcell")"
+  if [ -z "$this_row" ]; then
+    no "the tie-breaker table has a row for $optype"
+  elif ! in_text "$this_row" "$verb"; then
+    no "the $optype table row names \`$verb\` as its tie-breaker verb"
+  elif ! has "$E2E" "TOOLS.$verb"; then
+    no "e2e wiring really resolves \`$verb\` (the $optype row claims it)"
+  else
+    ok "$optype tie-breaker \`$verb\` — named in ITS OWN row AND wired in e2e"
+  fi
+done <<'PAIRS'
+get_transaction@`categorize`@categorize
+get_category@`allocate`@allocate
+get_account@`reconcile` (reconcile account)@reconcile-account
+PAIRS
 
 # `get_month` is the specific wrong answer for allocate (it appears on the
 # allocate path, but only in the advisory dry-run preview, never as the drift
-# read). Pin both halves: the doc must warn about it, and the e2e wiring must NOT
-# use it as the allocate live read.
-if has "$DOC" "get_month" && ! has "$E2E" "TOOLS.get_month"; then
-  ok "doc warns off \`get_month\` for allocate, and e2e confirms it is not wired there"
+# read). Pin all three halves: it must stay OUT of the table itself, the doc must
+# warn about it in prose, and the e2e wiring must not resolve it as a live read.
+# The table check is what catches a regression — the prose warning is doc-only
+# text that survives any table edit.
+if in_text "$table" "get_month"; then
+  no "\`get_month\` is kept out of the tie-breaker table"
+elif ! has "$DOC" "get_month"; then
+  no "doc warns off \`get_month\` for allocate"
+elif has "$E2E" "TOOLS.get_month"; then
+  no "e2e wiring confirms \`get_month\` is not the allocate live read"
 else
-  no "doc warns off \`get_month\` for allocate, and e2e confirms it is not wired there"
+  ok "\`get_month\` absent from the table, warned off in prose, unwired in e2e"
+fi
+
+# The two verbs the capability map cannot resolve must be flagged as such IN THE
+# GAP CALLOUT, with the tracking issue cited — otherwise a reader silently
+# substitutes a map-conformant wrong answer, which is how this defect recurred.
+# Scoped to the callout: both verbs and `#247` appear elsewhere in the document,
+# so a whole-document check would survive the citation being deleted from here.
+cap_gap="$(awk '/^> \*\*Capability-map gap\.\*\*/{f=1} f&&!/^>/{exit} f' "$REPO_ROOT/$DOC")"
+if [ -z "$cap_gap" ]; then
+  no "the capability-map-gap callout is locatable in $DOC"
+elif ! in_text "$cap_gap" "#247"; then
+  no "the capability-map-gap callout cites issue #247"
+elif ! in_text "$cap_gap" "get_account" || ! in_text "$cap_gap" "get_category"; then
+  no "the capability-map-gap callout names both unresolvable verbs"
+else
+  ok "capability-map-gap callout names \`get_account\` + \`get_category\`, cites #247"
 fi
 
 # --- 2. the reconcile fail-closed premise, read from source ------------------
