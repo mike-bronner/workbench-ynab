@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 #
-# session-warmup (workbench-ynab): inject YNAB routing guidance at session start
-# so the agent knows the namespaced tools, the config/token split, and the
-# read-only (M2) posture even outside an explicit `/workbench-ynab:ynab-review`.
-# Three signals, most-urgent first, all on STDOUT (Claude Code injects stdout
-# into the agent's context):
+# session-warmup (workbench-ynab): the LIVE half of the plugin's session start.
+# Two signals, most-urgent first, both on STDOUT (Claude Code injects stdout into
+# the agent's context):
 #
 #   1. Version-drift warning — the desktop app can keep serving a stale plugin
 #      bundle while the CLI plugin cache is already current
@@ -13,8 +11,20 @@
 #   2. Setup-incomplete warning — a missing Keychain token and/or config.json,
 #      pointing the user at `/workbench-ynab:setup`. Emitted only when something
 #      is actually wrong.
-#   3. Routing guidance — the standing reference block (tools, config split,
-#      read-only posture, trigger vocabulary). Emitted EVERY session.
+#
+# Both read live machine state, so both have to run per session. A healthy,
+# fully-configured, up-to-date session sees NOTHING from this hook.
+#
+# The *static* half — the YNAB routing block (tool namespace, config/token split,
+# read-only posture, trigger vocabulary) — is deliberately NOT emitted here. It
+# lives in `session-warmup.md` at the plugin root, which workbench-core's own
+# SessionStart hook aggregates with every other workbench-* plugin's contribution
+# into one block baked into ~/.claude/CLAUDE.md. One shared, byte-stable block
+# instead of one live `additionalContext` block per plugin keeps the prompt-cache
+# prefix intact for scheduled tasks, and picks up fleet-wide fixes for free. See
+# workbench-core's `docs/session-warmup-contributions.md`, which is also why the
+# two warnings above stay HERE: they flip on upgrade and on setup state, and the
+# aggregated block must be byte-identical across runs to stay cacheable.
 #
 # Wired to SessionStart and PostCompact via hooks/hooks.json. STDOUT is the
 # injected-context channel — the OPPOSITE of bin/launcher.sh, where STDOUT is the
@@ -46,13 +56,11 @@ set -u
 # ---------------------------------------------------------------------------
 # Skip guard. Claude Code sets CLAUDE_CODE_AGENT on every `--agent` sub-agent
 # dispatch (Watson, Holmes, Lestrade, and any future agent from any plugin).
-# None of the three blocks below is actionable in such a run: the drift warning
-# and the setup pointer both ask a HUMAN to run a command, and a dispatched agent
-# carries its own self-contained system prompt rather than this session's routing
-# guidance. Injected into every dispatch they only burn tokens and break the
-# agent's prompt-cache prefix. Interactive sessions — and the orchestrator runs
-# that spawn those agents — carry no `--agent`, leave this unset, and are
-# unaffected.
+# Neither block below is actionable in such a run: the drift warning and the setup
+# pointer both ask a HUMAN to run a command. Injected into every dispatch they only
+# burn tokens and break the agent's prompt-cache prefix. Interactive sessions — and
+# the orchestrator runs that spawn those agents — carry no `--agent`, leave this
+# unset, and are unaffected.
 #
 # First statement in the script on purpose: unlike the bujo warmup (which keeps a
 # silent, idempotent Apple Notes pre-warm above its guard), this hook has no side
@@ -155,9 +163,8 @@ _ynab_emit_drift_warning
 
 # ---------------------------------------------------------------------------
 # Setup-incomplete warning. Surface a missing Keychain token and/or config.json
-# and point the user at `/workbench-ynab:setup`. Unlike the routing block below,
-# this is emitted ONLY when something is wrong — a healthy session sees nothing
-# here.
+# and point the user at `/workbench-ynab:setup`. Emitted ONLY when something is
+# wrong — a healthy session sees nothing here.
 # ---------------------------------------------------------------------------
 
 # Config path. Tracks bin/config.sh's YNAB_CONFIG_FILE test seam and default
@@ -203,29 +210,9 @@ if [ "$token_missing" -eq 1 ] || [ "$config_missing" -eq 1 ]; then
   printf -- '---\n\n'
 fi
 
-# ---------------------------------------------------------------------------
-# Routing guidance — the standing reference block. Emitted EVERY session, so it
-# is kept lean (it costs tokens each time). A static heredoc: no expansion, no
-# set -u pitfalls.
-# ---------------------------------------------------------------------------
-cat <<'EOF'
-# 💰 workbench-ynab routing
-
-The `workbench-ynab` plugin is active — tax-aware YNAB budget review. **Milestone 2 is READ-ONLY:** review, categorization *proposals*, and reports only — never call a write/mutation tool, never move money. Propose changes for the user to apply later.
-
-**Tools are namespaced `mcp__plugin_workbench-ynab_ynab__*`** — NOT `mcp__ynab__*`. Never hard-code a tool name; resolve it from the `ynab-protocol` skill (`skills/protocol/ynab-tools.md`), the single source of truth.
-
-**Config / token split:** the YNAB access token is read from the macOS Keychain by the launcher (`bin/launcher.sh`) and handed to the MCP as `YNAB_ACCESS_TOKEN` — the ONLY thing the MCP ever sees. All budget / tax / profile / persona configuration lives in `config.json` under the plugin data-dir and is read by the SKILLS (`bin/config.sh`); it is never passed to the MCP.
-
-## Trigger vocabulary → route
-
-| The user asks about… | Route to |
-|---|---|
-| their budget / a category / month-to-date spend | the YNAB review skills — read-only |
-| a transaction / payee / a possible duplicate | the YNAB review skills — read-only |
-| categorization / "how should X be categorized?" | the categorize proposal path — proposes only, never writes |
-| taxes / estimated tax / a tax-category rollup | the estimated-tax review skill — read-only |
-| "run my review" / a weekly, monthly, quarterly-tax, or annual review | `/workbench-ynab:ynab-review` — the one entry point |
-EOF
+# The routing block that used to live here now ships as `session-warmup.md` at
+# the plugin root — see the header. Do not reintroduce it: emitting it here as
+# well would inject it twice, once per channel, and reinstate the byte-volatility
+# this hook was split to avoid. `tests/unit/session-warmup.test.sh` pins that.
 
 exit 0
