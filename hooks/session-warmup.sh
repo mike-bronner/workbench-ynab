@@ -23,6 +23,8 @@
 # stray STDOUT byte pollutes the injected context.
 #
 # Contract:
+#   - Silent under `--agent` sub-agent dispatch (see the CLAUDE_CODE_AGENT skip
+#     guard below): no block is emitted, the script exits 0 immediately.
 #   - Dependency-free: only POSIX tools plus `sed` and BSD `sort` (no jq, no
 #     GNU-only flags — the hook PATH is narrow under Cowork) and `security` (a
 #     macOS built-in, guarded so a host without it degrades gracefully).
@@ -40,6 +42,28 @@
 # the source of the version-drift helpers ported below.
 
 set -u
+
+# ---------------------------------------------------------------------------
+# Skip guard. Claude Code sets CLAUDE_CODE_AGENT on every `--agent` sub-agent
+# dispatch (Watson, Holmes, Lestrade, and any future agent from any plugin).
+# None of the three blocks below is actionable in such a run: the drift warning
+# and the setup pointer both ask a HUMAN to run a command, and a dispatched agent
+# carries its own self-contained system prompt rather than this session's routing
+# guidance. Injected into every dispatch they only burn tokens and break the
+# agent's prompt-cache prefix. Interactive sessions — and the orchestrator runs
+# that spawn those agents — carry no `--agent`, leave this unset, and are
+# unaffected.
+#
+# First statement in the script on purpose: unlike the bujo warmup (which keeps a
+# silent, idempotent Apple Notes pre-warm above its guard), this hook has no side
+# effect worth running for a dispatched agent, so the cheapest correct behaviour
+# is to do nothing at all. Ported from ~/Developer/workbench-bujo/hooks/session-warmup.sh
+# per workbench-core/docs/session-warmup-contributions.md, which names a plugin
+# hook missing this guard as a known fleet-wide defect.
+# ---------------------------------------------------------------------------
+if [ -n "${CLAUDE_CODE_AGENT:-}" ]; then
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Version-drift warning. Best-effort and dependency-free: extract versions with

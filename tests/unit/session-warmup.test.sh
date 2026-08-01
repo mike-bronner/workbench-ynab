@@ -110,7 +110,11 @@ assert_not_contains() {
 # would prove a leak.
 run() {
   local rc="$1" cfg="$2" home="$3" root="$4"
-  local -a e=(env)
+  # CLAUDE_CODE_AGENT is unset on EVERY run: the warmup exits 0 in silence when it
+  # is set (the sub-agent skip guard), so an inherited value — this suite is run by
+  # dispatched agents too — would blank $OUT and fail every case below for a reason
+  # that has nothing to do with the case. The guard gets its own explicit case.
+  local -a e=(env -u CLAUDE_CODE_AGENT)
   [ "$root" = UNSET ] && e+=(-u CLAUDE_PLUGIN_ROOT)
   e+=(STUB_SECURITY_RC="$rc" YNAB_CONFIG_FILE="$cfg" PATH="$STUB_BIN:$PATH")
   [ "$home" != KEEP ] && e+=(HOME="$home")
@@ -291,7 +295,7 @@ echo "valid bundle root + HOME unset → drift check silent on STDERR (bare \$HO
 # separately (run() only captures stdout) and asserted empty — the assertion that
 # discriminates the guarded line from a bare $HOME regression.
 HOME_UNSET_ERR="$SANDBOX/home-unset-drift.stderr"
-OUT="$(env -u HOME STUB_SECURITY_RC=0 YNAB_CONFIG_FILE="$PRESENT_CFG" PATH="$STUB_BIN:$PATH" CLAUDE_PLUGIN_ROOT="$ROOT_OLD" bash "$WARMUP" 2>"$HOME_UNSET_ERR")"
+OUT="$(env -u HOME -u CLAUDE_CODE_AGENT STUB_SECURITY_RC=0 YNAB_CONFIG_FILE="$PRESENT_CFG" PATH="$STUB_BIN:$PATH" CLAUDE_PLUGIN_ROOT="$ROOT_OLD" bash "$WARMUP" 2>"$HOME_UNSET_ERR")"
 RC=$?
 assert_eq           "exit code is 0 with HOME unset + valid bundle root" "0" "$RC"
 assert_eq           "STDERR empty (no HOME: unbound variable)" "" "$(cat "$HOME_UNSET_ERR")"
@@ -315,7 +319,7 @@ echo "HOME unset + config path unset — set -u must not abort on the first line
 # "HOME: unbound variable". The path then degrades to a guaranteed-absent
 # location → config reads as missing → the setup block is emitted, exit 0. A bare
 # $HOME here would abort non-zero before any exit 0, breaking the AC #2 contract.
-OUT="$(env -u HOME -u YNAB_CONFIG_FILE -u CLAUDE_PLUGIN_ROOT STUB_SECURITY_RC=1 PATH="$STUB_BIN:$PATH" bash "$WARMUP")"
+OUT="$(env -u HOME -u YNAB_CONFIG_FILE -u CLAUDE_PLUGIN_ROOT -u CLAUDE_CODE_AGENT STUB_SECURITY_RC=1 PATH="$STUB_BIN:$PATH" bash "$WARMUP")"
 RC=$?
 assert_eq       "exit code is 0 with HOME unset"        "0" "$RC"
 assert_contains "still points at /workbench-ynab:setup" "$OUT" "/workbench-ynab:setup"
@@ -332,16 +336,21 @@ echo "drift path is dependency-free — runs with PATH isolated to its declared 
 # The allowlist is the complete set the drift path invokes: sed + head (version
 # extraction), ls + grep + sort + tail (cache scan), sort + head (version compare),
 # cat (the drift heredoc). `security` is deliberately ABSENT — the warmup guards it
-# with `command -v`, so its absence just emits the setup block, which does not
-# interfere with the drift assertions. bash is invoked by absolute path, so it does
-# not need to be on PATH either.
+# with `command -v`, so its absence degrades to "no Keychain claim either way" and
+# does not interfere with the drift assertions (that degrade contract gets its own
+# case below). bash is invoked by absolute path, so it does not need to be on PATH
+# either.
+#
+# What this case does NOT prove: portability of the FLAGS passed to those tools.
+# Symlinking the host's own `sort` into the allowlist means a GNU-only flag still
+# runs fine here. The banned-flag case below covers that half.
 ISO_BIN="$SANDBOX/iso-bin"
 mkdir -p "$ISO_BIN"
 for _tool in sed head ls grep sort tail cat; do
   ln -sf "$(command -v "$_tool")" "$ISO_BIN/$_tool"
 done
 ISO_ERR="$SANDBOX/iso.stderr"
-OUT="$(env -u STUB_SECURITY_RC PATH="$ISO_BIN" HOME="$DRIFT_HOME" \
+OUT="$(env -u STUB_SECURITY_RC -u CLAUDE_CODE_AGENT PATH="$ISO_BIN" HOME="$DRIFT_HOME" \
   YNAB_CONFIG_FILE="$PRESENT_CFG" CLAUDE_PLUGIN_ROOT="$ROOT_OLD" \
   "$(command -v bash)" "$WARMUP" 2>"$ISO_ERR")"
 RC=$?
@@ -353,6 +362,83 @@ assert_contains "isolated PATH: drift warning still produced"  "$OUT" "version d
 assert_contains "isolated PATH: names running bundle version"  "$OUT" "v0.1.0"
 assert_contains "isolated PATH: names newest cached version"   "$OUT" "v0.2.0"
 assert_routing_present "dependency-free"
+
+echo "no GNU-only flags in the executable code (BSD-userland portability):"
+# The PATH-isolation case above proves no UNDECLARED BINARY is needed; it says
+# nothing about flags, because it symlinks the host's own tools — a GNU-only flag
+# (`sort -V`) runs unchanged there, and on CI's ubuntu-latest, and on a macOS host
+# whose PATH happens to reach GNU coreutils. Nothing we can execute distinguishes
+# it, so the contract is pinned statically instead: the executable code must not
+# CONTAIN a flag BSD userland lacks. Mirrors tests/launcher.test.sh's banned-token
+# grep. Comments are stripped first, because this script's header deliberately
+# NAMES the banned flags while documenting the contract — the guarantee is about
+# code, not prose.
+WARMUP_CODE="$(grep -vE '^[[:space:]]*#' "$WARMUP")"
+# pattern<TAB>what it would break. Case-SENSITIVE: `-V` and `-v`, `-P` and `-p` are
+# different flags, and a case-insensitive match would fire on the wrong one.
+while IFS=$'\t' read -r banned why; do
+  if printf '%s' "$WARMUP_CODE" | grep -qE -- "$banned"; then
+    FAIL=$((FAIL + 1)); echo "  ❌ executable code matches '$banned' — $why"
+  else
+    PASS=$((PASS + 1)); echo "  ✅ no '$banned' ($why)"
+  fi
+done <<'BANNED'
+-{1,2}V(ersion-sort)?\>	sort -V / --version-sort: GNU-only, BSD sort has neither
+--perl-regexp|grep[[:space:]]+-[[:alnum:]]*P	grep -P: GNU-only PCRE mode
+--regexp-extended|sed[[:space:]]+-[[:alnum:]]*r	sed -r: GNU-only, BSD sed spells it -E
+readlink[[:space:]]+-[[:alnum:]]*f	readlink -f: GNU-only, absent from BSD readlink
+date[[:space:]]+-[[:alnum:]]*d	date -d: GNU-only date arithmetic
+stat[[:space:]]+-[[:alnum:]]*c	stat -c: GNU-only format flag, BSD spells it -f
+(^|[^[:alnum:]_-])jq([^[:alnum:]_-]|$)	jq: not installed on the narrow Cowork hook PATH
+BANNED
+
+echo "security(1) absent → graceful degrade, NO false 'token missing' claim, exit 0:"
+# The `command -v security` guard exists so a non-macOS host (no Keychain CLI) is
+# not told its token is missing. Driving the stub's EXIT CODE never reaches that
+# branch — the binary is present in every case above, so only the `security ... ||
+# token_missing=1` path is exercised. This case makes `security` genuinely absent
+# from PATH (reusing the isolated bin, which deliberately omits it) with the config
+# PRESENT, so the ONLY thing that could produce a setup block is a wrong answer on
+# the Keychain branch. Flipping the guard to set token_missing=1 when `security` is
+# missing turns the two assert_not_contains below red; the "token absent" cases
+# above stay green either way, so the pair discriminates.
+NOSEC_ERR="$SANDBOX/nosec.stderr"
+OUT="$(env -u STUB_SECURITY_RC -u CLAUDE_CODE_AGENT -u CLAUDE_PLUGIN_ROOT \
+  PATH="$ISO_BIN" HOME="$CLEAN_HOME" YNAB_CONFIG_FILE="$PRESENT_CFG" \
+  "$(command -v bash)" "$WARMUP" 2>"$NOSEC_ERR")"
+RC=$?
+assert_eq           "exit code is 0 with security(1) absent"  "0" "$RC"
+assert_eq           "STDERR empty (no security: command not found)" "" "$(cat "$NOSEC_ERR")"
+assert_not_contains "absent security → no missing-token claim" "$OUT" "access token not found"
+assert_not_contains "absent security → no setup block at all"  "$OUT" "setup incomplete"
+assert_routing_present "security-absent"
+
+echo "sub-agent dispatch (CLAUDE_CODE_AGENT set) → silent, exit 0:"
+# Claude Code sets CLAUDE_CODE_AGENT on every `--agent` sub-agent dispatch. The
+# warmup must emit NOTHING there — no routing block, no setup block, no drift
+# warning — so it neither burns tokens nor breaks the dispatched agent's
+# prompt-cache prefix. Every input below is pinned to a state that WOULD emit all
+# three blocks (bundle behind cache, token missing, config absent), so empty stdout
+# is attributable to the guard alone: delete it and all three assertions go red.
+DISPATCH_ERR="$SANDBOX/dispatch.stderr"
+OUT="$(env CLAUDE_CODE_AGENT=watson STUB_SECURITY_RC=1 YNAB_CONFIG_FILE="$ABSENT_CFG" \
+  PATH="$STUB_BIN:$PATH" HOME="$DRIFT_HOME" CLAUDE_PLUGIN_ROOT="$ROOT_OLD" \
+  bash "$WARMUP" 2>"$DISPATCH_ERR")"
+RC=$?
+assert_eq "exit code is 0 under sub-agent dispatch"       "0" "$RC"
+assert_eq "STDOUT is completely empty under dispatch"     "" "$OUT"
+assert_eq "STDERR is empty under dispatch"                "" "$(cat "$DISPATCH_ERR")"
+
+echo "empty CLAUDE_CODE_AGENT is NOT a dispatch → normal output, exit 0:"
+# The guard tests -n, not merely "set": an exported-but-empty value is an
+# interactive session, which must still get its blocks. Pins the guard's shape
+# against a `[ -n ... ]` → `[ -v ... ]`/`[ -z ... ]` slip.
+OUT="$(env -u CLAUDE_PLUGIN_ROOT CLAUDE_CODE_AGENT= STUB_SECURITY_RC=0 \
+  YNAB_CONFIG_FILE="$PRESENT_CFG" PATH="$STUB_BIN:$PATH" HOME="$CLEAN_HOME" \
+  bash "$WARMUP")"
+RC=$?
+assert_eq "exit code is 0 with an empty CLAUDE_CODE_AGENT" "0" "$RC"
+assert_routing_present "empty-agent-var"
 
 echo ""
 echo "session-warmup: $PASS passed, $FAIL failed"
