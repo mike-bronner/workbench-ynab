@@ -102,6 +102,9 @@ echo "  -- reconcile vacuity premise cross-checked against $SCHEMA and $RECONCIL
 # The doc argues reconcile is the ONLY op type whose before/after carry no
 # `required` array, which is what makes `before: {}` schema-valid there alone.
 # Read that straight out of the schema so the argument dies with the schema.
+# shellcheck disable=SC2016  # JS source for node -e: `$defs` is a JSON Schema key
+                            # and the backticks are a JS template literal — bash
+                            # must not expand either.
 req_report="$(node -e '
   const fs = require("fs");
   const s = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
@@ -211,6 +214,8 @@ fi
 
 # The atomic-append guarantee the doc leans on for resume correctness must still
 # be a single append in the writer.
+# shellcheck disable=SC2016  # a literal needle: `$file` is the variable name as it
+                            # appears in audit-log.sh's source, not one to expand.
 if grep -q 'printf .*>> "\$file"' "$REPO_ROOT/$AUDIT" 2>/dev/null; then
   ok "audit writer still emits each record in one append (doc's atomicity claim)"
 else
