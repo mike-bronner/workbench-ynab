@@ -144,7 +144,10 @@ run. The M4-3 audit log is the source of truth: every real apply appended a reco
 carrying the operation's `id` and `result_status`. Read the applied op-ids and
 exclude them from the loaded set, so **re-running after a partial apply never
 re-applies an already-applied op** (the change-set `id` is stable precisely to make
-apply idempotent on resume — contract §1).
+apply idempotent on resume — contract §1). The full resume design — the
+idempotency key's structure, write-ahead ordering, and what to do when the audit
+log and live YNAB state disagree — is
+[`docs/write-back-idempotency.md`](../docs/write-back-idempotency.md) (GAP-11).
 
 ```bash
 # Applied op-ids = audit records for THIS proposal where the apply was real

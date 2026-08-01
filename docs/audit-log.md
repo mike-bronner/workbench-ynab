@@ -100,7 +100,9 @@ which the writer persists verbatim (both default to `null` on a non-error op):
 | `error_class` | `auth_revoked` / `insufficient_scope` / `rate_limited` / `unknown` | the failure class the executor classified the thrown port error into |
 | `applied_state` | `not_applied` / `unknown` | `not_applied` when YNAB rejected the call (a 4xx, so nothing changed); `unknown` when it can't be determined (a 5xx or a network timeout mid-mutation) |
 
-These two are the substrate the idempotent-resume design ([#48](https://github.com/mike-bronner/workbench-ynab/issues/48)) reads to reason about a failed op without re-querying.
+These two are the substrate the idempotent-resume design
+([`docs/write-back-idempotency.md`](./write-back-idempotency.md), [#48](https://github.com/mike-bronner/workbench-ynab/issues/48))
+reads to reason about a failed op without re-querying.
 
 `STDOUT` is left untouched (reserved for the read helper); diagnostics go to
 `STDERR`; a non-zero exit signals a build/append failure.

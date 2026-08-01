@@ -368,7 +368,10 @@ write; each interacts with it as follows:
   (`partial`, still in `proposals/`) and reads the audit log (via `audit_run_id`)
   to skip already-`applied` ops — exactly the existing idempotency guard
   (`/ynab-apply` Step 1b). When a resume completes the last op, it writes the
-  `partial → applied` transition and triggers the §6 move.
+  `partial → applied` transition and triggers the §6 move. The resume design
+  itself — the idempotency key, write-ahead ordering, and the two dangerous
+  interleavings — is
+  [`docs/write-back-idempotency.md`](./../docs/write-back-idempotency.md).
 
 The single source of per-op truth is the **audit log** (`result_status` per op);
 the single source of per-proposal truth is the **sidecar** (`status`). Neither
