@@ -1,0 +1,10 @@
+{
+  "$comment": "SYNTHETIC YNAB list_accounts response (issue #39 golden-snapshot fixture). Balances are YNAB MILLIUNITS (divide by 1000 for dollars) and are round placeholder figures — NOT real balances, and there are no real account numbers. Committed for deterministic review-engine snapshot tests.",
+  "data": {
+    "accounts": [
+      { "id": "acct-biz-checking", "name": "Business Checking Placeholder", "type": "checking", "on_budget": true, "closed": false, "balance": 12500000, "cleared_balance": 12500000, "uncleared_balance": 0 },
+      { "id": "acct-personal-checking", "name": "Everyday Checking Placeholder", "type": "checking", "on_budget": true, "closed": false, "balance": 4300000, "cleared_balance": 4300000, "uncleared_balance": 0 },
+      { "id": "acct-savings", "name": "Savings Placeholder", "type": "savings", "on_budget": true, "closed": false, "balance": 20000000, "cleared_balance": 20000000, "uncleared_balance": 0 }
+    ]
+  }
+}

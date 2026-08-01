@@ -202,7 +202,7 @@ Every command is namespaced under `/workbench-ynab:`. The plugin is mid-build; t
 | `/workbench-ynab:ynab-apply` | Review a proposed change-set and, on explicit approval, apply the ledger-only writes (dry-run by default). | Sprint 4 |
 | `/workbench-ynab:ynab-migrate` | Retire the legacy hand-run prototype: the old Desktop connector, its token, and the prototype scheduled tasks/directories. | Sprint 5 |
 | `/workbench-ynab:ynab-prune` | Prune old generated reports under the retention policy — previews by default, deletes only with `--apply`. Keeps unencrypted financial history from accumulating unbounded. | Sprint 5 |
-| `/workbench-ynab:ynab-monitor` | Run one proactive between-run monitoring pass: advance the monitor state store from fresh YNAB data, exit silently when nothing changed. Scaffold only — no alerts/detectors yet. | Sprint 6 (v-Next) |
+| `/workbench-ynab:ynab-monitor` | Run one proactive between-run monitoring pass: advance the monitor state store from fresh YNAB data, run the four alert detectors (overdrawn, large/unusual transaction, budget overrun, bill due), dispatch any new finding, and exit silently when nothing is alert-worthy. | Sprint 6 (v-Next) |
 
 ## Versioning
 

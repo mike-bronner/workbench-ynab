@@ -45,7 +45,7 @@ loader, the JSON Schema, or any default.
 | `mapping_rules` | array | optional | Payee/category → tax-line rules, expressed as data. |
 | `persona` | object | **required** | The financial-review persona (configurable name). |
 | `report` | object | **required** | Report output directory + template path. |
-| `schedules` | object | optional | Scheduled-task cadences for background tasks (e.g. the monitoring poll). |
+| `schedules` | object | optional | Scheduled-task cadences for background tasks (the unified `ynab-review` task and the `ynab-monitor` poll). |
 | `alerts` | object | optional | Alert rules + delivery channel for proactive monitoring (M6). |
 | `classification` | object | optional | Confidence-band thresholds for the human-review routing policy (issue #19). |
 
@@ -264,6 +264,23 @@ Cadences for the plugin's background scheduled tasks. The **setup step** (or a
 via the scheduled-tasks MCP — cadence is **config-driven, never hardcoded** in a
 skill or in the task deployment. Omit the whole block to accept the defaults.
 
+#### `schedules.review` *(object, optional)*
+
+The unified review (Sprint 3). **ONE** scheduled task (`ynab-review`) whose cron
+fires `/workbench-ynab:ynab-review`; the read-only orchestrator decides which
+tiers run that day (weekly, monthly, quarterly-tax, annual). It is **not** four
+per-tier tasks — a single cadence covers them all, exactly like bujo's one
+`bujo-ritual` task.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `cron` | string | optional | `"0 7 * * 1"` | Cron expression for the unified review. Defaults to Monday 07:00 (the proven weekly cadence) when the block or field is absent. The orchestrator routes tiers, so this one cadence covers weekly/monthly/quarterly-tax/annual. |
+| `enabled` | boolean | optional | `true` | Whether the `ynab-review` scheduled task is deployed. Set `false` and re-run setup to remove/disable the task; `ynab-monitor` is unaffected. |
+
+```json
+"schedules": { "review": { "cron": "0 7 * * 1", "enabled": true } }
+```
+
 #### `schedules.monitor` *(object, optional)*
 
 The proactive between-run monitoring poll (M6). It runs more frequently than the
@@ -304,6 +321,7 @@ The full contract — field semantics, the structured finding shape, the
 | `bill_due_lookahead_days` | integer | optional | `3` | Days ahead an upcoming scheduled bill is flagged. |
 | `overdrawn` | boolean | optional | `true` | Whether a negative account balance is alert-worthy. |
 | `channel` | string (enum) | optional | `"macos-notification"` | Delivery channel: `macos-notification` or `log-only`. Every dispatch also appends to the audit log. |
+| `tax` | object | optional | — | Quarterly estimated-tax reminders (M6-5). See [`alerts.tax`](#alertstax-object-optional) below. |
 
 ```json
 "alerts": {
@@ -313,9 +331,31 @@ The full contract — field semantics, the structured finding shape, the
   "budget_overrun_pct": 100,
   "bill_due_lookahead_days": 3,
   "overdrawn": true,
-  "channel": "macos-notification"
+  "channel": "macos-notification",
+  "tax": { "lead_time_days": 7, "reminders_enabled": true }
 }
 ```
+
+#### `alerts.tax` *(object, optional)*
+
+Quarterly estimated-tax **payment reminders** (M6-5, issue #83). Nudge the user
+ahead of each estimated-tax due date so a deadline never slips. The reminder is a
+thin layer over the M6-4 tracker (for the remaining-due figure and
+payment-suppression) and the M6-2 dispatch channel (delivery). Omit the whole
+block to accept the defaults — reminders are on out of the box. Due dates come
+from `tax_profile.quarterly_due_dates` / the tax profile — never hardcoded.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `lead_time_days` | integer ≥ 0 | optional | `7` | Calendar days before a due date the lead-time reminder starts firing. `0` reminds only on the due date itself. |
+| `reminders_enabled` | boolean | optional | `true` | Master switch for estimated-tax reminders. `false` silences them without touching any other alert. |
+
+Both take effect on the **next orchestrator/review run** — no code change. The
+reminder fires within `lead_time_days` of a quarter's due date (🟡 attention) and
+escalates to 🔴 on the due date when no payment is recorded, then stays silent
+once a payment for that quarter lands in the tracker. It runs inside the unified
+`ynab-review` scheduled task (`schedules.review`), so it adds **no** extra cron
+entry. Full contract: [`alerts-config.md`](alerts-config.md).
 
 ---
 

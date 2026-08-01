@@ -1,0 +1,15 @@
+{
+  "$readme": [
+    "SYNTHETIC tax profile (issue #39 golden-snapshot fixture) — the LOW-standard-deduction variant.",
+    "Schema-valid per assets/tax/tax-profile.schema.json; carries no real names, institutions, or amounts.",
+    "It overrides ONLY standardDeductionByYear (single/2025 = 15000); every rate, bracket, and quarterly due date falls back to the bundled US defaults (assets/tax/us-tax-lines.json).",
+    "Paired with tax-profile-high-deduction.json (the two differ ONLY in that deduction — the two prove the itemize-vs-standard verdict is driven by the config value, never a hardcoded constant (M2-2).",
+    "With the fixture's fixed 22000 itemized total, 22000 > 15000 so the verdict is 'itemize'."
+  ],
+  "schemaVersion": "1",
+  "filingStatus": "single",
+  "taxYear": 2025,
+  "standardDeductionByYear": {
+    "single": { "2025": 15000 }
+  }
+}

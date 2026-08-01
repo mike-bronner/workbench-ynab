@@ -18,6 +18,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PERSONA_SH="${REPO_ROOT}/bin/persona.sh"
 
+# Shared poll-and-kill timeout helper for the DoS/hang guards below. It kills the
+# whole process GROUP on a timeout, so no command-substitution grandchild is left
+# orphaned and burning CPU (issue #188).
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/watchdog.sh"
+# Shared fixture for the two per-call-site no-orphan regression tests below
+# (issue #251) — see tests/lib/orphan-probe.sh.
+# shellcheck source=/dev/null
+source "${SCRIPT_DIR}/lib/orphan-probe.sh"
+
 TMPDIR_TEST="$(mktemp -d)"
 trap 'rm -rf "${TMPDIR_TEST}"' EXIT
 
@@ -231,28 +241,86 @@ assert_contains "smuggled token stays verbatim in the name slot (_render_templat
 # BASH_SOURCE==$0 (same pattern as tests/unit/audit-log.test.sh sourcing
 # bin/audit-log.sh) so sourcing defines the functions without running the CLI.
 
+# _render_template_sourced <template> <key> <val> [...] — the payload
+# render_tmpl_timed runs under the watchdog. A named function (rather than an
+# inline subshell) is what lets watchdog_run background it as argv.
+_render_template_sourced() {
+  # shellcheck source=/dev/null
+  source "$PERSONA_SH"
+  _render_template "$@"
+}
+
 # render_tmpl_timed <secs> <template> <key> <val> [<key> <val>...]
-# Runs _render_template under a portable watchdog (macOS ships no timeout(1);
-# poll-until-exit mirrors tests/lib/bundle-integrity.sh) so a regressed hang
-# fails cleanly instead of stalling CI. Prints the render on stdout; returns 124
-# if the call overran (hung), else the call's own exit code.
+# Runs _render_template under the shared portable watchdog (macOS ships no
+# timeout(1) — see tests/lib/watchdog.sh) so a regressed hang fails cleanly
+# instead of stalling CI. Prints the render on stdout; returns 124 if the call
+# overran (hung), else the call's own exit code.
 render_tmpl_timed() {
   local secs="$1"; shift
   local out_file; out_file="$(mktemp "${TMPDIR_TEST}/rt.XXXXXX")"
-  # shellcheck source=/dev/null
-  ( source "$PERSONA_SH"; _render_template "$@" ) >"$out_file" 2>/dev/null &
-  local pid=$! waited=0
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge "$secs" ]; then
-      kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
-      return 124
-    fi
-    sleep 1; waited=$((waited + 1))
-  done
-  wait "$pid"; local rc=$?
+  local rc=0
+  watchdog_run "$secs" _render_template_sourced "$@" >"$out_file" 2>/dev/null || rc=$?
+  # On a timeout there is no render to print — return the 124 contract only.
+  if [ "$rc" -eq 124 ]; then
+    return 124
+  fi
   cat "$out_file"
   return "$rc"
 }
+
+# ---- #251: the no-orphan guarantee, pinned at THIS call site ----------------
+#
+# render_tmpl_timed's TIMEOUT branch (rc == 124) is never reached by any other
+# committed test — assert_render_tmpl below treats 124 as a FAILURE, so a green
+# run never executes the watchdog's reap. The promise that a timeout strands no
+# descendant was therefore verified here only by a point-in-time manual check,
+# which a later commit could invalidate in silence.
+#
+# This drives the site's real payload (_render_template_sourced — source a
+# script, then call a function it defines) to rc == 124 through the real
+# render_tmpl_timed wrapper, and asserts nothing survived. Only the sourced
+# SCRIPT is a stand-in: $PERSONA_SH is repointed at a generated fixture that
+# never terminates, because _render_template's empty-key hang is fixed and
+# inducing a new hang would mean regressing production code. The fixture carries
+# the same `BASH_SOURCE == $0` guard as bin/persona.sh, so sourcing it only
+# defines _render_template — the exact topology under test. See
+# tests/lib/orphan-probe.sh for the full real-vs-stand-in rationale.
+#
+# NOTE ON SHAPE: this file predates tests/lib/assert.sh — it has no run_tests
+# discovery, so the two #251 tests are named test_* per the repo convention but
+# invoked EXPLICITLY below, and report through this file's own pass/fail
+# counters. A silently-never-run test would be worse than none at all.
+#
+# Mutation-checked: reverting tests/lib/watchdog.sh's group kill to a bare
+# `kill -9 "$pid"` makes this test fail (the marker keeps growing).
+test_render_tmpl_timed_timeout_leaves_no_orphan() {
+  local marker="${TMPDIR_TEST}/orphan-render-ticks"
+  local fixture="${TMPDIR_TEST}/orphan-persona-render.sh"
+  local saved_persona="$PERSONA_SH" rc=0
+  : >"$marker"
+  orphan_probe_write_script "$fixture" "$marker" _render_template
+
+  PERSONA_SH="$fixture"
+  render_tmpl_timed 1 "abc" "{{name}}" "x" >/dev/null 2>&1 || rc=$?
+  PERSONA_SH="$saved_persona"
+
+  if [ "$rc" -ne 124 ]; then
+    printf 'FAIL — overrunning _render_template_sourced must return 124, got %s\n' "$rc"
+    fail=$((fail + 1))
+    return
+  fi
+  printf 'ok   — overrunning _render_template_sourced returns the 124 timeout contract\n'
+  pass=$((pass + 1))
+
+  if orphan_probe_no_survivors "$marker"; then
+    printf 'ok   — render_tmpl_timed timeout leaves no orphaned descendant\n'
+    pass=$((pass + 1))
+  else
+    printf 'FAIL — render_tmpl_timed timeout stranded a descendant (process-group reap regressed)\n'
+    fail=$((fail + 1))
+  fi
+}
+test_render_tmpl_timed_timeout_leaves_no_orphan
 
 # assert_render_tmpl <desc> <expected> <secs> <template> <key> <val> [<key> <val>...]
 # Fails loudly (not by hanging) if the call times out — the regression this pins.
@@ -621,20 +689,62 @@ run_voice_timed() {
   local secs="$1" cfg="$2" sub="${3:-voice}"
   shift 2; [ "$#" -gt 0 ] && shift   # anything left is extra argv for the subcommand
   local out_file="${TMPDIR_TEST}/voice-timed-out" err_file="${TMPDIR_TEST}/voice-timed-err"
-  YNAB_CONFIG_FILE="$cfg" WORKBENCH_CORE_CONFIG_FILE="$NO_FILE" \
-    bash "$PERSONA_SH" "$sub" "$@" >"$out_file" 2>"$err_file" &
-  local pid=$! waited=0
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge "$secs" ]; then
-      kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
-      return 124
-    fi
-    sleep 1; waited=$((waited + 1))
-  done
-  wait "$pid"; local rc=$?
+  local rc=0
+  # `env` carries the config overrides into the watchdog's argv form; the
+  # watchdog kills the whole process group on a timeout (issue #188), so
+  # persona.sh's own command substitutions cannot outlive it.
+  watchdog_run "$secs" \
+    env YNAB_CONFIG_FILE="$cfg" WORKBENCH_CORE_CONFIG_FILE="$NO_FILE" \
+      bash "$PERSONA_SH" "$sub" "$@" >"$out_file" 2>"$err_file" || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    return 124
+  fi
   cat "$out_file"
   return "$rc"
 }
+
+# ---- #251: the no-orphan guarantee, pinned at THIS call site ----------------
+#
+# Same gap as render_tmpl_timed above, at the OTHER persona topology: every DoS
+# guard below asserts bounded-time SUCCESS and treats 124 as a failure, so
+# run_voice_timed's timeout branch — `env VAR=… bash <script>`, where the reap
+# must cross the exec'd `env` into persona.sh's own command substitutions — is
+# never executed by a committed test. This drives the real wrapper down that
+# branch with $PERSONA_SH repointed at a never-terminating generated fixture (a
+# stand-in for the bounded real script only; no production code changes), and
+# asserts nothing survived. See tests/lib/orphan-probe.sh.
+#
+# Mutation-checked: reverting tests/lib/watchdog.sh's group kill to a bare
+# `kill -9 "$pid"` makes this test fail (the marker keeps growing).
+test_run_voice_timed_timeout_leaves_no_orphan() {
+  local marker="${TMPDIR_TEST}/orphan-voice-ticks"
+  local fixture="${TMPDIR_TEST}/orphan-persona-cli.sh"
+  local saved_persona="$PERSONA_SH" rc=0
+  : >"$marker"
+  orphan_probe_write_script "$fixture" "$marker"
+
+  PERSONA_SH="$fixture"
+  run_voice_timed 1 "$NO_FILE" voice >/dev/null 2>&1 || rc=$?
+  PERSONA_SH="$saved_persona"
+
+  if [ "$rc" -ne 124 ]; then
+    printf 'FAIL — overrunning env-wrapped persona.sh must return 124, got %s\n' "$rc"
+    fail=$((fail + 1))
+    return
+  fi
+  printf 'ok   — overrunning env-wrapped persona.sh returns the 124 timeout contract\n'
+  pass=$((pass + 1))
+
+  if orphan_probe_no_survivors "$marker"; then
+    printf 'ok   — run_voice_timed timeout leaves no orphaned descendant\n'
+    pass=$((pass + 1))
+  else
+    printf 'FAIL — run_voice_timed timeout stranded a descendant (process-group reap regressed)\n'
+    fail=$((fail + 1))
+  fi
+}
+test_run_voice_timed_timeout_leaves_no_orphan
+
 dos_unit='</voice-over</voice-overridesrides>'
 dos_val=""
 i=0; while [ "$i" -lt 3800 ]; do dos_val+="$dos_unit"; i=$((i + 1)); done   # ~133 KB

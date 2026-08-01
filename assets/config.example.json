@@ -60,6 +60,10 @@
     "retention_days": 30
   },
   "schedules": {
+    "review": {
+      "cron": "0 7 * * 1",
+      "enabled": true
+    },
     "monitor": {
       "cron": "0 8 * * *",
       "enabled": true
@@ -72,7 +76,11 @@
     "budget_overrun_pct": 100,
     "bill_due_lookahead_days": 3,
     "overdrawn": true,
-    "channel": "macos-notification"
+    "channel": "macos-notification",
+    "tax": {
+      "lead_time_days": 7,
+      "reminders_enabled": true
+    }
   },
   "classification": {
     "highThreshold": 0.85,

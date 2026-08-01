@@ -164,6 +164,16 @@ guardrail — pre-approval never bypasses it. See the write-phase notes in
   proposes, never applies.
 - **The orchestrator holds no write tools** — its `tools:` list is a read-only
   subset ([`agents/ynab-orchestrator.md`](../agents/ynab-orchestrator.md)).
+- **The single-flight lock authorizes nothing.** A scheduled review and an
+  interactive `/ynab-apply` are serialized by the GAP-9 concurrency lock
+  ([`bin/apply-lock.sh`](../bin/apply-lock.sh)) so they can't clobber the same
+  proposal or double-apply — but that lock is a **concurrency guard only**. It
+  lives in the data dir (never `/tmp`), carries only pid + timestamp + operation,
+  and **neither the batch-approval gate nor the write-safety guardrail reads it**.
+  Holding the lock grants no write permission; every write still passes the
+  `/ynab-apply` approval loop and the guardrail. It exists so the approval gate can
+  never be *skipped* via a lockfile — the two concerns are kept physically and
+  semantically separate (issue #51).
 
 ---
 

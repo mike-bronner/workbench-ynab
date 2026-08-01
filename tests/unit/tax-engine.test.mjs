@@ -200,8 +200,15 @@ test('AC#5 computeTaxSummary composes P&L, Schedule A, medical, SE tax, and next
 });
 
 test('AC#5 computeTaxSummary tolerates empty ytdData without throwing', () => {
+  // "Empty" means empty of YTD *figures* — the required anchors (taxYear,
+  // filingStatus, asOfDate) are still supplied, because the engine refuses to
+  // guess any of them (#240). The zero-figure tolerances are what this pins.
   const profile = loadFixtureProfile();
-  const summary = computeTaxSummary(profile, { taxYear: 2025, filingStatus: 'single' });
+  const summary = computeTaxSummary(profile, {
+    taxYear: 2025,
+    filingStatus: 'single',
+    asOfDate: '2025-05-01',
+  });
   assert.equal(summary.scheduleC.grossIncome, 0);
   assert.equal(summary.scheduleC.netProfit, 0);
   assert.equal(summary.medical.exceedsThreshold, false); // 0 medical, 0 threshold
@@ -229,6 +236,74 @@ test('computeTaxSummary throws — never emits a NaN due date — when taxYear i
   );
 });
 
+test('(#240) computeTaxSummary throws — never reads the host clock — when asOfDate is omitted', () => {
+  // The anchor USED to default to todayISO() (`new Date()`, UTC), so a caller that
+  // forgot asOfDate silently got a summary anchored on the host clock — the
+  // near-midnight / wrong-tax-year bug the review date path exists to kill. Omitting
+  // it must now FAIL LOUD, naming the missing field.
+  const profile = loadFixtureProfile();
+  assert.throws(
+    () =>
+      computeTaxSummary(profile, {
+        taxYear: 2025,
+        filingStatus: 'single',
+        scheduleCLines: [{ taxLineId: 'schedC.1', category: 'income', amount: 42000 }],
+      }),
+    /ytdData\.asOfDate/,
+  );
+});
+
+test('(#240) computeTaxSummary throws on a malformed or impossible asOfDate rather than mis-comparing it', () => {
+  // The due-date search is a LEXICOGRAPHIC compare (`d.date >= asOfDate`), so a
+  // bad anchor does not error on its own — it silently selects the wrong (or no)
+  // next quarterly payment. Two classes must fail closed, not one:
+  //   * wrong SHAPE ('5/1/2025', a Date, a number, or a full ISO timestamp whose
+  //     'YYYY-MM-DD' prefix is real) — not comparable with the profile's bare
+  //     'YYYY-MM-DD' due dates, which is why the exact shape is pinned separately
+  //     from the calendar check;
+  //   * IMPOSSIBLE-but-well-shaped ('2025-13-45', '2025-02-30', '0000-00-00',
+  //     '2025-02-29' in a non-leap year) — these compare happily, which is worse.
+  //     A shape-only guard let '2025-13-45' through, and because '1' > '0' in the
+  //     month position it sorts after every real 2025 due date: the search skipped
+  //     Q1–Q3 and returned Q4 (2026-01-15) with no error. Caught by epochDay()
+  //     (lib/tax/civilDate.mjs), which round-trips through Date.UTC.
+  const profile = loadFixtureProfile();
+  for (const asOfDate of [
+    '5/1/2025',
+    '2025-5-1',
+    '',
+    20250501,
+    new Date('2025-05-01'),
+    null,
+    '2025-05-01T00:00:00Z',
+    '2025-13-45',
+    '2025-02-30',
+    '0000-00-00',
+    '2025-02-29',
+    '2025-04-31',
+  ]) {
+    assert.throws(
+      () => computeTaxSummary(profile, { taxYear: 2025, filingStatus: 'single', asOfDate }),
+      /ytdData\.asOfDate/,
+      `expected a fail-closed throw for asOfDate=${JSON.stringify(asOfDate)}`,
+    );
+  }
+});
+
+test('(#240) computeTaxSummary accepts an explicit asOfDate and anchors on it, not on today', () => {
+  // The positive half of the contract: a well-formed anchor still drives the
+  // due-date search, and the summary echoes exactly what the caller passed — no
+  // host-clock substitution anywhere on the path.
+  const profile = loadFixtureProfile();
+  const summary = computeTaxSummary(profile, {
+    taxYear: 2025,
+    filingStatus: 'single',
+    asOfDate: '2025-01-01',
+  });
+  assert.equal(summary.meta.asOfDate, '2025-01-01');
+  assert.equal(summary.nextQuarterlyPayment.quarter, 1); // Q1 is still upcoming on Jan 1
+});
+
 test('computeTaxSummary yields nextQuarterlyPayment=null when no due date remains', () => {
   const profile = loadFixtureProfile();
   // Q4 2025 falls due 2026-01-15; an anchor past it leaves nothing upcoming, so
@@ -250,6 +325,7 @@ test('scheduleA breaks the itemized==standard tie toward standard (> not >=)', (
   const summary = computeTaxSummary(profile, {
     taxYear: 2025,
     filingStatus: 'single',
+    asOfDate: '2025-05-01',
     itemizedDeductionsTotal: std,
   });
   assert.equal(summary.scheduleA.recommendation, 'standard');
@@ -308,7 +384,33 @@ test('a failed profile load is refused consistently across classify/batch/summar
   // TypeError. The docstring tells M2 to check `.ok`; reaching here is a caller bug.
   assert.throws(() => classifyTransaction(GITHUB_TXN, bad), /failed profile load/);
   assert.throws(() => classifyBatch([GITHUB_TXN], bad), /failed profile load/);
-  assert.throws(() => computeTaxSummary(bad, { taxYear: 2025, filingStatus: 'single' }), /failed profile load/);
+  assert.throws(
+    // asOfDate supplied so the refusal provably comes from the failed profile load,
+    // not from the #240 anchor guard further down.
+    () => computeTaxSummary(bad, { taxYear: 2025, filingStatus: 'single', asOfDate: '2025-05-01' }),
+    /failed profile load/,
+  );
+});
+
+test('(#225) the facade re-throw carries no offending property name across the boundary', () => {
+  // rawProfile() re-throws a failed load's error.message across the MCP/JSON-RPC
+  // boundary. A schema failure whose only violation is a secret-shaped extra
+  // property must not leak that key here — the boundary the loader's redaction is
+  // ultimately protecting. Exercises the facade, not loadProfile.mjs in isolation.
+  const secretKey = 'AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE';
+  const p = join(TMP, 'secret-key-profile.json');
+  writeFileSync(p, JSON.stringify({ schemaVersion: '1', filingStatus: 'single', taxYear: 2025, [secretKey]: 'x' }));
+  const failed = loadEffectiveProfile({ dataDir: TMP, profilePath: p });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.error.kind, 'schema');
+  assert.throws(
+    () => classifyTransaction(GITHUB_TXN, failed),
+    (err) => {
+      assert.ok(!err.message.includes('AWS_SECRET_ACCESS_KEY'), `secret key crossed the facade boundary: ${err.message}`);
+      assert.match(err.message, /refusing to operate on a failed profile load/);
+      return true;
+    },
+  );
 });
 
 // --- AC #11: the facade writes nothing to stdout -----------------------------
@@ -329,6 +431,7 @@ test('AC#11 exercising the whole facade writes zero bytes to stdout', () => {
     computeTaxSummary(profile, {
       taxYear: 2025,
       filingStatus: 'single',
+      asOfDate: '2025-05-01',
       scheduleCLines: [{ taxLineId: 'schedC.1', category: 'income', amount: 1000 }],
       agi: 50000,
       medicalExpenses: 5000,

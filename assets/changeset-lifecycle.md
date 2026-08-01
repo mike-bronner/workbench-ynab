@@ -337,10 +337,17 @@ release. Directory placement and sidecar `status` can never diverge under a
 concurrent writer, and if a crash ever leaves them disagreeing, the next
 lock-holder treats the sidecar as authoritative and repairs the placement (§2.2).
 
-> **Coordination.** The GAP-9 lock is not yet implemented. Until it lands, apply is
-> the only writer of proposal status and runs interactively (one at a time); when
-> GAP-9 ships, every status write named in this document moves inside its critical
-> section.
+> **Coordination.** The GAP-9 lock **is implemented** as
+> [`bin/apply-lock.sh`](./../bin/apply-lock.sh) (issue #51): a single-flight lock
+> under the data dir (`$CONFIG_DIR/apply.lock`), acquired as `apply` or `review`,
+> holding pid + timestamp + operation, with `kill -0` stale-recovery so a crashed
+> holder never deadlocks the next run. It is **wired into `/ynab-apply`** (Step 0:
+> acquire before the proposal read, release on every exit path). The M4-10 review
+> emitter takes the *lighter* form — `acquire review` around the proposal write,
+> backing off if an apply holds the lock — when that emitter lands. The lock is a
+> **concurrency guard only**: it carries no approval state and no write-approval
+> decision reads it (issue #51 AC #6). Every status write named in this document
+> runs inside its critical section.
 
 ---
 

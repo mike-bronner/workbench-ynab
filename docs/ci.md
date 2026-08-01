@@ -38,8 +38,8 @@ Workflow hygiene, common to all jobs:
 | Job | Runner | What it checks | A failure means |
 |---|---|---|---|
 | `lint` | ubuntu | `shellcheck` at **default severity** over every repo-authored `.sh` (`bin/`, `hooks/`, `scripts/`, `tests/` — helpers included), then `jq empty` over every git-tracked `.json` (an empty file list fails closed — the gate never reports success having validated nothing) | A script has a shellcheck finding (any severity fails), a JSON file doesn't parse, or `git ls-files` found no JSON at all |
-| `test` | ubuntu (Node floor + `lts/*` matrix) | First the swap-ready tool-name guard (`bin/check-tool-name-sources.sh`, issues #87/#131) as an explicit fail-fast step, then the full bash + Node suite via `scripts/test.sh`, including the offline-boot proof (#14) against `node vendor/ynab-mcp/index.cjs` | A concrete YNAB tool name appeared outside the documented allowlist, or a test failed — the runner prints which file; the offline-boot proof failing usually means a bad re-vendor |
-| `bash-3-2` | macOS | The persona footer-escaping suites (`tests/persona-loader.test.sh`, `tests/unit/html-escape.test.sh`) under the runner's **bash 3.2** | The escaping regressed on macOS's default bash while staying green on bash ≥5 (issue #126 AC-3) — or the runner image no longer ships bash 3.2 on PATH (the lane fails loudly rather than test the wrong interpreter) |
+| `test` | ubuntu (Node floor + `lts/*` matrix) | First the swap-ready tool-name guard (`bin/check-tool-name-sources.sh`, issues #87/#131), then the M2 read-only guard (`scripts/check-readonly.sh`, issue #39 — no callable YNAB write tool and no bare `mcp__ynab__` namespace on any review surface) as explicit fail-fast steps, then the full bash + Node suite via `scripts/test.sh`, including the offline-boot proof (#14) against `node vendor/ynab-mcp/index.cjs` | A concrete YNAB tool name appeared outside the documented allowlist, a read-only review surface can call a write tool (or uses a bare namespace), or a test failed — the runner prints which file; the offline-boot proof failing usually means a bad re-vendor |
+| `bash-3-2` | macOS | The persona footer-escaping suites (`tests/persona-loader.test.sh`, `tests/unit/html-escape.test.sh`), the shared watchdog (`tests/unit/watchdog.test.sh`), and the report writer (`tests/unit/report-writer.test.sh`) under the runner's **bash 3.2** | The escaping regressed on macOS's default bash while staying green on bash ≥5 (issue #126 AC-3); the watchdog's process-group kill is job-control behaviour, which differs across bash majors (issue #188), and since issue #251 all four files drive their own call site down that timeout path — or the runner image no longer ships bash 3.2 on PATH (the lane fails loudly rather than test the wrong interpreter) |
 | `assets-tests` | ubuntu | `npm --prefix assets ci && npm --prefix assets test` — the `assets/test/*.test.js` integration suites (apply executor, write-safety guardrail, handlers) against real installed deps | An assets integration test failed, or `package-lock.json` no longer reproduces an install |
 | `docs-links` | ubuntu | `lychee --offline --include-fragments` over `assets/**/*.md`, `docs/**/*.md`, and the root `README.md` — recursive, so nested docs (`assets/tax/README.md`, `assets/persona/*.md`, `docs/decisions/*.md`, …) are covered alongside the top-level files, and the README's links to the docs/ set are checked too | A relative link or `#fragment` cross-reference anywhere in the docs tree or the README points at nothing |
 
@@ -91,13 +91,14 @@ Every job is one command, no repo-specific setup:
 # lint — identical to CI (needs shellcheck + jq)
 bash scripts/lint.sh
 
-# test — the swap-ready guard, then the full suite (needs bash, node, jq;
-# see docs/testing.md)
+# test — the swap-ready guard, then the read-only guard, then the full suite
+# (needs bash, node, jq; see docs/testing.md)
 bash bin/check-tool-name-sources.sh
+bash scripts/check-readonly.sh
 bash scripts/test.sh
 
 # bash-3-2 — on any Mac, /bin/bash IS bash 3.2
-/bin/bash scripts/test.sh tests/persona-loader.test.sh tests/unit/html-escape.test.sh
+/bin/bash scripts/test.sh tests/persona-loader.test.sh tests/unit/html-escape.test.sh tests/unit/watchdog.test.sh tests/unit/report-writer.test.sh
 
 # assets-tests
 npm --prefix assets ci && npm --prefix assets test
@@ -126,19 +127,63 @@ The workflow then, in order:
    (issue #75; see the README's Versioning section). The vendored bundle's
    version marker is provenance-only and is never touched;
 3. runs the full test suite (`scripts/test.sh`, which includes the
-   offline-boot proof) and the `assets/` integration suite;
+   offline-boot proof). The `assets/` integration suite has already gated the
+   release from its own `assets-tests` job — see below;
 4. commits as `github-actions[bot]`, creates the annotated tag `v<version>`,
-   pushes `main` and the tag, and creates the GitHub release;
+   pushes `main` **and** the tag in a single `git push --atomic` — both refs
+   land or neither does, because the monotonicity guard makes a same-version
+   re-run impossible and a half-pushed release would have no way back — and
+   creates the GitHub release;
 5. triggers `update-marketplace-sha.yml` explicitly via `gh workflow run` —
    releases created with `GITHUB_TOKEN` emit sterile events that do **not**
    auto-trigger `on: release` workflows (GitHub's anti-recursion rule).
+
+### Why the release is two jobs
+
+The `assets/` integration suite runs `npm --prefix assets ci` — third-party
+packages and their install scripts — followed by their module top-level code.
+It therefore lives in its **own `assets-tests` job**, scoped to
+`permissions: contents: read`, which overrides the workflow-level
+`contents: write` + `actions: write`. The `release` job gates on it via
+`needs: assets-tests`, so the suite still blocks the tag; as a job dependency
+that ordering is stronger than the step ordering it replaced, and "no
+`node_modules` on the resolution path while the offline-boot proof runs"
+becomes a separate-VM guarantee rather than a step-ordering one.
+
+Two jobs mean two checkouts of a moving `main`, so `assets-tests` publishes the
+commit it actually tested and `release` re-checks it against its own `HEAD`
+before bumping anything. If `main` advanced in between — or the output is
+missing — the release aborts with an `::error::` rather than tagging a tree the
+assets suite never saw.
+
+Sharing a runner is the exposure, not merely a credential on disk. Actions
+does not reap detached children at step boundaries, so a compromised
+transitive dependency can background a process that outlives its own step and
+read a push token out of another step's `/proc/<pid>/cmdline` **or**
+`/proc/<pid>/environ` — same VM, same UID. Neither `--ignore-scripts`,
+scrubbing the credential, nor moving it from the command line into `env:`
+closes that; only never minting a write-scoped token on that runner does.
+
+The `release` job additionally checks out with **`persist-credentials: false`**,
+so checkout's `contents: write` + `actions: write` token is never written into
+`.git/config`; step 4's push supplies the token in its URL instead, at push
+time. With the untrusted install now on a different runner this is defence in
+depth rather than the sole barrier.
 
 ## The marketplace SHA pin (cross-repo write)
 
 `update-marketplace-sha.yml` clones
 [`mike-bronner/claude-workbench`](https://github.com/mike-bronner/claude-workbench),
 sets `source.sha` for this plugin's entry in `.claude-plugin/marketplace.json`,
-and pushes the commit. It reads the plugin name from
+and pushes the commit. The clone is **unauthenticated**: an embedded
+credential in the clone URL is written into `marketplace/.git/config` as the
+`origin` remote, which would leave `DEVELOPER_SETTINGS_TOKEN` — a long-lived,
+non-expiring PAT with `Contents: write` on the *shared* marketplace repo —
+readable on disk for the rest of the step. It is supplied only in the push
+URL, at push time, mirroring the posture `release.yml` uses for its own push.
+(The marketplace is public, so the anonymous clone and the retry loop's
+`git pull --rebase` both work; were it ever made private, the clone fails
+loudly rather than degrading to a silent skip.) It reads the plugin name from
 `.claude-plugin/plugin.json` (never hardcoded) and resolves the release tag to
 a commit SHA, dereferencing annotated tags.
 
@@ -147,6 +192,16 @@ plugin's name, or when `source.sha` is already the resolved SHA. It **fails
 loudly** when the `DEVELOPER_SETTINGS_TOKEN` secret is missing or when the
 marketplace manifest is malformed (`.plugins` missing or not an array) — it
 never silently skips the push.
+
+The marketplace is **shared with every other workbench plugin repo**, and the
+`update-marketplace-sha` concurrency group only serializes runs *within this*
+repo — so a sibling plugin releasing at the same time can land its own pin
+commit between our clone and our push, making ours non-fast-forward. The push
+therefore sits in a bounded retry loop (5 attempts, linear backoff): on
+rejection it runs `git pull --rebase` and tries again. Because `jq` rewrites
+only this plugin's own entry, a sibling's edit rebases cleanly. A **conflicting
+rebase aborts and fails the run** — the pin is never force-pushed over another
+repo's write — and so does an exhausted attempt budget.
 
 ## The `DEVELOPER_SETTINGS_TOKEN` secret
 

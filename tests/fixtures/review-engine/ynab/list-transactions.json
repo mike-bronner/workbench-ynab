@@ -1,0 +1,67 @@
+{
+  "$comment": "SYNTHETIC YNAB list_transactions response (issue #39 golden-snapshot fixture). Amounts are in YNAB MILLIUNITS (divide by 1000 for dollars); positive = inflow, negative = outflow. Every payee, account, and category name is an obvious placeholder — no real name, institution, account number, or balance appears here. This file is committed and drives the review-engine snapshot test's tax aggregation deterministically.",
+  "data": {
+    "transactions": [
+      {
+        "id": "txn-0001",
+        "date": "2025-01-14",
+        "amount": 6200000,
+        "memo": "consulting invoice — placeholder client",
+        "cleared": "cleared",
+        "approved": true,
+        "payee_name": "Placeholder Consulting Client",
+        "category_name": "Consulting Income",
+        "category_group_name": "Business A Income",
+        "account_name": "Business Checking Placeholder"
+      },
+      {
+        "id": "txn-0002",
+        "date": "2025-02-03",
+        "amount": -420000,
+        "memo": "office supplies",
+        "cleared": "cleared",
+        "approved": true,
+        "payee_name": "Placeholder Office Supply Co",
+        "category_name": "Office Expense",
+        "category_group_name": "Business A Expenses",
+        "account_name": "Business Checking Placeholder"
+      },
+      {
+        "id": "txn-0003",
+        "date": "2025-02-20",
+        "amount": -180000,
+        "memo": "software subscription",
+        "cleared": "cleared",
+        "approved": true,
+        "payee_name": "Placeholder SaaS Vendor",
+        "category_name": "Software",
+        "category_group_name": "Business A Expenses",
+        "account_name": "Business Checking Placeholder"
+      },
+      {
+        "id": "txn-0004",
+        "date": "2025-03-11",
+        "amount": 3100000,
+        "memo": "second consulting invoice",
+        "cleared": "cleared",
+        "approved": true,
+        "payee_name": "Placeholder Consulting Client",
+        "category_name": "Consulting Income",
+        "category_group_name": "Business A Income",
+        "account_name": "Business Checking Placeholder"
+      },
+      {
+        "id": "txn-0005",
+        "date": "2025-03-28",
+        "amount": -260000,
+        "memo": "accountant placeholder",
+        "cleared": "uncleared",
+        "approved": true,
+        "payee_name": "Placeholder Bookkeeping LLC",
+        "category_name": "Professional Services",
+        "category_group_name": "Business A Expenses",
+        "account_name": "Business Checking Placeholder"
+      }
+    ]
+  }
+}

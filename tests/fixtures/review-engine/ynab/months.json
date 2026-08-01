@@ -1,0 +1,10 @@
+{
+  "$comment": "SYNTHETIC YNAB list_months response (issue #39 golden-snapshot fixture). income/budgeted/activity are YNAB MILLIUNITS (divide by 1000 for dollars). All figures are placeholders — no real budget history. Committed for deterministic review-engine snapshot tests.",
+  "data": {
+    "months": [
+      { "month": "2025-01-01", "income": 6200000, "budgeted": 1000000, "activity": -0, "to_be_budgeted": 5200000, "age_of_money": 30 },
+      { "month": "2025-02-01", "income": 0, "budgeted": 1000000, "activity": -600000, "to_be_budgeted": 4600000, "age_of_money": 45 },
+      { "month": "2025-03-01", "income": 3100000, "budgeted": 1000000, "activity": -260000, "to_be_budgeted": 7440000, "age_of_money": 60 }
+    ]
+  }
+}

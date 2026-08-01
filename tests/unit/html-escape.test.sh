@@ -19,6 +19,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 # shellcheck source=/dev/null
 source "$REPO_ROOT/tests/lib/assert.sh"
+# Shared poll-and-kill timeout helper: kills the whole process GROUP on a
+# timeout, so no command-substitution grandchild is stranded (issue #188).
+# shellcheck source=/dev/null
+source "$REPO_ROOT/tests/lib/watchdog.sh"
+# Shared fixture for the per-call-site no-orphan regression test below (#251).
+# shellcheck source=/dev/null
+source "$REPO_ROOT/tests/lib/orphan-probe.sh"
 
 MODULE="$REPO_ROOT/bin/html-escape.sh"
 # Source the module for direct function access. The CLI block inside it is guarded
@@ -198,30 +205,64 @@ test_giant_multibyte_value_is_bounded_and_truncated() {
   assert_eq "${expected}…" "$out"
 }
 
-# escape_timed <secs> <value> — run escape_ynab_string under a portable
-# poll-and-kill watchdog (macOS ships no timeout(1); same idiom as
-# tests/persona-loader.test.sh's render_tmpl_timed / run_voice_timed), so a
-# regressed super-linear scan fails the test cleanly instead of stalling CI.
+# escape_timed <secs> <value> — run escape_ynab_string under the shared portable
+# poll-and-kill watchdog (macOS ships no timeout(1) — see tests/lib/watchdog.sh),
+# so a regressed super-linear scan fails the test cleanly instead of stalling CI.
 # Prints the sanitized value on stdout; returns 124 if the call overran (hung),
 # else the call's own exit code.
 escape_timed() {
-  local secs="$1" value="$2" out_file pid waited=0 rc=0
+  local secs="$1" value="$2" out_file rc=0
   out_file="$(mktemp)"
-  ( escape_ynab_string "$value" ) >"$out_file" 2>/dev/null &
-  pid=$!
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge "$secs" ]; then
-      kill -9 "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
-      rm -f "$out_file"
-      return 124
-    fi
-    sleep 1; waited=$((waited + 1))
-  done
-  wait "$pid" || rc=$?
+  watchdog_run "$secs" escape_ynab_string "$value" >"$out_file" 2>/dev/null || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    rm -f "$out_file"
+    return 124
+  fi
   cat "$out_file"
   rm -f "$out_file"
   return "$rc"
+}
+
+# ---- #251: the no-orphan guarantee, pinned at THIS call site ----------------
+
+# escape_timed's TIMEOUT branch (rc == 124) is never reached by any other
+# committed test — every DoS guard in this file asserts bounded-time SUCCESS. So
+# the watchdog's promise that a timeout strands no descendant was verified here
+# only by a point-in-time manual check, which a later commit could invalidate in
+# silence. This drives the real wrapper down that branch and asserts the reap was
+# total.
+#
+# escape_ynab_string is SHADOWED for the duration of this test: the real escaper
+# is correctly bounded and can no longer be made to hang, and inducing a hang
+# would mean regressing production code. What is under test is this call site's
+# topology — `watchdog_run <secs> <bare shell function> <arg>` behind
+# escape_timed's own wrapper — not the escaper's algorithm; that topology is
+# what a future process-group escape would break. run_tests runs every test_* in
+# its own subshell, so the shadow cannot leak to another test. See
+# tests/lib/orphan-probe.sh for the full real-vs-stand-in rationale.
+#
+# Mutation-checked: reverting tests/lib/watchdog.sh's group kill to a bare
+# `kill -9 "$pid"` makes this test fail (the marker keeps growing).
+test_escape_timed_timeout_leaves_no_orphan() {
+  local marker rc=0
+  marker="$(mktemp)"
+  # Bake the path in NOW (%q-quoted): $marker is `local`, so it is already out of
+  # scope when the EXIT trap fires in the enclosing subshell — a deferred
+  # expansion would abort on `set -u` instead of cleaning up.
+  # shellcheck disable=SC2064  # expanding at trap-set time is the point, see above
+  trap "rm -f $(printf '%q' "$marker")" EXIT
+
+  # Reached indirectly, by name, via escape_timed → watchdog_run, so shellcheck
+  # cannot see the call. Both codes are listed on purpose: the shadow trips
+  # SC2329 on shellcheck >= 0.11 and SC2317 on the older release CI runs.
+  # shellcheck disable=SC2329,SC2317
+  escape_ynab_string() { orphan_probe_tick_forever "$1"; }
+
+  escape_timed 1 "$marker" >/dev/null 2>&1 || rc=$?
+  assert_eq "124" "$rc" \
+    "an overrunning escape_ynab_string must surface escape_timed's 124 timeout contract"
+  orphan_probe_no_survivors "$marker" \
+    || fail "escape_timed's timeout stranded a descendant — the process-group reap regressed"
 }
 
 # ---- The DoS guard: match-dense invisible-char payload under a watchdog -------
