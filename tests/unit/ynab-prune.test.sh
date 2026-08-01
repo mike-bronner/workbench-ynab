@@ -350,4 +350,87 @@ test_dotdot_path_resolving_to_root_is_refused() {
   assert_contains "$err" "filesystem root" "error explains the root refusal post-normalization"
 }
 
+# --- the no-recursion / files-only safety boundary ---------------------------
+#
+# The script header promises prune "never deletes directories, never follows into
+# sub-directories," enforced solely by `find -maxdepth 1 -type f`. Every other
+# fixture in this file is a flat regular file, which passes identically whether
+# those two flags are present or missing — so the promise had no coverage. These
+# two tests plant fixtures shaped to violate it, one per flag.
+
+# `-maxdepth 1`: a report-named file NESTED in a sub-directory must survive
+# --apply. Mutation-checked: dropping `-maxdepth 1` makes find descend and delete
+# it, reddening the survival assertion.
+test_nested_report_is_never_recursed_into() {
+  local dir="$SANDBOX/nested" nested="$SANDBOX/nested/archive/YNAB-Weekly-Review-2020-01-01.html"
+  local out rc=0
+  seed_reports "$dir"
+  mkdir -p "$dir/archive"
+  : > "$nested"
+  age_file "$nested" 400          # old enough to be a candidate if it were seen
+  out="$( bash "$PRUNE" --output-dir "$dir" --days 30 --apply )" || rc=$?
+  assert_eq "0" "$rc" "apply exits 0"
+  # Only the two TOP-LEVEL old reports are swept — the nested one is not counted.
+  assert_contains "$out" "removed 2 of 2 report(s)" "only top-level reports were candidates"
+  assert_file_exists "$nested"
+  case "$out" in *"archive/"*) fail "a nested report was listed as a prune candidate" ;; esac
+  assert_dir_exists "$dir/archive"
+  return 0
+}
+
+# `-type f`: a DIRECTORY whose name matches the report pattern must survive
+# --apply and never be handed to `rm -f`. Mutation-checked: dropping `-type f`
+# makes find match the directory, `rm -f` on it fails, and prune exits non-zero
+# with a "could not remove" error — reddening both the exit code and the survival
+# assertion.
+test_report_named_directory_is_never_deleted() {
+  local dir="$SANDBOX/dirnamed" decoy="$SANDBOX/dirnamed/YNAB-Weekly-Review-2020-03-01.html"
+  local out rc=0
+  seed_reports "$dir"
+  mkdir -p "$decoy"               # a DIRECTORY named exactly like a report
+  : > "$decoy/inner.txt"
+  age_file "$decoy" 400
+  out="$( bash "$PRUNE" --output-dir "$dir" --days 30 --apply )" || rc=$?
+  assert_eq "0" "$rc" "apply exits 0 — the report-named directory never reached rm"
+  assert_contains "$out" "removed 2 of 2 report(s)" "the directory was not counted as a report"
+  case "$out" in *"could not remove"*) fail "prune tried to rm the report-named directory" ;; esac
+  assert_dir_exists "$decoy"
+  assert_file_exists "$decoy/inner.txt"
+  return 0
+}
+
+# --- the retention age boundary ----------------------------------------------
+#
+# `-mtime +N` is the sole age comparison in the tool, and every other fixture
+# here sits at an extreme (2020, or mtime=now) — an off-by-one in the predicate
+# passes all of them. These fixtures straddle a small realistic threshold so the
+# boundary itself is pinned.
+#
+# `find -mtime +N` is true when (now - mtime) / 86400, remainder DISCARDED, is
+# > N. Against `--days 7`:
+#   6 days old → quotient 6 → not pruned
+#   7 days old → quotient 7 → NOT pruned (exactly at the threshold, survives)
+#   8 days old → quotient 8 → pruned
+#
+# Mutation-checked both directions:
+#   `-mtime +$((days-1))` (prunes a day early) → the 7-day file dies → red
+#   `-mtime +$((days+1))` (prunes a day late)  → the 8-day file lives → red
+test_retention_age_boundary_is_exact() {
+  local dir="$SANDBOX/boundary" out rc=0
+  mkdir -p "$dir"
+  : > "$dir/YNAB-Weekly-Review-2026-06-06.html"; age_file "$dir/YNAB-Weekly-Review-2026-06-06.html" 6
+  : > "$dir/YNAB-Weekly-Review-2026-06-07.html"; age_file "$dir/YNAB-Weekly-Review-2026-06-07.html" 7
+  : > "$dir/YNAB-Weekly-Review-2026-06-08.html"; age_file "$dir/YNAB-Weekly-Review-2026-06-08.html" 8
+  out="$( bash "$PRUNE" --output-dir "$dir" --days 7 --apply )" || rc=$?
+  assert_eq "0" "$rc" "apply exits 0"
+  assert_contains "$out" "removed 1 of 1 report(s)" "exactly one file is past a 7-day threshold"
+  # One day INSIDE the threshold — survives.
+  assert_file_exists "$dir/YNAB-Weekly-Review-2026-06-06.html"
+  # EXACTLY at the threshold — survives ("older than 7 days" excludes 7 days old).
+  assert_file_exists "$dir/YNAB-Weekly-Review-2026-06-07.html"
+  # One day OUTSIDE the threshold — pruned.
+  [ -e "$dir/YNAB-Weekly-Review-2026-06-08.html" ] && fail "a report 8 days old was not pruned by --days 7"
+  return 0
+}
+
 run_tests
