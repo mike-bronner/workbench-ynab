@@ -137,6 +137,98 @@ echo "Self-test: NUL handling leaves the vendor/ hex scoping intact"
 run_nul_case "64-hex digest beside a NUL under vendor/ stays ignored" 0 "vendor/x.json" '{"sha256": "\000%s"}\n' "$SYNTH_HEX"
 run_nul_case "cleartext token beside a NUL under vendor/ IS caught"   1 "vendor/run.sh" "lead\\000ing ${ENV_NAME}=%s\\n" "$SYNTH_HEX"
 
+# The NUL blind spot has a twin that arrives through the LOCALE door. Under a
+# UTF-8 locale grep decodes input as UTF-8, and a byte that is not valid UTF-8 (a
+# lone continuation byte such as \200) makes it silently fail to match on that
+# line — no error, no warning, the credential simply reports as absent. Same
+# thesis as issue #255: one stray byte, secret invisible, guard says clean. The
+# guard now pins LC_ALL=C on every scanning grep; these cases pin that pin.
+#
+# The locale is FORCED rather than inherited. CI (ubuntu-latest) runs under
+# LANG=C.UTF-8 and secret-scan.yml sets no override, so the affected locale is
+# the real one — but a developer running under LC_ALL=C would otherwise pass
+# these cases vacuously, and they would not redden when the pin is removed.
+UTF8_LOCALE=C.UTF-8
+
+# run_utf8_case "<desc>" <expected-exit> <file> "<printf-fmt>" "<fmt-arg>"
+#
+# Same contract as run_nul_case — the payload must come from a printf FORMAT,
+# since routing \200 through a bash variable is not what is being tested — except
+# the guard runs under a forced UTF-8 locale.
+run_utf8_case() {
+  local desc="$1" expected="$2" file="$3" fmt="$4" arg="$5"
+  reset_sandbox
+  mkdir -p "$SANDBOX/$(dirname "$file")"
+  # shellcheck disable=SC2059  # fmt is a trusted literal format carrying \200.
+  printf "$fmt" "$arg" > "$SANDBOX/$file"
+  local actual=0
+  ( cd "$SANDBOX" && LC_ALL="$UTF8_LOCALE" LANG="$UTF8_LOCALE" bash bin/secret-scan.sh ) \
+    >/dev/null 2>&1 || actual=$?
+  if [ "$actual" -eq "$expected" ]; then
+    echo "  ✓ $desc (exit $actual)"
+    pass=$((pass + 1))
+  else
+    echo "  ✖ $desc — expected exit $expected, got $actual"
+    fail=$((fail + 1))
+  fi
+}
+
+echo "Self-test: an invalid UTF-8 byte cannot hide a secret from the guard"
+# Vacuity control FIRST, and it deliberately does NOT go through the guard: prove
+# that on THIS runner an unpinned grep really does miss the shape under
+# $UTF8_LOCALE. If it still matches, the locale is not UTF-8-effective here, the
+# case below would pass without exercising the pin at all, and removing the pin
+# would not redden it — so that outcome is a failure, not a silent pass.
+#
+# The probe must use the guard's OWN rule-1 pattern, not a bare [0-9a-f]{64}.
+# That distinction is the whole mechanism on GNU grep: it is the trailing
+# [^0-9a-f] boundary class having to CONSUME the invalid byte that fails under a
+# UTF-8 locale. A pattern without the boundary class matches straight through the
+# bad byte and would certify the locale as ineffective when it is not.
+UTF8_PROBE_PAT='(^|[^0-9a-f])[0-9a-f]{64}([^0-9a-f]|$)'
+if printf 'lead %s\200\n' "$SYNTH_HEX" \
+     | LC_ALL="$UTF8_LOCALE" LANG="$UTF8_LOCALE" grep -qE "$UTF8_PROBE_PAT"; then
+  echo "  ✖ $UTF8_LOCALE is not UTF-8-effective on this runner — the case below"
+  echo "    cannot discriminate, so this is a failure, not a pass."
+  fail=$((fail + 1))
+else
+  echo "  ✓ $UTF8_LOCALE makes an unpinned grep miss the shape (the case below discriminates)"
+  pass=$((pass + 1))
+fi
+
+# The byte sits DIRECTLY against the 64-hex run, which is load-bearing on GNU
+# grep — measured on 3.12, the version CI runs. There the miss is caused by the
+# pattern's [^0-9a-f] boundary class being unable to consume an invalid byte, so
+# the same byte parked at the start of the line still matches and would make this
+# case vacuous. (BSD grep 2.6.0-FreeBSD is blunter: an invalid byte ANYWHERE on
+# the line kills the match for every rule. Adjacency satisfies both.)
+run_utf8_case "hex PAT shape beside an invalid UTF-8 byte is caught" 1 "src/leak.txt" 'lead token: %s\200\n' "$SYNTH_HEX"
+
+# The cleartext and PEM rules share the OTHER scanning call site (the loop), and
+# the pin is on both. These two cases assert that site keeps catching a secret
+# beside an invalid byte — but be precise about what they discriminate, because
+# the two greps differ and a comment claiming more than it delivers is the defect
+# this file exists to avoid:
+#
+#   * BSD-family grep rejects the whole line, so both rules miss without the pin
+#     and both cases go red — measured on 2.6.0-FreeBSD.
+#   * GNU grep 3.12 still matches these two, pin or no pin: neither PAT_ENV nor
+#     PAT_PEM has a boundary class that must consume the invalid byte, so there
+#     is nothing for the locale to break. On CI's grep these two cases pass
+#     either way; the hex case above is what pins the pin there.
+#
+# They are kept because the pin protects this call site too, and on a BSD grep
+# they are the only thing that proves it.
+#
+# The cleartext fixture's value is deliberately NOT the 64-hex shape the other
+# cases use. With a hex value the file trips rule 1 as well, so the case reports
+# exit 1 whether or not the loop's own grep found anything — it would pass on the
+# strength of a rule it is not testing. Measured: with the hex value, dropping
+# the pin on the loop alone left this case green on BSD grep.
+echo "Self-test: the cleartext/PEM call site is pinned too (discriminates on BSD grep)"
+run_utf8_case "cleartext token beside an invalid UTF-8 byte is caught" 1 "src/run.sh"   "x\\200${ENV_NAME}=%s\\n" "s3cretvalue"
+run_utf8_case "PEM header beside an invalid UTF-8 byte is caught"      1 "src/id_rsa"   "x\\200${BEGIN_FRAG} RSA %s\\n" "$KEY_FRAG"
+
 # The guard reports with grep -o, so only bytes INSIDE the match can reach the
 # report — but that does not make the report safe on its own. PAT_HEX's
 # [^0-9a-f] boundary class matches ANY non-hex byte, so a NUL placed directly

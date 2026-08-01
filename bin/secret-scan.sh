@@ -151,10 +151,26 @@ PAT_PEM='-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----'
 
 hits=""
 
+# EVERY SCANNING GREP IS PINNED TO LC_ALL=C, and that pin is load-bearing for
+# exactly the same reason --binary-files=text is. Under a UTF-8 locale grep
+# decodes input as UTF-8, and a byte that is not valid UTF-8 — a lone
+# continuation byte like 0x80, or 0xFF — makes it silently fail to match on that
+# line: no error, no warning, just a credential the gate reports as absent.
+# Measured on GNU grep 3.12 and BSD grep 2.6.0-FreeBSD alike: a 64-hex PAT shape
+# with one trailing 0x80 is MISSED under C.UTF-8 and en_US.UTF-8, and caught
+# under C. ubuntu-latest sets LANG=C.UTF-8 and secret-scan.yml overrides no
+# locale, so the merge-gating job ran in an affected locale.
+#
+# This is the NUL blind spot's twin — one stray byte, secret invisible, guard
+# reports clean — through the locale door rather than the binary-classification
+# door, so it is closed here alongside it. sanitize_hits already pins LC_ALL=C on
+# all three of its stages; the stage that decides whether a credential is found
+# at all now gets the same treatment.
+
 # Rule 1 (hex) excludes vendor/: vendored.json carries legitimate 64-char-hex
 # SHA-256 digests indistinguishable from a YNAB PAT. The exclusion is scoped to
 # THIS rule alone.
-found="$(grep "${GREP_BASE[@]}" --exclude-dir=vendor -e "$PAT_HEX" . 2>/dev/null | sanitize_hits || true)"
+found="$(LC_ALL=C grep "${GREP_BASE[@]}" --exclude-dir=vendor -e "$PAT_HEX" . 2>/dev/null | sanitize_hits || true)"
 [ -n "$found" ] && hits="${hits}${found}"$'\n'
 
 # Rules 2 (cleartext token) and 3 (PEM) scan the WHOLE tree, vendor/ included —
@@ -162,7 +178,7 @@ found="$(grep "${GREP_BASE[@]}" --exclude-dir=vendor -e "$PAT_HEX" . 2>/dev/null
 # smuggled under vendor/ is caught. -e "$pat" is required: the PEM pattern starts
 # with '-', which grep would otherwise parse as an option flag.
 for pat in "$PAT_ENV" "$PAT_PEM"; do
-  found="$(grep "${GREP_BASE[@]}" -e "$pat" . 2>/dev/null | sanitize_hits || true)"
+  found="$(LC_ALL=C grep "${GREP_BASE[@]}" -e "$pat" . 2>/dev/null | sanitize_hits || true)"
   [ -n "$found" ] && hits="${hits}${found}"$'\n'
 done
 hits="$(printf '%s' "$hits" | sed '/^[[:space:]]*$/d' | sort -u || true)"
