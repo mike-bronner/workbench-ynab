@@ -11,6 +11,19 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 # shellcheck disable=SC1091
 source "$ROOT/tests/lib/assert.sh"
+# The orphan-probe fixture is harness infrastructure too (issue #251), so its
+# helpers get the same "prove they FAIL on bad input" treatment as assert.sh's.
+# shellcheck disable=SC1091
+source "$ROOT/tests/lib/watchdog.sh"
+# shellcheck disable=SC1091
+source "$ROOT/tests/lib/orphan-probe.sh"
+
+# Payload for the generated-fixture check below. Top level, not nested, because
+# watchdog_run reaches it indirectly by name (shellcheck cannot see that call).
+orphan_probe_selftest_source() {
+  # shellcheck disable=SC1090  # a fixture generated at runtime; no static path to follow
+  source "$1"
+}
 
 test_assert_helpers_work() {
   assert_eq "abc" "abc"
@@ -143,6 +156,75 @@ test_fixtures_are_valid_json() {
   assert_json_valid "$ROOT/tests/fixtures/empty-budget.json"
   assert_json_valid "$ROOT/tests/fixtures/hostile/hostile-transactions.json"
   assert_json_valid "$ROOT/tests/fixtures/hostile/malformed-changeset.json"
+}
+
+# ---- tests/lib/orphan-probe.sh (issue #251) ---------------------------------
+
+# orphan_probe_no_survivors is the assertion behind all five watchdog-timeout
+# tests, so the same reasoning as test_failing_assertions_are_caught applies: a
+# regression that made it always return 0 would turn every one of those tests
+# silently green while proving nothing. Each case runs the helper in a subshell
+# so its non-zero return is observed rather than propagated.
+test_orphan_probe_no_survivors_detects_a_survivor() {
+  local marker spinner
+  marker="$(mktemp)"
+  printf 'tick\n' >"$marker"                    # already ticked: liveness satisfied
+  ( while :; do printf 'tick\n' >>"$marker"; sleep 0.2; done ) &
+  spinner=$!
+  if (orphan_probe_no_survivors "$marker" 1) 2>/dev/null; then
+    kill -9 "$spinner" 2>/dev/null || true
+    rm -f "$marker"
+    fail "orphan_probe_no_survivors passed while the marker kept growing — a stranded orphan would go undetected"
+  fi
+  kill -9 "$spinner" 2>/dev/null || true
+  wait "$spinner" 2>/dev/null || true
+  rm -f "$marker"
+}
+
+# The fail-closed half: a marker that NEVER ticked means the payload never ran,
+# so a flat 0 → 0 count proves nothing and must be a FAILURE, not a vacuous pass.
+test_orphan_probe_no_survivors_fails_closed_when_nothing_ticked() {
+  local marker
+  marker="$(mktemp)"                            # empty: the payload never ran
+  if (orphan_probe_no_survivors "$marker" 1) 2>/dev/null; then
+    rm -f "$marker"
+    fail "orphan_probe_no_survivors passed on a marker that never ticked — it must fail closed, not pass vacuously"
+  fi
+  rm -f "$marker"
+}
+
+# ...and it must still PASS on the real thing: ticked, then flat (tree reaped).
+test_orphan_probe_no_survivors_passes_on_a_reaped_tree() {
+  local marker
+  marker="$(mktemp)"
+  printf 'tick\ntick\n' >"$marker"
+  orphan_probe_no_survivors "$marker" 1 \
+    || fail "orphan_probe_no_survivors failed on a ticked-then-flat marker — the reaped-tree case must pass"
+  rm -f "$marker"
+}
+
+# The generated fixture carries the production `BASH_SOURCE == $0` guard so that
+# SOURCING it only defines the payload. That guard is what makes the
+# persona-loader render test exercise the real source-then-call-a-function
+# topology: if sourcing also RAN the never-ending ticker, that test would still
+# see rc == 124 and still pass — while silently testing a different shape.
+test_orphan_probe_script_only_defines_when_sourced() {
+  local marker fixture rc=0
+  marker="$(mktemp)"
+  fixture="$(mktemp)"
+  orphan_probe_write_script "$fixture" "$marker" selftest_payload
+
+  # Under a watchdog first, so a regressed guard fails RED here instead of
+  # hanging this file forever on the plain source below.
+  watchdog_run 5 orphan_probe_selftest_source "$fixture" >/dev/null 2>&1 || rc=$?
+  assert_eq "0" "$rc" "sourcing the generated fixture must return promptly, not run the ticker"
+  assert_eq "0" "$(orphan_probe_tick_count "$marker")" \
+    "sourcing the generated fixture must not tick — the BASH_SOURCE guard regressed"
+
+  # Having proved it returns, confirm it actually defined the payload function.
+  ( orphan_probe_selftest_source "$fixture"; declare -F selftest_payload >/dev/null ) \
+    || fail "sourcing the generated fixture must define the payload function under the requested name"
+  rm -f "$marker" "$fixture"
 }
 
 test_populated_fixture_has_expected_shape() {

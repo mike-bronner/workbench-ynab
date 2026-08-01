@@ -55,8 +55,28 @@ milliunit amount against a profile or tracker number.
 ## Procedure
 
 1. **Load the tax profile.** Run `loadProfile()`. If it returns `ok: false`,
-   stop and surface the structured error (a half-valid profile must never
-   produce a silently-wrong tax number). Note `taxYear` and `filingStatus`.
+   **stop the run** — a half-valid profile must never produce a silently-wrong
+   tax number — and report the failure to the human using **only these two
+   fields**: `error.kind` and `error.message`. Those two are the redacted,
+   human-safe surface (on a `schema` failure `error.message` is deliberately
+   reduced to a content-free violation count); tell the user to inspect their own
+   `tax-profile.json` against
+   [`assets/tax/tax-profile.schema.json`](../../assets/tax/tax-profile.schema.json)
+   for the offending key. On success, note `taxYear` and `filingStatus`.
+
+   > **🔒 Never surface `error.errors[]`.** The per-violation array is
+   > **intentionally raw** for programmatic callers (#225 AC #3): each entry's
+   > `path`, `message`, and `params` (`additionalProperty`, `propertyName`, …)
+   > embeds the **offending JSON property name verbatim**, and a property name at
+   > the profile root or under the schema-open `overrides` layer can carry
+   > secret-shaped bytes (an `AWS_SECRET_ACCESS_KEY=…`-style key). You are a
+   > direct caller, so you *can* read it — you must not **quote, paraphrase,
+   > summarize, redact-in-part, spell, count-by-path, or otherwise describe** any
+   > entry of `error.errors[]` in chat, in the report, in the tracker, or in any
+   > other human-facing output. This holds even when the human asks outright
+   > which property is wrong: `error.kind` and `error.message` are the *only*
+   > fields you may emit, and "no other field of `error`" is the rule — not
+   > merely "no verbatim dump of `errors[]`".
 
 2. **Pick the target quarter.** Default to the quarter that **today** falls in,
    resolved via `quarterForDate(today, profile.quarterlyEstimatedDueDates)`. The

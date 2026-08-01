@@ -13,7 +13,8 @@
 # WHAT IT CHECKS (two invariants)
 #
 #   1. NO WRITE VERB IS CALLABLE from an M2 read-only surface. The ten YNAB
-#      write tools are:
+#      write tools are (this list is pinned against the money gate's
+#      authoritative inventory — see the WRITE_VERBS definition below):
 #        ynab_update_transaction   ynab_update_transactions  ynab_update_category
 #        ynab_create_transaction   ynab_create_transactions
 #        ynab_create_receipt_split_transaction               ynab_delete_transaction
@@ -62,6 +63,14 @@ NS_PREFIX='mcp__plugin_workbench-ynab_ynab__'
 # The ten M2-forbidden write verbs, as an ERE alternation. Longer names precede
 # their prefixes so the alternation reads naturally; grep -E matches on presence
 # either way (the gate only needs to DETECT a hit, not bound its extent).
+#
+# PINNED — do not edit this list on its own. tests/check-readonly.test.sh
+# cross-checks it against the authoritative mutating-tool inventory in
+# assets/write-safety-guardrail.js (ALLOWED_TOOLS ∪ DENIED_TOOLS, namespace
+# prefix stripped) and fails on ANY divergence. Two independently-maintained
+# copies of one invariant is how a guard quietly stops guarding: a verb dropped
+# here would silently widen M2's write surface across every scanned file. Add a
+# write tool to the money gate and this list must grow with it, and vice versa.
 WRITE_VERBS='ynab_update_transactions|ynab_update_transaction|ynab_update_category|ynab_create_transactions|ynab_create_receipt_split_transaction|ynab_create_transaction|ynab_create_account|ynab_delete_transaction|ynab_reconcile_account|ynab_set_default_budget'
 
 # The callable-write pattern: the namespace prefix immediately followed by a

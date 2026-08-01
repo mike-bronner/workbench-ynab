@@ -226,6 +226,14 @@ test('calendarDaysBetween counts civil days and returns null on bad input', () =
   // Crosses a DST boundary in most US zones — civil-day math must be unaffected.
   assert.equal(calendarDaysBetween('2026-03-01', '2026-03-31'), 30);
   assert.equal(calendarDaysBetween('nope', '2026-09-15'), null);
+  // Impossible-but-well-shaped dates fail closed rather than rolling over (#240):
+  // Date.UTC would turn '2026-02-30' into March 2 and answer plausibly-but-wrongly.
+  // The parser is now shared (lib/tax/civilDate.mjs) — pin its calendar check here.
+  assert.equal(calendarDaysBetween('2026-02-30', '2026-09-15'), null);
+  assert.equal(calendarDaysBetween('2026-09-15', '2026-13-45'), null);
+  assert.equal(calendarDaysBetween('2026-02-29', '2026-09-15'), null); // 2026 is not a leap year
+  // …but a REAL leap day is still accepted — fail-closed must not over-reject.
+  assert.equal(calendarDaysBetween('2024-02-29', '2024-03-01'), 1);
 });
 
 // --- resolveCandidateDueDates (the January prior-year Q4 rollover) -----------

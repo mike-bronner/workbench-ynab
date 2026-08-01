@@ -23,6 +23,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 # shellcheck source=/dev/null
 source "$REPO_ROOT/tests/lib/assert.sh"
+# Shared poll-and-kill timeout helper: kills the whole process GROUP on a
+# timeout, so no command-substitution grandchild is stranded (issue #188).
+# shellcheck source=/dev/null
+source "$REPO_ROOT/tests/lib/watchdog.sh"
+# Shared fixture for the per-call-site no-orphan regression test below (#251).
+# shellcheck source=/dev/null
+source "$REPO_ROOT/tests/lib/orphan-probe.sh"
 
 WRITER="$REPO_ROOT/bin/report-writer.sh"
 REAL_TEMPLATE="$REPO_ROOT/assets/report/template.html"
@@ -68,6 +75,15 @@ run_writer_fixture() {
   while IFS= read -r -d '' a; do args+=("$a"); done < <(fixture_slots)
   YNAB_CONFIG_FILE="${YNAB_CONFIG_FILE:-$SANDBOX/none.json}" \
     bash "$WRITER" --template "$FIXTURE_TEMPLATE" "$@" "${args[@]}"
+}
+
+# overlong_writer_run <config> — the payload the output-dir watchdog runs.
+# run_writer_fixture is a shell function, so it is wrapped here rather than
+# passed through `env`. Defined at top level (not inside its test_* function)
+# because watchdog_run invokes it indirectly, by name, which trips SC2329 when
+# the definition is nested.
+overlong_writer_run() {
+  YNAB_CONFIG_FILE="$1" run_writer_fixture --tier Weekly --date 2026-06-22
 }
 
 # (a) AC: default path applied when .report.output_dir is absent from config.
@@ -267,16 +283,37 @@ test_invalid_slot_name_rejected_at_parse() {
   assert_contains "$err" "invalid --slot name" "error explains the bad slot name"
 }
 
-# A configured output_dir that expands to empty (e.g. an unset $VAR) is refused
-# rather than silently writing to the filesystem root.
+# A configured output_dir that resolves to EMPTY — a SET-but-empty $VAR — is
+# refused rather than silently writing to the filesystem root. (An UNSET $VAR is
+# refused earlier still, by expand_path itself — see the next test.) The var is
+# exported so the writer subprocess sees it SET-but-empty; expand_path resolves
+# it to "" and the writer's own empty-path guard (line ~213) rejects it.
 test_empty_output_dir_is_rejected() {
   local cfg="$SANDBOX/empty-dir.json" rc=0 err
+  export YNAB_SET_EMPTY_DIR=""
   cat > "$cfg" <<'JSON'
-{ "report": { "output_dir": "$YNAB_NOPE_UNSET_VAR" } }
+{ "report": { "output_dir": "$YNAB_SET_EMPTY_DIR" } }
 JSON
   err="$( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 2>&1 )" || rc=$?
+  unset YNAB_SET_EMPTY_DIR
   assert_eq "2" "$rc" "output dir resolving to empty → usage error (exit 2)"
   assert_contains "$err" "output dir resolved to empty" "error explains the empty output dir"
+}
+
+# An UNSET $VAR — whether it is the whole value or only PART of a longer path — is
+# REFUSED by expand_path, not silently swallowed to "". `$TYPO/reports` with TYPO
+# unset must NOT collapse to `/reports` (a valid-looking absolute path the
+# empty-check never fires on) and send the writer to the filesystem root; the
+# resolver fails so the writer exits 2 "did not fully resolve". The single-quoted
+# heredoc keeps `$YNAB_DEFINITELY_UNSET_VAR` UNEXPANDED so expand_path is exercised.
+test_unset_var_embedded_in_output_dir_is_refused() {
+  local cfg="$SANDBOX/unset-embedded.json" rc=0 err
+  cat > "$cfg" <<'JSON'
+{ "report": { "output_dir": "$YNAB_DEFINITELY_UNSET_VAR/reports" } }
+JSON
+  err="$( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 2>&1 )" || rc=$?
+  assert_eq "2" "$rc" "an unset \$VAR embedded in output_dir → usage error (exit 2)"
+  assert_contains "$err" "did not fully resolve" "error explains the unresolved output dir"
 }
 
 # #28 cost invariant: .report.output_dir is config-sourced and unbounded, and
@@ -285,23 +322,48 @@ JSON
 # so an over-1024-byte out_dir is refused loudly BEFORE either pass can run on
 # it. Watchdog-wrapped: a regression would otherwise peg the suite for minutes.
 test_overlong_output_dir_is_rejected_in_bounded_time() {
-  local cfg="$SANDBOX/overlong-dir.json" flood="" i=0 rc=0 pid waited=0
+  local cfg="$SANDBOX/overlong-dir.json" flood="" i=0 rc=0
   while [ "$i" -lt 4096 ]; do flood+='&&&&&&&&'; i=$((i + 1)); done   # ~32 KB of '&'
   printf '{ "report": { "output_dir": "/tmp/%s" } }' "$flood" > "$cfg"
-  ( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 \
-      >"$SANDBOX/overlong-out" 2>"$SANDBOX/overlong-err" ) &
-  pid=$!
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge 20 ]; then
-      kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
-      fail "overlong output_dir overran the 20 s watchdog (unbounded scan regressed)"
-    fi
-    sleep 1; waited=$((waited + 1))
-  done
-  wait "$pid" || rc=$?
+  watchdog_run 20 overlong_writer_run "$cfg" \
+    >"$SANDBOX/overlong-out" 2>"$SANDBOX/overlong-err" || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    fail "overlong output_dir overran the 20 s watchdog (unbounded scan regressed)"
+  fi
   assert_eq "2" "$rc" "over-1024-byte output dir → usage error (exit 2)"
   assert_contains "$(cat "$SANDBOX/overlong-err")" "longer than 1024 bytes" "error names the bound"
   assert_contains "$(cat "$SANDBOX/overlong-err")" ".report.output_dir" "error names the field"
+}
+
+# #251: the no-orphan guarantee, pinned at THIS call site. The watchdog above
+# only ever asserts bounded-time SUCCESS, so its TIMEOUT branch — the one the
+# process-group reap exists for — is never executed by a committed test here;
+# the per-site check was manual, and a manual check is a snapshot a later commit
+# can invalidate in silence.
+#
+# This drives the site's real payload chain (overlong_writer_run →
+# run_writer_fixture → `bash "$WRITER"`, a function wrapping a function that
+# shells out) to rc == 124 and asserts nothing survived. Only the innermost
+# script is a stand-in: $WRITER is repointed at a generated fixture that never
+# terminates, because the real writer is correctly bounded and inducing a hang
+# would mean regressing production code. run_tests runs every test_* in its own
+# subshell, so the $WRITER override cannot leak to another test. See
+# tests/lib/orphan-probe.sh for the full real-vs-stand-in rationale.
+#
+# Mutation-checked: reverting tests/lib/watchdog.sh's group kill to a bare
+# `kill -9 "$pid"` makes this test fail (the marker keeps growing).
+test_overlong_writer_timeout_leaves_no_orphan() {
+  local marker="$SANDBOX/orphan-writer-ticks" fixture="$SANDBOX/orphan-writer.sh" rc=0
+  : >"$marker"
+  orphan_probe_write_script "$fixture" "$marker"
+  WRITER="$fixture"
+
+  watchdog_run 1 overlong_writer_run "$SANDBOX/none.json" \
+    >"$SANDBOX/orphan-writer-out" 2>"$SANDBOX/orphan-writer-err" || rc=$?
+  assert_eq "124" "$rc" \
+    "an overrunning writer payload must surface the watchdog's 124 timeout contract"
+  orphan_probe_no_survivors "$marker" \
+    || fail "the output-dir watchdog's timeout stranded a descendant — the process-group reap regressed"
 }
 
 # #28 round-6 blocker: the 1024-"byte" gate used a bare `${#out_dir}` — a
@@ -857,6 +919,38 @@ JSON
   assert_contains "$err" "did not fully resolve" "the error explains the unresolved mid-string ~ output dir"
   [ -z "$(find "$cwd" -name '*.html')" ] \
     || fail "writer wrote a report to a literal mid-string ~ directory"
+}
+
+# Privacy hardening (issue #65, GAP-21): a report is an UNENCRYPTED financial
+# record, so the WRITTEN file must be owner-only (0600) and a directory the writer
+# CREATES must be owner-only (0700) — with no world-readable window at creation.
+# Portable octal-perms read, GNU-first (see the note in tests/unit/audit-log.test.sh).
+mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+
+# A report written into a freshly-created (nested) output dir: file 0600, and
+# every directory component the writer created is 0700.
+test_written_report_and_created_dir_are_owner_only() {
+  local dir="$SANDBOX/perms/nested" out
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" \
+          run_writer_fixture --tier Weekly --date 2026-06-22 --output-dir "$dir" )"
+  assert_file_exists "$out"
+  assert_eq "600" "$(mode_of "$out")"      "written report file is mode 0600"
+  assert_eq "700" "$(mode_of "$dir")"      "created leaf output dir is mode 0700"
+  assert_eq "700" "$(mode_of "$SANDBOX/perms")" "created parent dir is mode 0700 (umask 077, no world-readable window)"
+}
+
+# An ALREADY-EXISTING output dir is deliberately NOT force-chmod'd (the user may
+# share it on purpose), but the FILE is hardened to 0600 unconditionally — its
+# content is what's sensitive. Seed a loose 0755 dir + drop a report into it.
+test_file_is_hardened_even_in_a_preexisting_loose_dir() {
+  local dir="$SANDBOX/preexisting-loose" out
+  mkdir -p "$dir"; chmod 755 "$dir"
+  assert_eq "755" "$(mode_of "$dir")" "pre-existing dir starts at 0755"
+  out="$( YNAB_CONFIG_FILE="$SANDBOX/none.json" \
+          run_writer_fixture --tier Monthly --date 2026-02-28 --output-dir "$dir" )"
+  assert_file_exists "$out"
+  assert_eq "600" "$(mode_of "$out")" "report file is 0600 even inside a pre-existing loose dir"
+  assert_eq "755" "$(mode_of "$dir")" "a pre-existing dir the writer did not create is left untouched"
 }
 
 run_tests

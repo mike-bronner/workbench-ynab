@@ -91,6 +91,24 @@ assert_present "tax profile via loadProfile.mjs"   "loadProfile.mjs"
 assert_present "config never forwarded to the MCP" "never forwarded to the vendored MCP"
 assert_present "no hardcoded tax constants rule"   "No hardcoded tax constants"
 
+# ---- a tax-loader failure never puts errors[] detail in the report (#235) -----
+# `error.errors[]` is intentionally raw for programmatic callers (#225 AC #3):
+# each entry's `path`/`params` embeds the offending JSON property name verbatim,
+# and a property name can be secret-shaped. The report is human-facing output, so
+# the unavailable-message must carry the redacted `error.kind` only — the old
+# "tax profile unavailable: <error path>" form interpolated the raw path.
+assert_absent_re "tax-unavailable message does not interpolate the raw error path" \
+  'unavailable: <error'
+# shellcheck disable=SC2016  # literal needles: markdown backticks, no expansion
+assert_present    "tax-unavailable message reports error.kind" \
+  'tax profile unavailable (<error.kind>)'
+# shellcheck disable=SC2016
+assert_present    "report is restricted to error.kind + error.message" \
+  'Report only `error.kind` + `error.message`'
+# shellcheck disable=SC2016
+assert_present    "raw errors[] detail is banned from the report" \
+  'never the `error.errors[]`'
+
 # ---- all 12 methodology sections (AC) ----------------------------------------
 sections=(
   "Transaction Classification"

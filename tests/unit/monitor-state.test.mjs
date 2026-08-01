@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -27,6 +27,7 @@ import {
   readState,
   computeNextState,
   recordFiredAlert,
+  expireFiredAlerts,
   writeState,
   milliunitsToDollars,
 } from '../../lib/monitor/state.mjs';
@@ -241,6 +242,32 @@ test('recordFiredAlert: a new key is recorded; an existing key is skipped, never
   assert.equal(s0.firedAlerts['overdrawn:acct-1'], undefined, 'inputs are never mutated');
 });
 
+// --- firedAlerts expiry seam (M6-3 AC: a cleared condition re-alerts) --------
+
+test('expireFiredAlerts: a key absent from keepKeys is dropped; an active key is kept', () => {
+  const s0 = { ...defaultState(), firedAlerts: { 'overdrawn:a1': { at: 'old' }, 'overdrawn:a2': { at: 'old' } } };
+  const { state: s1, expired } = expireFiredAlerts(s0, new Set(['overdrawn:a1']));
+  assert.deepEqual(s1.firedAlerts, { 'overdrawn:a1': { at: 'old' } }, 'the still-active key survives, the cleared one is dropped');
+  assert.deepEqual(expired, ['overdrawn:a2'], 'the dropped key is reported');
+  assert.deepEqual(s0.firedAlerts, { 'overdrawn:a1': { at: 'old' }, 'overdrawn:a2': { at: 'old' } }, 'input is never mutated');
+});
+
+test('expireFiredAlerts: a type OUTSIDE options.types is preserved even when not active', () => {
+  // The type gate is what keeps point-event large_txn keys alive: they name a
+  // transaction the incremental window can't re-attest, so they must NOT expire
+  // just because they are absent from this pass's active set.
+  const s0 = { ...defaultState(), firedAlerts: { 'overdrawn:a1': 1, 'large_txn:t1': 1 } };
+  const { state, expired } = expireFiredAlerts(s0, new Set(), { types: ['overdrawn'] });
+  assert.deepEqual(state.firedAlerts, { 'large_txn:t1': 1 }, 'only the eligible-type cleared key is dropped');
+  assert.deepEqual(expired, ['overdrawn:a1']);
+});
+
+test('expireFiredAlerts: with no types allow-list, every cleared key is eligible', () => {
+  const s0 = { ...defaultState(), firedAlerts: { 'overdrawn:a1': 1, 'large_txn:t1': 1 } };
+  const { state } = expireFiredAlerts(s0, new Set(['large_txn:t1']));
+  assert.deepEqual(state.firedAlerts, { 'large_txn:t1': 1 }, 'overdrawn:a1 cleared and eligible → dropped');
+});
+
 // --- milliunits storage + display conversion (AC #6/#7) ---------------------
 
 test('balances are stored as integer milliunits; milliunitsToDollars divides by 1000 for display only', () => {
@@ -264,6 +291,20 @@ test('writeState writes owner-only: the state file is 0600 and its leaf data dir
   const statePath = join(dir, 'monitor-state.json');
   writeState(defaultState(), { statePath, dataDir: TMP });
   assert.equal(statSync(statePath).mode & 0o777, 0o600);
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
+});
+
+test('writeState re-tightens a pre-existing loose data dir to 0700', () => {
+  // mkdirSync's `mode` is a no-op when the dir already exists, so a data dir left
+  // 0755 by an earlier writer would stay world-traversable unless writeState
+  // chmods it. Pre-create the leaf loose, then assert writeState tightens it —
+  // this fails if the unconditional chmodSync(dir, 0o700) is dropped, matching
+  // lib/monitor/alerts.mjs / bin/audit-log.sh which chmod the dir on every write.
+  const dir = join(TMP, `preexisting-loose-${seq++}`);
+  mkdirSync(dir, { recursive: true });
+  chmodSync(dir, 0o755);
+  const statePath = join(dir, 'monitor-state.json');
+  writeState(defaultState(), { statePath, dataDir: TMP });
   assert.equal(statSync(dir).mode & 0o777, 0o700);
 });
 
@@ -296,7 +337,8 @@ test('the module writes nothing to stdout', () => {
     import(${JSON.stringify(url)}).then((m) => {
       const { state } = m.readState({ statePath: ${JSON.stringify(tmpState)}, dataDir: ${JSON.stringify(TMP)} });
       const { state: next } = m.computeNextState(state, { timestamp: 't', accounts: { a: { cleared: 1, uncleared: 0 } }, recentTransactionCount: 0 });
-      m.recordFiredAlert(next, 'k', 1);
+      const { state: fired } = m.recordFiredAlert(next, 'overdrawn:a', 1);
+      m.expireFiredAlerts(fired, new Set(), { types: ['overdrawn'] });
       m.writeState(next, { statePath: ${JSON.stringify(tmpState)}, dataDir: ${JSON.stringify(TMP)} });
       m.milliunitsToDollars(1000);
       process.stderr.write('ok');                                      // proof it ran

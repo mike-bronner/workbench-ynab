@@ -41,6 +41,15 @@ already did that and handed you a single YAML `plan:` block. Treat it as
 authoritative and **do not recompute it** (same contract as bujo: the
 orchestrator owns the schedule, the protocol owns the analysis).
 
+Every date you use — the lookback window, month/quarter boundaries, the tax-year
+label — comes **exclusively** from this plan, whose windows the dispatcher
+computed from the configured `timezone` (`config.timezone`, issue #31). **Never
+call the host clock** (`new Date()`, `date`, `now`, the shell's `TZ`) to derive
+or widen a date: a review run in the wrong zone misplaces near-midnight
+transactions and the wrong tax year. When a downstream tax read needs an "as of"
+date, pass the review window's end date (`plan.data_pull.transactions.until_date`)
+— never a host-clock default.
+
 From the plan you consume:
 
 | Plan field | Use |
@@ -48,6 +57,7 @@ From the plan you consume:
 | `plan.review_scope` / `plan.report.tiers` | The tier(s) to run — selects the row of the [tier matrix](#7-tier-matrix). |
 | `plan.budget.{name,id}` | The budget to read. |
 | `plan.data_pull.accounts` | Account ids to fetch (ids, not bodies). |
+| `plan.data_pull.transactions.until_date` | The authoritative "as of" date (window end, in the configured tz) for any downstream tax read — never the host clock. |
 | `plan.data_pull.months` | Month keys in scope. |
 | `plan.data_pull.transactions.{since_date,until_date}` | The lookback window — already sized by the orchestrator. |
 | `plan.report.period` | Human period label for the report header. |
@@ -154,9 +164,17 @@ token + native env — see the [capability map](../../docs/mcp-capability-map.md
 **No hardcoded tax constants anywhere.** Every rate, threshold, standard
 deduction, due date, and Schedule C/A/SE/1 mapping is a read from the tax-profile
 loader. If the loader returns `!ok` (schema/parse/io/depth failure), do **not**
-guess a value — render the tax sections as "tax profile unavailable: <error
-path>" and add a `tax_profile_error` note to the dispatch summary. A wrong tax
-constant corrupts every downstream number; failing loud is correct.
+guess a value — render the tax sections as
+`tax profile unavailable (<error.kind>)` and add a `tax_profile_error` note to the
+dispatch summary. A wrong tax constant corrupts every downstream number; failing
+loud is correct.
+
+**Report only `error.kind` + `error.message`** — never the `error.errors[]`
+detail. That per-violation array is intentionally raw for programmatic callers,
+and every entry's `path` / `params` embeds the offending JSON property name
+verbatim, which can itself be secret-shaped; a report is human-facing output, so
+quoting, paraphrasing, or summarizing an entry discloses it (#235). Same rule,
+same reasoning as [`../estimated-tax/SKILL.md`](../estimated-tax/SKILL.md) step 1.
 
 ---
 

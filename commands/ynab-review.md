@@ -46,12 +46,18 @@ source "${CLAUDE_PLUGIN_ROOT}/bin/config.sh"
 _require_config || exit 1
 budget_entry="$(_cfg_default_budget)"        # → budget_name (or budget_id) + label
 report_dir="$(_cfg '.report.output_dir')"    # default: ~/Documents/Claude/Reports
-timezone="$(_cfg '.timezone')"               # fall back to the system timezone when unset
+timezone="$(_cfg_timezone)" || exit 1        # required IANA tz — fail closed, never the host clock
+today="$(_today_in_tz "$timezone")"          # authoritative today (YYYY-MM-DD) in the configured tz
 ```
 
-Compute `today` as an ISO date (`YYYY-MM-DD`) in that timezone (`timezone`
-falls back to the system timezone until the timezone-ownership config field
-lands — note the fallback, don't fail on it).
+`today` is the authoritative review date, computed **in the configured
+timezone** by `_today_in_tz` — the single source both this router and the ad-hoc
+tier commands use, so a scheduled run and an interactive run on the same day
+agree on the window and the tax-year label. `_cfg_timezone` **fails closed**: a
+missing or invalid `.timezone` stops the run with a descriptive error rather
+than silently defaulting to the system timezone, which would misplace
+near-midnight transactions and the wrong tax year. Never compute `today` from
+the host clock.
 
 ### 1b. Pre-warm the YNAB MCP (best-effort)
 

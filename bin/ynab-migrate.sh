@@ -27,11 +27,15 @@
 #                         a bad argument can never rm -rf the wrong thing.
 #                         Idempotent. Exit 0 ok, 2 on a rejected name.
 #   seed-config CONFIG    Create CONFIG from the shipped example on FIRST RUN,
-#                         with the example's placeholder `budgets` array and
-#                         `default_budget` stripped so Step 5's migrate-config
-#                         calls can land the user's REAL budget (issue #84 —
-#                         a placeholder budgets array is not "blank", so seeding
-#                         it verbatim would lock the factory placeholders in).
+#                         with the example's placeholder `budgets` array,
+#                         `default_budget`, and `timezone` stripped so Step 5's
+#                         migrate-config calls can land the user's REAL values
+#                         (issue #84 — a placeholder budgets array is not "blank",
+#                         so seeding it verbatim would lock the factory
+#                         placeholders in; issue #31 — the example's illustrative
+#                         `America/Phoenix` must never become a user's silent
+#                         baked-in timezone, so it is stripped and the ceremony
+#                         collects the real one).
 #                         No-op when CONFIG already exists. Writes via
 #                         temp-file→validate→mv at mode 0600. Exit 0 ok,
 #                         2 on a missing/unparseable example or a failed write.
@@ -195,21 +199,27 @@ do_remove_task_dir() {
 }
 
 # Create CONFIG from the shipped example on FIRST RUN — with the example's
-# placeholder `budgets` array and `default_budget` stripped. The example ships
-# a two-budget placeholder array to document the v2 shape (issue #84), but
-# seeding it verbatim breaks the migration: migrate-config fills only BLANK
-# fields, and an array of placeholder OBJECTS is not blank, so the factory
+# placeholder `budgets` array, `default_budget`, and `timezone` stripped. The
+# example ships a two-budget placeholder array to document the v2 shape (issue
+# #84), but seeding it verbatim breaks the migration: migrate-config fills only
+# BLANK fields, and an array of placeholder OBJECTS is not blank, so the factory
 # placeholders would win over the user's real migrated budget forever (and the
 # legacy ["budget","name"] patch would strand the real name in a key the v2
 # loader never reads — bin/config.sh's `has("budgets")` gate sees the
-# placeholders and skips the legacy synthesis). With the array absent, Step 5's
-# `migrate-config CONFIG '["budgets"]' …` lands the real entry and the emitted
-# file validates against assets/config.schema.json. Idempotent: an existing
-# CONFIG is never touched. Written at mode 0600 — the file will hold the user's
-# budget/business/tax data. Exit 0 ok (seeded or already present), 2 on a
-# missing/unparseable example or a failed write.
+# placeholders and skips the legacy synthesis). The example's `timezone` is a
+# concrete IANA value (`America/Phoenix`, issue #31) — NOT a placeholder, so
+# migrate-config would never overwrite it; left in the seed it would silently
+# become every migrated user's timezone regardless of their real zone, breaking
+# the very fail-closed guarantee #31 establishes. Stripping it makes the config
+# carry no timezone until Step 5 collects the user's real one (and the loader
+# fails closed if they skip it). With those keys absent, Step 5's
+# `migrate-config CONFIG '["budgets"]' …` and `… '["timezone"]' …` land the real
+# values and the emitted file validates against assets/config.schema.json.
+# Idempotent: an existing CONFIG is never touched. Written at mode 0600 — the
+# file will hold the user's budget/business/tax data. Exit 0 ok (seeded or
+# already present), 2 on a missing/unparseable example or a failed write.
 do_seed_config() {
-  local config="${1:-}" tmp
+  local config="${1:-}" tmp dir
   [ -n "$config" ] || die "seed-config requires a CONFIG path"
   if [ -f "$config" ]; then
     printf 'Config already present — not seeding (already done): %s\n' "$config"
@@ -220,17 +230,38 @@ do_seed_config() {
     return 2
   fi
   jq -e . "$CONFIG_EXAMPLE" >/dev/null 2>&1 || { printf '⚠️  Unparseable example — refusing to seed from it: %s\n' "$CONFIG_EXAMPLE" >&2; return 2; }
-  mkdir -p "$(dirname "$config")" || return 2
+  # The data dir holds config.json (tax profile + business identity) and every
+  # other generated artifact, so it is owner-only (mode 0700) from creation (issue
+  # #65, GAP-21). /ynab-migrate seeds config WITHOUT requiring /setup first, so on
+  # the legacy-prototype path it can be the FIRST creator of this dir — a bare
+  # `mkdir -p` left it world-traversable (0755) under a loose umask, leaking
+  # filenames + mtimes of audit/, monitor-state, tax-tracker, and config to other
+  # local users. `( umask 077; mkdir -p )` gives a fresh dir 0700 with no
+  # world-readable window; the explicit chmod additionally tightens a dir left
+  # 0755 by a pre-privacy install. Mirrors commands/setup.md.
+  #
+  # The failure branch carries its OWN message, like every other error branch in
+  # this function. That is not decoration: without it the abort is silent, and a
+  # silent abort is indistinguishable from the downstream `mv` failure below —
+  # both end in `return 2` having written nothing, so no test could tell whether
+  # this guard fired or was deleted (round-5 review). The message is the guard's
+  # fingerprint, and the absence of the `Failed to seed config` line below proves
+  # the abort happened HERE, before `mv` was ever reached.
+  dir="$(dirname "$config")"
+  if ! ( umask 077; mkdir -p "$dir" ) || ! chmod 700 "$dir"; then
+    printf '⚠️  Could not create the data directory owner-only (mode 0700) — refusing to seed so no financial artifact lands in a world-traversable directory: %s\n' "$dir" >&2
+    return 2
+  fi
   tmp="$(mktemp)" || return 2
   # Clean the temp copy on EVERY exit, mirroring the other writers, so a failure
   # can never strand a half-built seed (or leave an empty config that a re-run
   # would then mistake for "already present").
   trap 'rm -f "$tmp"; trap - RETURN' RETURN
-  if jq 'del(.budgets, .default_budget)' "$CONFIG_EXAMPLE" > "$tmp" \
+  if jq 'del(.budgets, .default_budget, .timezone)' "$CONFIG_EXAMPLE" > "$tmp" \
     && jq -e . "$tmp" >/dev/null 2>&1 \
     && chmod 600 "$tmp" \
     && mv "$tmp" "$config"; then
-    printf 'Seeded %s from the shipped example (placeholder budgets stripped — Step 5 fills the real one).\n' "$config"
+    printf 'Seeded %s from the shipped example (placeholder budgets and timezone stripped — Step 5 fills the real ones).\n' "$config"
     return 0
   fi
   printf '⚠️  Failed to seed config — nothing written: %s\n' "$config" >&2
@@ -297,10 +328,11 @@ Usage: $(basename "$0") <subcommand> [args]
                         under the Scheduled root. Exit 0 if any exist, else 1.
   remove-task-dir NAME  Remove one known deprecated task directory. Idempotent.
   seed-config CONFIG    Create CONFIG from the shipped example on first run, with
-                        the placeholder budgets array and default_budget stripped
-                        so migrate-config can land the real budget. No-op when
-                        CONFIG exists. Exit 0 ok, 2 on a missing/unparseable
-                        example or a failed write.
+                        the placeholder budgets array, default_budget, and the
+                        example timezone stripped so migrate-config can land the
+                        user's real budget and timezone. No-op when CONFIG exists.
+                        Exit 0 ok, 2 on a missing/unparseable example or a failed
+                        write.
   migrate-config CONFIG PATH VALUE
                         Set one config.json field (PATH = JSON array, VALUE = JSON
                         literal) only when it is currently blank — never a blind
