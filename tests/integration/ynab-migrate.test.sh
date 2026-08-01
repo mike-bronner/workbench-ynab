@@ -359,7 +359,10 @@ test_migrate_config_fails_closed_when_rewrite_fails() {
 # The example ships a PLACEHOLDER two-budget array to document the shape (issue
 # #84). The seed must strip it (and default_budget) so Step 5's migrate-config
 # calls can land the user's real budget: an array of placeholder OBJECTS is not
-# "blank", so seeding it verbatim would lock the factory placeholders in.
+# "blank", so seeding it verbatim would lock the factory placeholders in. It must
+# ALSO strip the example's concrete `timezone` (issue #31): it is not a
+# placeholder, so migrate-config would never overwrite it — left in the seed it
+# would silently become every migrated user's zone regardless of their real one.
 
 test_seed_config_strips_placeholder_budgets() {
   local sb cfg rc=0
@@ -371,6 +374,25 @@ test_seed_config_strips_placeholder_budgets() {
   assert_eq false "$(jq 'has("default_budget")' "$cfg")" "default_budget must be stripped with it"
   assert_eq true  "$(jq 'has("business")' "$cfg")" "the rest of the example must be seeded intact"
   assert_eq "$cfg" "$(find "$cfg" -maxdepth 0 -perm 600)" "the seeded config must be owner-only (0600)"
+  rm -rf "$sb"
+}
+
+# The #31 baked-timezone regression: onboarding must NEVER produce a timezone the
+# user didn't choose. seed-config leaves no `.timezone`, and the ceremony's
+# timezone step (migrate-config '["timezone"]' …) lands the user's zone on the
+# now-blank field — never the example's `America/Phoenix`.
+test_seed_and_migrate_never_bake_a_timezone() {
+  local sb cfg
+  sb="$(mktemp -d)"; cfg="$sb/config.json"
+  bash "$MIGRATE" seed-config "$cfg" >/dev/null
+  assert_eq false "$(jq 'has("timezone")' "$cfg")" \
+    "the seed must carry NO timezone — never the example's America/Phoenix"
+  # The ceremony collects the user's real zone and lands it on the blank field.
+  bash "$MIGRATE" migrate-config "$cfg" '["timezone"]' '"America/New_York"' >/dev/null
+  assert_eq "America/New_York" "$(jq -r '.timezone' "$cfg")" \
+    "the ceremony lands the user-chosen zone on the blank timezone field"
+  assert_eq "America/New_York" "$(YNAB_CONFIG_FILE="$cfg" _cfg_timezone)" \
+    "the loader reads back the user-chosen zone, never a baked default"
   rm -rf "$sb"
 }
 
@@ -411,6 +433,10 @@ test_first_run_migration_yields_real_default_budget_and_schema_valid_config() {
   bash "$MIGRATE" migrate-config "$cfg" '["budgets"]'        "$(jq -n --arg v "Prototype Budget 2024" '[{label: $v, role: "personal", budget_name: $v}]')" >/dev/null
   bash "$MIGRATE" migrate-config "$cfg" '["default_budget"]' "$(jq -n --arg v "Prototype Budget 2024" '$v')" >/dev/null
   bash "$MIGRATE" migrate-config "$cfg" '["business","name"]' '"Prototype Business"' >/dev/null
+  # The ceremony's timezone step (issue #31): the seed strips the example zone,
+  # so a real user-chosen zone is landed here — NOT the example's Phoenix — and
+  # the required `timezone` key is what makes the schema assertions below pass.
+  bash "$MIGRATE" migrate-config "$cfg" '["timezone"]'      '"America/New_York"' >/dev/null
 
   # the loader resolves the REAL migrated budget, not a factory placeholder.
   entry="$(YNAB_CONFIG_FILE="$cfg" _cfg_default_budget)"

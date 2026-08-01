@@ -23,11 +23,12 @@ reimplementing the same `jq` plumbing. It mirrors the `_cfg()` idiom from
 source "${CLAUDE_PLUGIN_ROOT}/bin/config.sh"
 ```
 
-Sourcing only **defines** functions (`_cfg`, `_require_config`, and the
+Sourcing only **defines** functions (`_cfg`, `_require_config`, the timezone
+helpers `_is_valid_timezone`, `_cfg_timezone`, `_today_in_tz`, and the
 multi-budget helpers `_migrate_config`, `_cfg_budgets`, `_cfg_budget_field`,
-`_cfg_default_budget`) and one path variable (`YNAB_CONFIG_FILE`). It never runs
-`set -e`/`set -u` or any command with side effects, so it cannot abort or mutate
-the caller's shell.
+`_cfg_default_budget`) and two path variables (`YNAB_CONFIG_FILE`, `TZ_DB_DIR`).
+It never runs `set -e`/`set -u` or any command with side effects, so it cannot
+abort or mutate the caller's shell.
 
 ## The config path
 
@@ -82,6 +83,31 @@ _require_config || exit 1     # fail fast, pointing the user at /workbench-ynab:
 `_cfg` on its own is **tolerant** — it returns empty rather than erroring, so a
 skill that has its own defaults can read optional fields without the guard. Use
 `_require_config` when a missing config is a hard stop.
+
+## The timezone helpers (issue #31)
+
+`config.timezone` is the single source of truth for every date-sensitive
+computation in a review (window, carryover, month/quarter boundaries, tax-year
+label). Three helpers own reading, validating, and applying it — so no skill or
+command computes a date from the host clock.
+
+| Helper | Behaviour |
+|---|---|
+| `_is_valid_timezone TZ` | Pure predicate — returns 0 iff `TZ` is a syntactically-safe, real IANA zone. Prints nothing. **Fails closed**: rejects empty, an absolute path, a `..` traversal, a trailing slash, any character outside `[A-Za-z0-9_+/-]`, the non-selectable TZif pseudo-zones `Factory`/`posixrules` (they resolve to a UTC-equivalent date) — matched **case-insensitively** and including the `right/`/`posix/` leap-second mirror subtrees, so `factory`, `FACTORY`, and `right/Factory` fail closed too — and any name under `$TZ_DB_DIR` (default `/usr/share/zoneinfo`, honouring `$TZDIR`) that is missing or is a housekeeping file rather than a compiled zone — the final gate requires the `TZif` magic (RFC 8536), so text artifacts like `leapseconds`, `+VERSION`, and `tzdata.zi` are rejected, not a bare `-f` existence check. Nested zones like `America/Argentina/Buenos_Aires` are accepted. |
+| `_cfg_timezone` | The **load-time timezone gate**. Reads `.timezone`; echoes it on stdout when valid. On a **missing or invalid** value it prints a descriptive error to **stderr** and returns **non-zero** — it **never** falls back to the host clock. Resolve it as a hard stop: `tz="$(_cfg_timezone)" \|\| exit 1`. |
+| `_today_in_tz TZ [EPOCH]` | Echoes today's ISO-8601 date (`YYYY-MM-DD`) in zone `TZ` — the single source of "today" for the review router and the four ad-hoc tier commands, so a scheduled run and an interactive run at the same instant agree on the window and tax-year label. `EPOCH` (Unix seconds; or the `$YNAB_NOW_EPOCH` env var) overrides "now" — the deterministic test seam, mirroring `lib/monitor/alerts.mjs`'s `options.now`. Portable across GNU (`date -d @…`) and BSD (`date -r …`). Assumes `TZ` is already validated. |
+
+```bash
+source "${CLAUDE_PLUGIN_ROOT}/bin/config.sh"
+_require_config || exit 1
+timezone="$(_cfg_timezone)" || exit 1        # required IANA tz — fail closed, never host clock
+today="$(_today_in_tz "$timezone")"          # authoritative today in the configured tz
+```
+
+Because a review's window and tax-year label are timezone-sensitive, `_cfg_timezone`
+is deliberately **stricter** than `_cfg`: `_cfg` is tolerant (empty on absence, so a
+caller with its own default reads optional fields freely), but a missing timezone is
+a hard stop — the review must not run in the wrong zone.
 
 ## The multi-budget helpers (schema v2, issue #84)
 
@@ -164,7 +190,11 @@ absent field returns empty, and the missing-config guard emits the expected erro
 text and a non-zero exit. `tests/unit/config-budgets.test.sh` covers the
 multi-budget helpers the same way: two-budget isolation, per-label field reads
 (including boolean-`false` readback), the read-time legacy migration (file
-untouched, `schema_version` stays 1), and the `default_budget` fallback rules. It follows the issue #4 harness convention — sources
+untouched, `schema_version` stays 1), and the `default_budget` fallback rules.
+`tests/unit/timezone.test.sh` covers the timezone helpers: `_is_valid_timezone`
+accept/reject cases, `_cfg_timezone`'s fail-closed behaviour on a missing or
+invalid zone, and `_today_in_tz`'s boundary scenarios (near-midnight, month
+boundary, and Dec 31 / Jan 1 tax-year) via the `$YNAB_NOW_EPOCH` seam. It follows the issue #4 harness convention — sources
 `tests/lib/assert.sh`, organises the cases into `test_*` functions, and ends with
 `run_tests` — so the repo-wide entrypoint auto-discovers it. Run the whole suite,
 or just this file:
