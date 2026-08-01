@@ -27,6 +27,7 @@ import {
   readState,
   computeNextState,
   recordFiredAlert,
+  expireFiredAlerts,
   writeState,
   milliunitsToDollars,
 } from '../../lib/monitor/state.mjs';
@@ -241,6 +242,32 @@ test('recordFiredAlert: a new key is recorded; an existing key is skipped, never
   assert.equal(s0.firedAlerts['overdrawn:acct-1'], undefined, 'inputs are never mutated');
 });
 
+// --- firedAlerts expiry seam (M6-3 AC: a cleared condition re-alerts) --------
+
+test('expireFiredAlerts: a key absent from keepKeys is dropped; an active key is kept', () => {
+  const s0 = { ...defaultState(), firedAlerts: { 'overdrawn:a1': { at: 'old' }, 'overdrawn:a2': { at: 'old' } } };
+  const { state: s1, expired } = expireFiredAlerts(s0, new Set(['overdrawn:a1']));
+  assert.deepEqual(s1.firedAlerts, { 'overdrawn:a1': { at: 'old' } }, 'the still-active key survives, the cleared one is dropped');
+  assert.deepEqual(expired, ['overdrawn:a2'], 'the dropped key is reported');
+  assert.deepEqual(s0.firedAlerts, { 'overdrawn:a1': { at: 'old' }, 'overdrawn:a2': { at: 'old' } }, 'input is never mutated');
+});
+
+test('expireFiredAlerts: a type OUTSIDE options.types is preserved even when not active', () => {
+  // The type gate is what keeps point-event large_txn keys alive: they name a
+  // transaction the incremental window can't re-attest, so they must NOT expire
+  // just because they are absent from this pass's active set.
+  const s0 = { ...defaultState(), firedAlerts: { 'overdrawn:a1': 1, 'large_txn:t1': 1 } };
+  const { state, expired } = expireFiredAlerts(s0, new Set(), { types: ['overdrawn'] });
+  assert.deepEqual(state.firedAlerts, { 'large_txn:t1': 1 }, 'only the eligible-type cleared key is dropped');
+  assert.deepEqual(expired, ['overdrawn:a1']);
+});
+
+test('expireFiredAlerts: with no types allow-list, every cleared key is eligible', () => {
+  const s0 = { ...defaultState(), firedAlerts: { 'overdrawn:a1': 1, 'large_txn:t1': 1 } };
+  const { state } = expireFiredAlerts(s0, new Set(['large_txn:t1']));
+  assert.deepEqual(state.firedAlerts, { 'large_txn:t1': 1 }, 'overdrawn:a1 cleared and eligible → dropped');
+});
+
 // --- milliunits storage + display conversion (AC #6/#7) ---------------------
 
 test('balances are stored as integer milliunits; milliunitsToDollars divides by 1000 for display only', () => {
@@ -296,7 +323,8 @@ test('the module writes nothing to stdout', () => {
     import(${JSON.stringify(url)}).then((m) => {
       const { state } = m.readState({ statePath: ${JSON.stringify(tmpState)}, dataDir: ${JSON.stringify(TMP)} });
       const { state: next } = m.computeNextState(state, { timestamp: 't', accounts: { a: { cleared: 1, uncleared: 0 } }, recentTransactionCount: 0 });
-      m.recordFiredAlert(next, 'k', 1);
+      const { state: fired } = m.recordFiredAlert(next, 'overdrawn:a', 1);
+      m.expireFiredAlerts(fired, new Set(), { types: ['overdrawn'] });
       m.writeState(next, { statePath: ${JSON.stringify(tmpState)}, dataDir: ${JSON.stringify(TMP)} });
       m.milliunitsToDollars(1000);
       process.stderr.write('ok');                                      // proof it ran

@@ -196,7 +196,7 @@ Every command is namespaced under `/workbench-ynab:`. The plugin is mid-build; t
 | `/workbench-ynab:ynab-annual-review` | Run the annual review ad-hoc — plans via the orchestrator, then forces the annual tier only. | Sprint 3 |
 | `/workbench-ynab:ynab-apply` | Review a proposed change-set and, on explicit approval, apply the ledger-only writes (dry-run by default). | Sprint 4 |
 | `/workbench-ynab:ynab-migrate` | Retire the legacy hand-run prototype: the old Desktop connector, its token, and the prototype scheduled tasks/directories. | Sprint 5 |
-| `/workbench-ynab:ynab-monitor` | Run one proactive between-run monitoring pass: advance the monitor state store from fresh YNAB data, exit silently when nothing changed. Scaffold only — no alerts/detectors yet. | Sprint 6 (v-Next) |
+| `/workbench-ynab:ynab-monitor` | Run one proactive between-run monitoring pass: advance the monitor state store from fresh YNAB data, run the four alert detectors (overdrawn, large/unusual transaction, budget overrun, bill due), dispatch any new finding, and exit silently when nothing is alert-worthy. | Sprint 6 (v-Next) |
 
 ## Versioning
 
