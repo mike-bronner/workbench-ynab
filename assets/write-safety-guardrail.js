@@ -60,6 +60,14 @@ const LEDGER_ONLY_OP_TYPES = Object.freeze([
 /**
  * The namespaced tool allow-list. EXACTLY these tools may be invoked at apply
  * time. Adding a tool requires editing only this constant.
+ *
+ * AUTHORITATIVE INVENTORY — `ALLOWED_TOOLS` ∪ `DENIED_TOOLS` is the single
+ * source of truth for which YNAB verbs mutate. `scripts/check-readonly.sh`'s
+ * `WRITE_VERBS` deny-list is pinned against this union by
+ * `tests/check-readonly.test.sh`, which parses these two array literals and
+ * fails on any divergence. Adding or removing a verb here therefore requires
+ * the same change to `WRITE_VERBS`, or the build breaks — deliberately, so the
+ * M2 read-only guard can never fall behind the write surface it guards.
  * @type {readonly string[]}
  */
 const ALLOWED_TOOLS = Object.freeze([
