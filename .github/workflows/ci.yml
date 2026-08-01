@@ -128,10 +128,14 @@ jobs:
       # tests/unit/watchdog.test.sh joins this lane because the shared watchdog's
       # process-group kill (issue #188) is job-control behaviour, and job control
       # differs across bash majors — its TIMEOUT path must be proven on 3.2, not
-      # just on the ubuntu runner's bash 5.x. The other two files exercise the
-      # helper's pass path via render_tmpl_timed / run_voice_timed / escape_timed.
+      # just on the ubuntu runner's bash 5.x. Since issue #251 the other three
+      # files each drive their OWN call site down that same timeout path
+      # (render_tmpl_timed / run_voice_timed / escape_timed / the report-writer
+      # output-dir guard), so they carry the identical job-control dependency and
+      # belong here too — which is why tests/unit/report-writer.test.sh joined the
+      # lane. They also still exercise the helper's pass path.
       - name: Run the persona footer-escaping tests under bash 3.2
-        run: bash scripts/test.sh tests/persona-loader.test.sh tests/unit/html-escape.test.sh tests/unit/watchdog.test.sh
+        run: bash scripts/test.sh tests/persona-loader.test.sh tests/unit/html-escape.test.sh tests/unit/watchdog.test.sh tests/unit/report-writer.test.sh
 
   # The assets/ change-set integration suites (M4) exercise the real apply
   # executor and the Ajv-backed validator end to end (assets/test/*.test.js),
