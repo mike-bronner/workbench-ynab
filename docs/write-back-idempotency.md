@@ -460,11 +460,53 @@ live == neither               → CONFLICT / third-party drift. Do NOT re-apply.
 ```
 
 This is the same `readLiveState` read the executor already performs for drift
-detection, used for one extra decision. Fail-closed throughout: a `before`/`after`
-that is not a comparable object, or a read that throws, is treated as
-**not-confirmed-applied** and never triggers a silent re-apply — an auth failure
-on the read aborts the whole batch exactly as it does today
-([`assets/apply-executor.js`](../assets/apply-executor.js) `prepareOp`).
+detection, used for one extra decision.
+
+**The comparison is delegated per op type — resume never rolls its own.** Each
+op type already owns a staleness check, and resume calls that check rather than
+applying one generic `Object.keys(...)` comparison to every op. This matters
+most for `reconcile`, which is the **only** op type whose `before`/`after`
+snapshots have no `required` fields in the schema
+([`assets/changeset-schema.json`](../assets/changeset-schema.json) —
+`categorizeOp` requires `category_id`, `allocateOp` requires `budgeted`,
+`deleteDuplicateOp` requires seven, `reconcileOp` requires none). A schema-valid
+reconcile op can therefore carry `before: {}` / `after: {}`, and the executor's
+subset comparison `isStale`
+([`assets/apply-executor.js`](../assets/apply-executor.js)) is
+`Object.keys(before).some(...)` — **vacuously `false` for `{}`**, so an empty
+snapshot matches *any* live state. Run through the generic three-way branch
+above, `live == after` is tested first, so a reconcile op with `after: {}` would
+vacuously match and take **ALREADY APPLIED → skip** before the CONFLICT fallback
+is ever reached: resume would silently skip a real money op it never applied.
+
+Production already solved this. `isReconcileStale`
+([`assets/reconcile-handler.js`](../assets/reconcile-handler.js)) fails **closed**
+on a missing `before.cleared` baseline, and its comment names this exact case:
+*"a schema-valid op can reach here with `before: {}`; fail CLOSED."* Resume
+delegates to it — and to each op type's equivalent — so the guard that ships
+today is inherited, never re-derived and never regressed.
+
+**Fail-closed throughout.** Each of these is treated as **not-confirmed-applied**,
+and none of them ever triggers a silent re-apply:
+
+- A `before`/`after` that is **not a comparable object** (`null`, an array, a
+  scalar).
+- An **empty or baseline-free snapshot** (`{}`, or a reconcile `before` with no
+  `cleared` baseline). `{}` *is* a comparable object, so the clause above does
+  not cover it — it needs naming separately. This is the vacuity trap; it
+  resolves to the op type's own check, which fails closed.
+- A **live read that throws** (network, 5xx, timeout). Resume has *less*
+  evidence than a missing audit record, which §"Write-ahead ordering" already
+  forbids dispatching on. So resume **does nothing to this op** — it does not
+  skip it as applied and it does not dispatch it — and **reports it as
+  unconfirmable** in the resume report. It stays un-applied and a human decides.
+  This rule holds for **every** op type and **both** interleavings; the two
+  procedures below cross-reference it rather than restating it.
+
+An auth failure on the read is the one exception to "do nothing to this op": it
+aborts the whole batch exactly as it does today
+([`assets/apply-executor.js`](../assets/apply-executor.js) `prepareOp`), because
+a revoked token invalidates every remaining op, not just this one.
 
 ## Recovery procedures for the two dangerous interleavings
 
@@ -485,6 +527,11 @@ trust the record blindly.
   claiming `applied` that reality contradicts is a genuine inconsistency in a
   money-adjacent trail; silently re-applying could clobber a value a human or a
   later run set deliberately. Surface it to the human and stop touching that op.
+
+- **the live read itself fails** (network, 5xx, timeout) → **unconfirmable.** Do
+  nothing to this op — neither skip-as-applied nor dispatch — and report it. This
+  is the general fail-closed rule from §"The unified resume decision"; it is not
+  special to interleaving A.
 
 An `error` record with `applied_state: not_applied` is **not** interleaving A: a
 4xx means YNAB rejected the call and nothing changed, so the op is simply
@@ -517,6 +564,17 @@ them.
 
 - **live != `after`** → the op genuinely never applied (no record *and* no ledger
   change). Dispatch it normally.
+
+- **the live read fails** (network, 5xx, timeout) → **unconfirmable.** Do nothing
+  to this op — neither treat-as-applied nor dispatch — and report it. Same
+  general fail-closed rule as interleaving A, from §"The unified resume decision".
+  It bears restating here because interleaving B is the branch where a naïve
+  "if it matches, skip; otherwise process normally" reading is most tempting: a
+  thrown read is not a mismatch, and treating it as one would dispatch a
+  mutating call on **zero** information. `categorize` / `allocate` / `reconcile`
+  are value-idempotent (§"Consistency model"), so the fallout there would be a
+  wasted call rather than corruption — but `delete_duplicate` is not, and the
+  rule is uniform so no reader has to work out which is which.
 
 ## Resume prerequisites — the same gates as any apply, in order
 
@@ -574,24 +632,47 @@ from [`docs/audit-log.md`](./audit-log.md):
 - **Append-only.** The writer only ever `>>`-appends; it never rewrites,
   truncates, or seeks. History is immutable, so a resume reads the same records
   a prior run wrote.
-- **Atomic per record (the durability property).** Each record is one compact
-  `jq -c` line emitted with its terminating newline in a **single atomic
-  `write(2)`** to an `O_APPEND` fd, so a crash leaves **either the whole
-  newline-terminated record or nothing — never a torn line**. Resume therefore
-  never has to reason about a half-written record; every record it reads is
-  complete. (An explicit `fsync` per record would add power-loss durability on
-  top of this atomicity; the atomic-append guarantee is what resume's
-  *correctness* depends on, and it holds today.)
+- **Atomic per record.** Each record is one compact `jq -c` line emitted with its
+  terminating newline in a **single atomic `write(2)`** to an `O_APPEND` fd, so a
+  crash leaves **either the whole newline-terminated record or nothing — never a
+  torn line**. Resume therefore never has to reason about a half-written record;
+  every record it reads is complete.
+- **fsync'd per record. ⚠️ Requirement, not yet implemented.** Each record should
+  be flushed to stable storage before the writer reports success, so a **power
+  cut** — not just a process crash — leaves the trail intact. This does not hold
+  today: [`bin/audit-log.sh`](../bin/audit-log.sh) does the atomic append above
+  and returns; `grep -rn fsync bin/ docs/audit-log.md` returns **zero hits**.
+  Atomic-append survives a process death (the kernel already has the bytes); it
+  does **not** survive the machine losing power before the page cache is flushed.
+  Tracked as **#275** against `bin/audit-log.sh`. Named here as a gap rather than
+  dissolved by a wording change, the same way this document marks the GAP-10
+  freshness gate "⚠️ Designed, not yet wired" and the `backfilled` field additive.
 - **Ordered.** One file per UTC month, appended in processing order, so replaying
   a run's records (`audit-log.sh run <run_id>`) yields them in the order the ops
   were acted on.
 
-**These three are sufficient for deterministic resume.** Append-only + atomic-per-record
-means the trail resume reads is a prefix of complete, ordered records — exactly
-the "recoverable, ordered trail" a crash must leave. Combined with live-state
-verification as the tie-breaker, resume needs nothing more from the log: the log
-tells it *where a run got to*, and live YNAB state resolves *anything the log
-cannot confirm*.
+**These requirements are sufficient for deterministic resume — and the three that
+ship today are already sufficient for resume *correctness*.** Append-only +
+atomic-per-record means the trail resume reads is a prefix of complete, ordered
+records — exactly the "recoverable, ordered trail" a crash must leave. Combined
+with live-state verification as the tie-breaker, resume needs nothing more from
+the log: the log tells it *where a run got to*, and live YNAB state resolves
+*anything the log cannot confirm*.
+
+**Why the missing fsync does not block this design.** A tail lost to a power cut
+produces exactly the shape §"Interleaving B" already handles: ops applied to
+YNAB with no audit record. Resume live-verifies those, treats them as applied,
+and backfills. So resume stays correct without fsync — which is precisely why
+#275 is a tracked gap and not a blocker on this document.
+
+**Why it still matters.** The audit log is not only a resume aid; it is the
+**forensic** record of every money mutation this plugin makes
+([`docs/audit-log.md`](./audit-log.md)). "The last N records were lost to a power
+cut" is a materially worse failure for a compliance trail than "resume
+recomputed it", and resume's ability to reconstruct *ledger state* does not
+reconstruct the *evidence* of who changed what and when. That is the gap #275
+closes, and it is why this document keeps fsync as a stated requirement instead
+of narrowing the durability contract to what the code happens to do today.
 
 ## Worked walkthrough
 
