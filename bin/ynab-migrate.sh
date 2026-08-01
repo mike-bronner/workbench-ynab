@@ -229,8 +229,19 @@ do_seed_config() {
   # local users. `( umask 077; mkdir -p )` gives a fresh dir 0700 with no
   # world-readable window; the explicit chmod additionally tightens a dir left
   # 0755 by a pre-privacy install. Mirrors commands/setup.md.
+  #
+  # The failure branch carries its OWN message, like every other error branch in
+  # this function. That is not decoration: without it the abort is silent, and a
+  # silent abort is indistinguishable from the downstream `mv` failure below —
+  # both end in `return 2` having written nothing, so no test could tell whether
+  # this guard fired or was deleted (round-5 review). The message is the guard's
+  # fingerprint, and the absence of the `Failed to seed config` line below proves
+  # the abort happened HERE, before `mv` was ever reached.
   dir="$(dirname "$config")"
-  ( umask 077; mkdir -p "$dir" ) && chmod 700 "$dir" || return 2
+  if ! ( umask 077; mkdir -p "$dir" ) || ! chmod 700 "$dir"; then
+    printf '⚠️  Could not create the data directory owner-only (mode 0700) — refusing to seed so no financial artifact lands in a world-traversable directory: %s\n' "$dir" >&2
+    return 2
+  fi
   tmp="$(mktemp)" || return 2
   # Clean the temp copy on EVERY exit, mirroring the other writers, so a failure
   # can never strand a half-built seed (or leave an empty config that a re-run

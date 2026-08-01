@@ -229,10 +229,11 @@ overwrite:
 # the explicit chmod additionally tightens a dir left 0755 by a pre-privacy
 # install (setup is idempotent and the recommended step after every update).
 # Both steps fail CLOSED like every gate in Step 4 (mirrors bin/ynab-migrate.sh's
-# `|| return 2` and bin/audit-log.sh): a swallowed chmod failure on a pre-existing
-# 0755 dir would print the ✅ banner while $CONFIG_DIR — which also holds audit/,
-# monitor-state.json, and tax-tracker.json — stays world-traversable, letting
-# other local users enumerate every financial artifact's filename and mtime.
+# `do_seed_config` guard, which returns 2, and bin/audit-log.sh): a swallowed
+# chmod failure on a pre-existing 0755 dir would print the ✅ banner while
+# $CONFIG_DIR — which also holds audit/, monitor-state.json, and
+# tax-tracker.json — stays world-traversable, letting other local users
+# enumerate every financial artifact's filename and mtime.
 if ! ( umask 077; mkdir -p "$CONFIG_DIR" ); then
   echo "❌ Could not create the data directory $CONFIG_DIR — aborting setup." >&2
   exit 1
