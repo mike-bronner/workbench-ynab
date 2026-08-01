@@ -205,9 +205,9 @@ assert_routing_present "no-cache-dir"
 
 echo "bundle root without plugin.json (broken/partial install) → drift silent, routing still emitted, exit 0:"
 # A CLAUDE_PLUGIN_ROOT that exists but has no .claude-plugin/plugin.json drives
-# `_ynab_plugin_version` non-zero → the `bundle=$(...) || return 0` gate
-# (session-warmup.sh:92). A valid cache is present (DRIFT_HOME, v0.2.0), so the
-# ONLY reason no drift fires is the missing bundle file — isolating this gate
+# `_ynab_plugin_version` non-zero → the `bundle=$(...) || return 0` gate in
+# `_ynab_emit_drift_warning`. A valid cache is present (DRIFT_HOME, v0.2.0), so
+# the ONLY reason no drift fires is the missing bundle file — isolating this gate
 # from the no-cache gate. A `return 0`→`exit 0` typo here would skip the routing
 # block and trip assert_routing_present.
 ROOT_NOPLUGIN="$SANDBOX/root-noplugin"; mkdir -p "$ROOT_NOPLUGIN"
@@ -219,12 +219,12 @@ assert_routing_present "broken-install"
 echo "bundle plugin.json present but carries no \"version\" field → drift silent, routing still emitted, exit 0:"
 # A CLAUDE_PLUGIN_ROOT whose plugin.json EXISTS but has no "version" field:
 # `_ynab_plugin_version` matches nothing → echoes empty and returns 0, so the
-# `bundle=$(...) || return 0` gate (session-warmup.sh:92) does NOT fire — the
-# `[ -n "$bundle" ] || return 0` gate (session-warmup.sh:93) does. A valid cache
-# is present (DRIFT_HOME, v0.2.0), so the ONLY reason no drift fires is the empty
-# bundle version — isolating this gate from the newest-empty gate (:95) below. A
-# `return 0`→`exit 0` typo at :93 would skip the routing block and trip
-# assert_routing_present.
+# `bundle=$(...) || return 0` gate does NOT fire — the `[ -n "$bundle" ] ||
+# return 0` gate does (both in `_ynab_emit_drift_warning`). A valid cache is
+# present (DRIFT_HOME, v0.2.0), so the ONLY reason no drift fires is the empty
+# bundle version — isolating this gate from the `[ -n "$newest" ] || return 0`
+# gate below. A `return 0`→`exit 0` typo in the `[ -n "$bundle" ]` gate would
+# skip the routing block and trip assert_routing_present.
 ROOT_NOVERSION="$SANDBOX/root-noversion"; mkdir -p "$ROOT_NOVERSION/.claude-plugin"
 printf '{ "name": "workbench-ynab" }\n' > "$ROOT_NOVERSION/.claude-plugin/plugin.json"
 run 0 "$PRESENT_CFG" "$DRIFT_HOME" "$ROOT_NOVERSION"
@@ -267,13 +267,13 @@ assert_routing_present "short-version"
 echo "cache dir present but holds no X.Y.Z subdir → drift silent, routing still emitted, exit 0:"
 # A HOME whose CLI cache dir EXISTS but contains no semver subdir: the `-d` test
 # passes, so `_ynab_newest_cached_version` returns 0 and the `newest=$(...) ||
-# return 0` gate (session-warmup.sh:94) does NOT fire — but the semver grep matches
-# nothing, so `newest` is empty and the `[ -n "$newest" ] || return 0` gate
-# (session-warmup.sh:95) does. A valid bundle root (ROOT_OLD, v0.1.0) clears the
+# return 0` gate does NOT fire — but the semver grep matches nothing, so `newest`
+# is empty and the `[ -n "$newest" ] || return 0` gate does (both in
+# `_ynab_emit_drift_warning`). A valid bundle root (ROOT_OLD, v0.1.0) clears the
 # earlier bundle gates, so the ONLY reason no drift fires is the empty newest —
-# isolating this gate from the no-cache-dir gate (:94, where the dir is absent
-# entirely). A `return 0`→`exit 0` typo at :95 would skip the routing block and
-# trip assert_routing_present.
+# isolating this gate from the `newest=$(...) || return 0` gate (where the cache
+# dir is absent entirely). A `return 0`→`exit 0` typo in the `[ -n "$newest" ]`
+# gate would skip the routing block and trip assert_routing_present.
 EMPTY_CACHE_HOME="$SANDBOX/empty-cache-home"
 mk_cache "$EMPTY_CACHE_HOME" "not-a-version"   # dir present; the entry fails the semver grep
 run 0 "$PRESENT_CFG" "$EMPTY_CACHE_HOME" "$ROOT_OLD"
