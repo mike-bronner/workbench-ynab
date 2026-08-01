@@ -207,6 +207,11 @@ assert_absent_re "command has no hardcoded absolute/relative skill path" \
 
 # ── AC#10 — strictly read-only, on both surfaces ──────────────────────────────
 echo "AC#10: strictly read-only"
+# Deliberately WHOLE-FILE, like the not-tax-advice banner below and unlike the
+# section-scoped AC checks: "this surface is read-only" is a claim about the
+# whole document, and the absence assertions must sweep every line to mean
+# anything — a write verb hiding outside the scoped section is exactly the
+# regression they exist to catch. Scoping these would weaken them, not tighten them.
 for f in "$COMMAND_FILE" "$SKILL_FILE"; do
   FILE="$f"
   assert_present_re "${f##*/} declares read-only" "read-only"
@@ -272,7 +277,14 @@ assert_in_section_re 3 "skill states milliunits convert exactly once" \
   'converted exactly once|milliunits are converted'
 assert_in_section_flat_re 3 "skill forbids summing raw milliunits" \
   "[Nn]ever sum raw +milliunits|never add a raw +milliunit"
-assert_present "skill delegates the arithmetic to the tested module" 'portfolio-rollup.js'
+# Scoped to §3, and to the REQUIRE CALL rather than the bare path. Both matter:
+# the bare path appears in the intro (:27), so a whole-file grep was satisfied
+# without §3 requiring anything — but §3 ALSO names the path in the
+# `formatRollupMoney` prose bullet (:156), so merely scoping to §3 would still
+# pass after the require is repointed at another file. Pinning the require's own
+# text is the only form that goes red on that mutation.
+assert_in_section 3 "skill delegates the arithmetic to the tested module" \
+  "require('assets/portfolio-rollup.js')"
 # The primary aggregation entry point — previously asserted nowhere at all, so
 # §3 could have stopped calling it without a single test noticing. Scoped, for
 # the same reason as every other identifier the intro pre-mentions.
