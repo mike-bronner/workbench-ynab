@@ -181,7 +181,22 @@ plugin's out-of-repo config so the user doesn't re-enter it.
    # #65). /ynab-migrate seeds config without requiring /setup first, so it may be
    # the FIRST creator of this dir — harden at creation like commands/setup.md
    # rather than a bare `mkdir -p` that leaves it world-traversable (0755).
-   ( umask 077; mkdir -p "$CONFIG_DIR" ) && chmod 700 "$CONFIG_DIR"
+   #
+   # Both steps fail CLOSED, exactly as commands/setup.md does. The chmod half
+   # matters most here: seed-config below returns EARLY (success) when the config
+   # already exists, without touching the directory — so on a pre-privacy install
+   # (a 0755 dir with a config already in it) this chmod is the ONLY code that
+   # re-tightens it. Swallowing its failure would let the migration report success
+   # while $CONFIG_DIR — which also holds audit/, monitor-state.json, and
+   # tax-tracker.json — stays world-traversable to other local users.
+   if ! ( umask 077; mkdir -p "$CONFIG_DIR" ); then
+     echo "❌ Could not create the data directory $CONFIG_DIR — aborting migration." >&2
+     exit 1
+   fi
+   if ! chmod 700 "$CONFIG_DIR"; then
+     echo "❌ Could not restrict $CONFIG_DIR to owner-only (mode 0700) — aborting migration so no financial artifact lands in a world-traversable directory." >&2
+     exit 1
+   fi
    # Seed on first run via the tested helper: it copies the shipped example with
    # the placeholder `budgets` array and `default_budget` STRIPPED (so the real
    # migrated budget can land below — migrate-config fills only blank fields, and
