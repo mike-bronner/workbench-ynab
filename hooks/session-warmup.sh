@@ -48,17 +48,38 @@ set -u
 # only when the running bundle is STRICTLY behind the newest version in the CLI
 # cache. A Cowork-only setup with no CLI cache has nothing to compare against,
 # so the check no-ops there. Mirrors the workbench-bujo warmup, swapping
-# workbench-bujo → workbench-ynab, with one deliberate divergence: the cache_dir
-# guards HOME as ${HOME:-} (see _ynab_newest_cached_version) so an unset HOME
-# degrades to a guaranteed-absent path and stays silent, instead of raising
-# "HOME: unbound variable" on stderr under set -u — the same guard already applied
-# to the config path below.
+# workbench-bujo → workbench-ynab, with two deliberate divergences, both strict
+# hardenings that keep every well-formed input behaving identically:
+#   1. The cache_dir guards HOME as ${HOME:-} (see _ynab_newest_cached_version) so
+#      an unset HOME degrades to a guaranteed-absent path and stays silent, instead
+#      of raising "HOME: unbound variable" on stderr under set -u — the same guard
+#      already applied to the config path below.
+#   2. The extracted bundle version is validated against a strict X.Y.Z allowlist
+#      (see _ynab_plugin_version), matching the allowlist the cache side already
+#      applies, so a malformed version reads as a missing input instead of flowing
+#      unvalidated into the agent-facing drift block.
 # ---------------------------------------------------------------------------
 
 _ynab_plugin_version() {
   # Echo the "version" field from a plugin.json, or nothing.
+  #
+  # The sed capture is deliberately permissive ([^"]*) because JSON says nothing
+  # about the field's shape, so the extracted string is validated against the
+  # SAME strict X.Y.Z allowlist the cache side already applies in
+  # _ynab_newest_cached_version. Anything else echoes nothing, which the caller's
+  # `[ -n "$bundle" ] || return 0` gate reads as "missing input" → silent, exit 0
+  # (AC #4: silent on any missing input). Two reasons the allowlist is load-bearing:
+  #   1. The value is interpolated verbatim into the drift heredoc, which is the
+  #      injected-context channel for the agent. An unvalidated version string is
+  #      therefore agent-facing text, and a crafted plugin.json could smuggle
+  #      arbitrary markdown/instructions into context.
+  #   2. _ynab_version_lt assumes both operands are X.Y.Z and mis-sorts garbage.
+  # A deliberate divergence from the bujo reference (like the ${HOME:-} guard
+  # below), and a strict tightening only: every well-formed version still passes.
   [ -f "$1" ] || return 1
-  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" | head -n 1
+  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" \
+    | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+    | head -n 1
 }
 
 _ynab_newest_cached_version() {
