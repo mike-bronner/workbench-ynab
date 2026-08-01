@@ -148,6 +148,15 @@ summary on screen and prints in full.
 > unbounded config value is safe to pass. `tests/unit/portfolio-report.test.sh`
 > renders a hostile `</summary><script>…` label and asserts it arrives as inert
 > text.
+>
+> **The same rule covers the tax-profile loader's error message.** On the
+> `loadProfile()` failure path the tax section renders "tax profile unavailable:
+> …", and that message can quote the `tax_profile_path` override or
+> `$YNAB_TAX_PROFILE_FILE`. `redact()` ([`../lib/containment.mjs`](../lib/containment.mjs))
+> masks home-directory spellings only — it neutralizes no HTML metacharacter — so
+> the message is escaped exactly like a label before it reaches
+> `section-12-tax-summary`. The escaping rule names four sources and exempts
+> none.
 
 ## Dispatch ordering
 

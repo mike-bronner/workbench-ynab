@@ -30,11 +30,19 @@
 # The template/print assertions (AC#7/#8) are NOT string checks against the
 # skill: they RENDER a real Portfolio report through the actual report writer
 # and inspect the resulting HTML, which is what "verified by inspecting rendered
-# HTML" requires. That render also carries the ESCAPING case: a hostile,
-# config-sourced budget label (`</summary><script>…`) is routed through
-# bin/html-escape.sh exactly as the skill instructs and asserted to arrive as
-# inert text — config is a trust boundary (issue #28 / GAP-13), and the writer
-# never re-escapes a block slot, so the skill's rule is the only defense.
+# HTML" requires. That render also carries the ESCAPING cases: BOTH
+# config-controlled strings the report interpolates — a hostile budget label
+# (`</summary><script>…`) and the tax-profile loader's error message (which
+# quotes the `tax_profile_path` override or $YNAB_TAX_PROFILE_FILE) — are routed
+# through bin/html-escape.sh exactly as the skill instructs and asserted to
+# arrive as inert text. Config is a trust boundary (issue #28 / GAP-13), the
+# writer never re-escapes a block slot, and redact() masks home directories
+# rather than markup, so the skill's rule is the only defense on either string.
+#
+# The AC#8 print-CSS assertions are scoped to the EXTRACTED `@media print` rule
+# (print_css_block), never the whole file: the template names `@media print` in
+# five prose comments that survive assembly, so a whole-file grep for it passes
+# even after the real rule is deleted.
 # Dispatch ordering (AC#9) is proven by the module's unit tests
 # (tests/unit/portfolio-rollup.test.mjs); asserted here only as the wiring that
 # the skill calls that ranking rather than improvising one.
@@ -124,6 +132,35 @@ assert_in_section_re() {
 # so a prose assertion survives markdown line-wrapping.
 assert_in_section_flat_re() {
   if skill_section "$1" | flatten | grep -qiE -- "$3"; then ok "$2"; else no "$2: /$3/ did not match (flattened) in skill §$1"; fi
+}
+
+# print_css_block <rendered-html> — emit the body of the report's REAL
+# `@media print` CSS rule, brace-counted from the rule's opening `{` to its
+# matching `}`. Empty when the rule is absent.
+#
+# Whole-file greps cannot prove AC#8. assets/report/template.html mentions the
+# literal string `@media print` in five prose HTML comments, and
+# bin/report-writer.sh substitutes only `<!-- SLOT:name -->` markers — it never
+# strips comments — so all five reach the rendered file. A bare
+# `grep -F '@media print'` therefore stays green after the entire real rule is
+# deleted. This extractor requires the at-rule AND its opening brace on one
+# line, which no comment in the template satisfies, and returns nothing once the
+# rule is deleted — so every assertion scoped to it goes red on that mutation.
+print_css_block() {
+  awk '
+    !inblock && /@media[[:space:]]+print[[:space:]]*\{/ { inblock = 1; depth = 0 }
+    inblock {
+      opens = gsub(/\{/, "{"); closes = gsub(/\}/, "}")
+      depth += opens - closes
+      print
+      if (depth <= 0) exit
+    }
+  ' "$1"
+}
+
+# assert_in_print_css <desc> <ERE, case-insensitive> — scoped to $PRINT_CSS.
+assert_in_print_css() {
+  if printf '%s\n' "$PRINT_CSS" | grep -qiE -- "$2"; then ok "$1"; else no "$1: /$2/ did not match inside the @media print rule"; fi
 }
 
 # The scoping is only as good as the extractor: if skill_section silently
@@ -335,6 +372,30 @@ else
   ok "skill does not exempt budget labels from escaping"
 fi
 
+# THE SAME TRUST BOUNDARY, ON THE TAX-LOADER ERROR PATH. §4 renders
+# loadProfile()'s failure message into section-12-tax-summary, and that message
+# can embed the `tax_profile_path` override or $YNAB_TAX_PROFILE_FILE — config
+# again. lib/containment.mjs's redact() masks home-directory spellings only, so
+# it neutralizes nothing in HTML terms, and report-writer.sh never re-processes
+# a block slot. Pin the CALL LINE in §4 (the line an agent copies), the escaped
+# value at its sink, and the rule's own enumeration — the same three-way pin the
+# label already carries, because a rule that names three of four sources is how
+# the fourth one got left out.
+# shellcheck disable=SC2016
+assert_in_section 4 "skill shows the tax-loader error going through the escaper" \
+  'safe_tax_error="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" -- "$tax_error")"'
+assert_in_section 4 "skill renders the ESCAPED tax error, not the raw message" \
+  '{escaped error message}'
+assert_in_section 5 "slot table names the escaped tax error at the sink" \
+  '{escaped error message}'
+assert_in_section_flat_re 5 "escaping rule enumerates the tax-loader error message" \
+  "tax-profile loader's error message"
+# The enumeration's own count must track the list. It read "Three sources" while
+# the tax error was the unnamed fourth; a stale count is what an agent trusts
+# instead of re-reading the bullets.
+assert_in_section_flat_re 5 "escaping rule counts four sources, not three" \
+  "Four sources, one rule, no carve-outs"
+
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
@@ -364,6 +425,24 @@ case "$HOSTILE_LABEL_ESCAPED" in
     no "the escaper neutralizes a hostile budget label (unexpected output: $HOSTILE_LABEL_ESCAPED)" ;;
 esac
 
+# A HOSTILE TAX-PROFILE ERROR MESSAGE — the second config-controlled string that
+# reaches this report as markup. loadProfile()'s failure message quotes the path
+# it was given, which comes from the `tax_profile_path` config override or
+# $YNAB_TAX_PROFILE_FILE, and redact() only rewrites home-directory spellings.
+# No `</summary>` in this payload, deliberately: the `</summary>` count assertion
+# below belongs to the LABEL case, and reusing that byte here would let a tax-error
+# regression hide inside the label's own count.
+HOSTILE_TAX_ERROR='tax profile unavailable: /tmp/<script>alert(3)</script><img src=x onerror=alert(4)>.json'
+HOSTILE_TAX_ERROR_ESCAPED="$(bash "$ESCAPER" -- "$HOSTILE_TAX_ERROR")"
+case "$HOSTILE_TAX_ERROR_ESCAPED" in
+  *'<script>'*|*'<img'*)
+    no "the escaper neutralizes a hostile tax-profile error (raw markup survived: $HOSTILE_TAX_ERROR_ESCAPED)" ;;
+  *'&lt;script&gt;'*)
+    ok "the escaper neutralizes a hostile tax-profile error" ;;
+  *)
+    no "the escaper neutralizes a hostile tax-profile error (unexpected output: $HOSTILE_TAX_ERROR_ESCAPED)" ;;
+esac
+
 # Give two slots the shapes the AC names: a KPI dashboard and a collapsible
 # per-budget detail section.
 # The `$3,500.00` and `${...}`-free HTML below are literal fixture text, not
@@ -379,6 +458,9 @@ for i in "${!slot_args[@]}"; do
     # EVERY collapsible open, not just the first.
     section-10-anomalies=*)
       slot_args[i]="section-10-anomalies=<div class=\"card\"><h2>Per-budget detail</h2><details><summary>Personal</summary><div class=\"details__body\">personal detail</div></details><details><summary>Business</summary><div class=\"details__body\">business detail</div></details><details><summary>${HOSTILE_LABEL_ESCAPED}</summary><div class=\"details__body\">hostile detail</div></details></div>" ;;
+    # §4's loader-failure path, escaped exactly as the skill instructs.
+    section-12-tax-summary=*)
+      slot_args[i]="section-12-tax-summary=<div class=\"card\"><h2>Tax summary</h2><p>${HOSTILE_TAX_ERROR_ESCAPED}</p></div>" ;;
   esac
 done
 
@@ -401,11 +483,26 @@ if [ -f "$report_path" ]; then
     YNAB-Portfolio-Review-2026-07-24.html) ok "the report filename carries the Portfolio tier" ;;
     *) no "the report filename carries the Portfolio tier (got ${report_path##*/})" ;;
   esac
-  # AC#8 — the print CSS the prototype was missing. Assert the block AND its
-  # substantive rules, so an empty `@media print {}` could never pass.
-  assert_present "rendered HTML carries the @media print block" '@media print'
-  assert_present_re "print CSS forces collapsibles open" 'details > \*:not\(summary\) *\{ *display: *block'
-  assert_present_re "print CSS sets a page margin" '@page'
+  # AC#8 — the print CSS the prototype was missing. Every assertion here is
+  # scoped to the EXTRACTED RULE BODY, never the whole file: the template
+  # discusses `@media print` in five prose HTML comments (lines 10, 32, 92, 199,
+  # 212) that the writer passes through verbatim, so a whole-file grep for the
+  # bare string survives deleting the real rule outright — proven by mutation.
+  # print_css_block only matches the rule's opening line (`@media print` AND `{`
+  # on the same line), so no comment can satisfy it, and it returns nothing when
+  # the rule is gone — which reddens the extractor self-test and all three
+  # assertions below together.
+  PRINT_CSS="$(print_css_block "$report_path")"
+  if [ "$(printf '%s' "$PRINT_CSS" | wc -c)" -gt 200 ] && ! printf '%s\n' "$PRINT_CSS" | grep -qF '</style>'; then
+    ok "print_css_block extracts a bounded @media print rule body"
+  else
+    no "print_css_block extracts a bounded @media print rule body (got $(printf '%s' "$PRINT_CSS" | wc -c) bytes)"
+  fi
+  assert_in_print_css "print CSS forces colors to print" \
+    'print-color-adjust: *exact'
+  assert_in_print_css "print CSS forces collapsibles open" \
+    'details > \*:not\(summary\) *\{ *display: *block'
+  assert_in_print_css "print CSS sets a page margin" '@page *\{ *margin:'
   # AC#7 — the dark theme tokens, the KPI dashboard, and collapsible per-budget detail.
   #
   # DELIBERATE DEVIATION on the warning token. The AC names the prototype's
@@ -440,8 +537,11 @@ if [ -f "$report_path" ]; then
   # pre-escaped (bin/report-writer.sh), so this proves the ONLY defense — the
   # skill's escaping rule — actually holds end to end.
   assert_present "hostile budget label renders as escaped text" '&lt;script&gt;alert(1)&lt;/script&gt;'
-  assert_absent_re "hostile budget label injects no live script element" '<script'
-  assert_absent_re "hostile budget label injects no live img/onerror element" '<img[^>]*onerror'
+  # Whole-file by design, and named for it: these two cover EVERY hostile payload
+  # in the render (the label and the tax-loader error alike), so no unescaped
+  # string from any source can reach the file as live markup.
+  assert_absent_re "no hostile payload injects a live script element" '<script'
+  assert_absent_re "no hostile payload injects a live img/onerror element" '<img[^>]*onerror'
   # The `</summary>` half of the payload is the one that would break OUT of the
   # summary element. The template legitimately contains no `</summary>` of its
   # own beyond the three fixtures', so an escaped payload leaves exactly three.
@@ -451,6 +551,15 @@ if [ -f "$report_path" ]; then
   else
     no "hostile label does not break out of its <summary> (expected 3 </summary>, got $close_summary_count)"
   fi
+  # THE TAX-LOADER ERROR PATH, AT ITS SINK. Same proof as the label, on the
+  # fourth string the escaping rule now names: it must arrive as inert text in
+  # section-12-tax-summary. The `<script` / `onerror` absent-assertions above are
+  # whole-file, so they cover this payload too — this one pins that the escaped
+  # form is actually PRESENT, which an absent-check alone can never show.
+  assert_present "hostile tax-profile error renders as escaped text" \
+    '&lt;script&gt;alert(3)&lt;/script&gt;'
+  assert_present "hostile tax-profile error's img payload renders as escaped text" \
+    '&lt;img src=x onerror=alert(4)&gt;'
   assert_present "rendered HTML reports the Portfolio tier" 'Portfolio YNAB Review'
   # The disclaimer is hardcoded in the template, so the rollup inherits it too.
   assert_present_re "rendered HTML carries the not-tax-advice disclaimer" 'not tax advice'

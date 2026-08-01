@@ -195,8 +195,21 @@ getIncomeTaxBrackets() })`, then `quarterlyEstimate(…)` and `renderYtdSummary(
 exactly as that skill's procedure specifies. **No tax constant is ever written
 here** — every rate, bracket, threshold, and due date is a read through the
 tax-profile loader, and if `loadProfile()` returns `!ok` the tax section renders
-"tax profile unavailable: <error path>" with a `tax_profile_error` note rather
-than a guessed number.
+"tax profile unavailable: {escaped error message}" with a `tax_profile_error`
+note rather than a guessed number.
+
+**That error message is config-controlled and lands in markup — escape it.** It
+can embed the `tax_profile_path` override or the `YNAB_TAX_PROFILE_FILE` value,
+and `redact()` ([`../../lib/containment.mjs`](../../lib/containment.mjs)) masks
+home-directory spellings only, never `<`, `>`, or `&`. It reaches the
+`section-12-tax-summary` slot, which
+[`../../bin/report-writer.sh`](../../bin/report-writer.sh) treats as an opaque,
+pre-escaped fragment — so it goes through the same escaper as every other string
+([§5](#5-render-into-the-frozen-template)), no exceptions:
+
+```bash
+safe_tax_error="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" -- "$tax_error")"
+```
 
 **Two fail-closed cases, both of which suppress the figure rather than publish a
 wrong one:**
@@ -242,7 +255,7 @@ the rollup:
 | `section-2-income` / `section-3-spending` / `section-5-cash-flow` | Aggregate income, spending, and net cash flow across budgets. |
 | `section-4-budget-adherence` | Cross-budget Ready-to-Assign and funding status. |
 | `section-7-accounts` | Accounts across all budgets, grouped by budget. |
-| `section-12-tax-summary` | The **single** consolidated YTD tax picture from §4 — never one fragment per budget. |
+| `section-12-tax-summary` | The **single** consolidated YTD tax picture from §4 — never one fragment per budget. On the loader-failure path it carries `{escaped error message}`: that string is config-controlled and goes through the escaper below, exactly like the label. |
 | `section-11-recommendations` | The ordered cross-budget action list (§6 ordering). |
 | `section-1-classification`, `section-6-categories`, `section-8-goals`, `section-10-anomalies` | The **collapsible per-budget detail**: one `<details><summary>{escaped budget label}</summary><div class="details__body">…</div></details>` per budget, so the rollup reads as a summary on screen and prints in full. The label is config-sourced and lands in markup — it goes through the escaper below like every other string, no exceptions. |
 | `footer-persona` | `bash "${CLAUDE_PLUGIN_ROOT}/bin/persona.sh" html-name` — inject verbatim. |
@@ -251,7 +264,7 @@ Every slot the template declares must be supplied; a section with nothing to say
 is passed as the literal `no findings`.
 
 **Escape every string that reaches the markup — the budget `label` included.**
-Three sources, one rule, no carve-outs:
+Four sources, one rule, no carve-outs:
 
 - **Budget labels** come from config, and this repo has already ruled that config
   strings are a **trust boundary, not trusted input**: `persona.name` is bounded
@@ -265,6 +278,11 @@ Three sources, one rule, no carve-outs:
 - **The `currency_symbol`** embedded in a `formatRollupMoney` / `formatMoney`
   result is equally off-the-wire (`formatRollupMoney` delegates to `formatMoney`,
   which embeds the symbol and separators verbatim and does **not** pre-escape).
+- **The tax-profile loader's error message** — §4's "tax profile unavailable: …"
+  — is config-controlled for the same reason a label is: it can embed the
+  `tax_profile_path` override or the `YNAB_TAX_PROFILE_FILE` value, and
+  `redact()` masks home-directory spellings only, never HTML metacharacters. It
+  reaches `section-12-tax-summary` as markup.
 
 Route **every one** of them through the one shared escaper before it enters a
 fragment, exactly as the universal protocol's §8 requires:
@@ -272,7 +290,12 @@ fragment, exactly as the universal protocol's §8 requires:
 ```bash
 safe="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" -- "$raw")"
 safe_label="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" -- "$label")"
+safe_tax_error="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" -- "$tax_error")"
 ```
+
+**No string interpolated into a fragment is outside this rule.** The only value
+that skips the escaper is `bash bin/persona.sh html-name`, which is pre-escaped
+at the source.
 
 The default (sanitize) mode is **self-bounding** — it byte-gates and truncates
 before any scan — so an unbounded config value is safe to hand it. Never reach for
