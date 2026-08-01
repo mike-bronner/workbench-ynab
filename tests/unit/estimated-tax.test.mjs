@@ -15,7 +15,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, chmodSync, existsSync, readFileSync, readdirSync, writeFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 
@@ -263,6 +263,20 @@ test('loadTracker returns a fresh tracker when absent; saveTracker creates the f
   assert.equal(q1.estimated_liability, est.quarterLiability);
   assert.equal(q1.remaining_due, est.quarterLiability); // no payments yet
   assert.ok(q1.computed_inputs.scheduleCNet === 30000);
+});
+
+test('saveTracker re-tightens a pre-existing loose data dir to 0700', () => {
+  // mkdirSync's `mode` is a no-op on an existing dir, so a data dir left 0755 by
+  // an earlier writer stays world-traversable unless saveTracker chmods it.
+  // Pre-create the leaf loose, then assert saveTracker tightens it — this fails if
+  // the unconditional chmodSync(dir, 0o700) is dropped, matching alerts.mjs /
+  // bin/audit-log.sh which chmod the dir on every write for this same data class.
+  const dir = join(TMP, 'preexisting-loose-tracker');
+  mkdirSync(dir, { recursive: true });
+  chmodSync(dir, 0o755);
+  const trackerPath = join(dir, 'tax-tracker.json');
+  saveTracker(emptyTracker(), { trackerPath, dataDir: TMP });
+  assert.equal(statSync(dir).mode & 0o777, 0o700);
 });
 
 test('upsertQuarterEstimate is idempotent: a second run overwrites the estimate but preserves payments', () => {

@@ -73,10 +73,11 @@ shopt -u patsub_replacement 2>/dev/null || true
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Shipped fallback output directory (prototype default, SKILL.md line 143),
-# notated to the user as ~/Documents/Claude/Reports. Resolved eagerly via $HOME
-# so it is already absolute before path handling.
-DEFAULT_OUTPUT_DIR="$HOME/Documents/Claude/Reports"
+# DEFAULT_OUTPUT_DIR (the shipped fallback report dir, ~/Documents/Claude/Reports)
+# is single-sourced in bin/path-expand.sh — the module both this writer and
+# bin/ynab-prune.sh source — so the two can't drift on where reports live. It is
+# in scope by the time it is used (out_dir default, below), after the source line
+# further down.
 DEFAULT_TEMPLATE="${REPO_ROOT}/assets/report/template.html"
 
 # Reuse the shared loader's `_cfg` (jq-read with `// empty`) so the config shape
@@ -91,84 +92,20 @@ DEFAULT_TEMPLATE="${REPO_ROOT}/assets/report/template.html"
 # shellcheck source=/dev/null
 . "${REPO_ROOT}/bin/html-escape.sh"
 
+# The ONE shared config-path resolver (`expand_path`). bin/ynab-prune.sh sources
+# the same module, so write and prune agree byte-for-byte on where reports live —
+# no second copy that could drift the way prune's tilde-only handling once did.
+# shellcheck source=/dev/null
+. "${REPO_ROOT}/bin/path-expand.sh"
+
 prog="report-writer.sh"
 err()   { printf '%s: %s\n' "$prog" "$1" >&2; }
 usage_err() { err "$1"; exit 2; }
 
-# expand_path <path> — resolve a leading ~ and $VAR / ${VAR} references WITHOUT
-# eval (no command/arithmetic substitution is ever executed — a config path is
-# data, not code), returning the FULLY resolved path or FAILING (non-zero, no
-# output) rather than a partially-resolved one. The tilde and the variable
-# substitution run in ONE fixpoint loop: each pass resolves a leading ~ AND the
-# first $VAR/${VAR}, then repeats until the string stops changing. Expansion is
-# therefore TRANSITIVE — a $VAR whose value itself contains $OTHER expands too —
-# and a leading ~ introduced by a variable's VALUE (not just one typed literally
-# at the front) is resolved as well, which a single pre-loop tilde check missed.
-#
-# A partially-resolved path is NEVER emitted. If the result still carries a
-# component-leading ~ (a `~user`, or a `~` a variable's value introduced mid-path)
-# or an unresolved $VAR after the loop settles — a self-referential
-# value like FOO='$FOO/x' that exhausts the guard, or any value the shell cannot
-# fully expand — the function returns 1 WITHOUT printing, and the caller turns
-# that into a usage_err (exit 2, no file). Silently writing to `$PWD/~/…` or a
-# path still holding a literal `$FOO` is exactly the falsely-successful report
-# this helper exists to prevent.
-expand_path() {
-  local p="$1" guard=0 before match name value
-  # Literal ~ in these case patterns is intentional: we MATCH an input that
-  # begins with a literal tilde and rewrite it to $HOME. (Not a tilde meant to
-  # shell-expand — that is exactly what this function exists to do by hand.)
-  # The guard caps iterations, and each pass resolves only the FIRST reference
-  # (single-occurrence replace, not global — see below), so a self-referential
-  # value grows only LINEARLY: it exhausts the cap in bounded time and is then
-  # refused by the post-loop guard, rather than looping — or ballooning — forever.
-  # shellcheck disable=SC2088
-  while [ "$guard" -lt 64 ]; do
-    before="$p"
-    # Resolve a leading ~ — including one a variable's value introduced on an
-    # earlier pass (the old single pre-loop check never saw those).
-    case "$p" in
-      "~")   p="$HOME" ;;
-      "~/"*) p="${HOME}/${p#\~/}" ;;
-    esac
-    # Resolve the first $NAME / ${NAME} reference (an unset name → empty).
-    if [[ "$p" =~ (\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)) ]]; then
-      match="${BASH_REMATCH[1]}"
-      name="${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}"
-      value="${!name:-}"
-      # Replace only the FIRST occurrence (single `/`, not global `//`). A global
-      # replace lets a value that names itself TWICE (FOO='$FOO$FOO') DOUBLE the
-      # occurrence count every pass — exponential growth that pegs CPU/memory and
-      # hangs long before the iteration cap, never reaching the refuse-loudly guard.
-      # One-at-a-time keeps a self-referential value LINEAR: it hits the cap and is
-      # refused. Repeated legitimate references still fully resolve over more passes.
-      p="${p/"$match"/$value}"
-    fi
-    # Nothing changed this pass → settled (fully resolved, or stuck on a
-    # self-reference the checks below will reject).
-    [ "$p" = "$before" ] && break
-    guard=$((guard + 1))
-  done
-  # Refuse a still-partial path rather than emit it. The tilde and $VAR guards are
-  # SYMMETRIC — each rejects its token wherever it survives the loop, not just at
-  # the front:
-  #   * A `~` that begins ANY path component (start-of-string OR right after a `/`)
-  #     is refused. The loop resolves a LEADING current-user `~`/`~/`; every other
-  #     tilde form is one this helper deliberately does NOT expand — a `~user`
-  #     (another user's home; expanding it needs eval or passwd parsing, both barred
-  #     by the no-eval design) or a `~` a variable's value shoved mid-string
-  #     (`prefix/$VAR` with VAR='~/x' → `prefix/~/x`). Emitting either would write to
-  #     a LITERAL `~mike`/`~` directory at exit 0 — the falsely-successful report
-  #     this helper exists to prevent. A `~` MID-component (a literal char in a name
-  #     like `file~backup`) is not a tilde form and is left untouched.
-  #   * A surviving $VAR/${VAR} anywhere (a self-referential value that exhausts the
-  #     guard, or any value the shell cannot expand) is likewise refused.
-  # The caller turns the non-zero return into a usage_err (exit 2, no file).
-  # shellcheck disable=SC2088
-  case "$p" in "~"* | *"/~"*) return 1 ;; esac
-  [[ "$p" =~ (\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*) ]] && return 1
-  printf '%s' "$p"
-}
+# expand_path is provided by the sourced bin/path-expand.sh — the shared config-
+# path resolver. It expands a leading ~ and $VAR/${VAR} references WITHOUT eval and
+# REFUSES (non-zero, no output) a path that does not fully resolve, so this writer
+# and bin/ynab-prune.sh resolve `.report.output_dir` identically.
 
 # html_escape is provided by the sourced bin/html-escape.sh — the shared, audited
 # escaper. It escapes the five HTML metacharacters (`&` first) so a scalar the
@@ -472,10 +409,29 @@ html="$assembled"
 # file in the destination dir, then mv it into place — an atomic swap, so a
 # failed same-day rerun (same tier+date → same path) can never destroy a prior
 # good report, and a partially-written file is never observable at the final path.
-mkdir -p "$out_dir" || { err "could not create output directory: $out_dir"; exit 1; }
+#
+# PRIVACY — the report is an UNENCRYPTED financial record (full transaction
+# history, balances, payees, tax detail), so it is created owner-only from the
+# first byte (issue #65, GAP-21):
+#   * The output directory is created under `umask 077`, so any component this
+#     writer makes is 0700 with no world-readable window — the caller's umask is
+#     untouched (the subshell scopes it). We do NOT force-chmod an ALREADY-EXISTING
+#     directory: the configured output_dir may be a location the user shares
+#     deliberately, and (like the .mjs state writers) we don't overreach on a
+#     parent we didn't create. The file itself is hardened unconditionally below.
+#   * The report file is 0600. `mktemp` already creates the temp file 0600 (so it
+#     is never world-readable, even briefly), and the explicit chmod ENFORCES that
+#     BEFORE the atomic swap — the file at its final path is never observable with
+#     looser permissions, and the guarantee no longer depends on mktemp's umask.
+if ! ( umask 077; mkdir -p "$out_dir" ); then err "could not create output directory: $out_dir"; exit 1; fi
 tmp="$(mktemp "${out_dir}/.report-writer.XXXXXX")" || { err "could not create a temp file in: $out_dir"; exit 1; }
 if ! printf '%s\n' "$html" > "$tmp"; then
   err "could not write report: $out_path"
+  rm -f "$tmp"
+  exit 1
+fi
+if ! chmod 600 "$tmp"; then
+  err "could not restrict report permissions: $out_path"
   rm -f "$tmp"
   exit 1
 fi

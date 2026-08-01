@@ -243,7 +243,28 @@ user, or fields added by a future schema) are preserved — never a blind
 overwrite:
 
 ```bash
-mkdir -p "$CONFIG_DIR"
+# The data dir holds config.json — your tax profile (filing status, rates,
+# thresholds) and business identity — and every other generated artifact, so it
+# is owner-only (mode 0700) from creation (issue #65, GAP-21). Setup is the FIRST
+# creator of this dir on a fresh install; later writers deliberately never widen a
+# parent they didn't create, so if setup left it 0755 the loose mode would stick.
+# `( umask 077; mkdir -p )` gives a FRESH dir 0700 with no world-readable window;
+# the explicit chmod additionally tightens a dir left 0755 by a pre-privacy
+# install (setup is idempotent and the recommended step after every update).
+# Both steps fail CLOSED like every gate in Step 4 (mirrors bin/ynab-migrate.sh's
+# `do_seed_config` guard, which returns 2, and bin/audit-log.sh): a swallowed
+# chmod failure on a pre-existing 0755 dir would print the ✅ banner while
+# $CONFIG_DIR — which also holds audit/, monitor-state.json, and
+# tax-tracker.json — stays world-traversable, letting other local users
+# enumerate every financial artifact's filename and mtime.
+if ! ( umask 077; mkdir -p "$CONFIG_DIR" ); then
+  echo "❌ Could not create the data directory $CONFIG_DIR — aborting setup." >&2
+  exit 1
+fi
+if ! chmod 700 "$CONFIG_DIR"; then
+  echo "❌ Could not restrict $CONFIG_DIR to owner-only (mode 0700) — aborting setup so no financial artifact lands in a world-traversable directory." >&2
+  exit 1
+fi
 
 # $NEW_JSON is the object Step 3 assembled (schema_version + timezone + budget +
 # optional business + tax_profile + persona + report). Merge it over the existing file so
@@ -266,11 +287,25 @@ if [ -f "$CONFIG_FILE" ]; then
   fi
 fi
 
+# Stage the merged config. The `( umask 077; … )` subshell is what makes the
+# .tmp owner-only AT CREATION TIME: the `>` redirect happens inside the subshell,
+# so the file is born 0600 and there is NO window in which it is world-readable
+# (issue #65 AC #2 — "no window where a file is world-readable before the
+# chmod... not a post-write chmod"). config.json holds your tax profile and
+# business identity, so that window would expose real financial detail. This is
+# the same creation-time pattern every other artifact class uses: `mktemp` (the
+# report writer), a tightened-umask subshell (bin/audit-log.sh), or an explicit
+# `mode:0o600` (the monitor-state and tax-tracker writers). The umask only
+# constrains a NEWLY created file, so the explicit `chmod 600` further down stays
+# as defense-in-depth — it re-tightens a .tmp left over from an earlier run at
+# looser permissions, which `>` truncates but never re-modes.
+#
 # Check the merge's exit code explicitly: on failure the > redirect has already
-# truncated the .tmp, so drop it instead of letting it near the real path.
-if ! printf '%s\n' "$EXISTING" \
+# truncated the .tmp, so drop it instead of letting it near the real path. The
+# subshell's exit status is the pipeline's, so `if !` still sees a jq failure.
+if ! ( umask 077; printf '%s\n' "$EXISTING" \
   | jq --argjson new "$NEW_JSON" '. * $new' \
-  > "$CONFIG_FILE.tmp"; then
+  > "$CONFIG_FILE.tmp" ); then
   rm -f "$CONFIG_FILE.tmp"
   echo "❌ jq merge failed — $CONFIG_FILE left untouched." >&2
   exit 1
@@ -302,6 +337,20 @@ if [ "$TOKEN_SCAN" -eq 0 ]; then
 elif [ "$TOKEN_SCAN" -ne 1 ]; then
   rm -f "$CONFIG_FILE.tmp"
   echo "❌ Could not verify the staged config is token-free (jq failed to scan it) — $CONFIG_FILE left untouched." >&2
+  exit 1
+fi
+
+# Defense-in-depth on the 0600 guarantee. The staging subshell above already
+# CREATED the .tmp owner-only via `umask 077`, so this chmod is a second layer,
+# not the only one: it re-tightens a .tmp that survived an interrupted run at
+# looser permissions (the `>` redirect truncates such a file but leaves its mode
+# alone), making 0600 hold no matter how the .tmp came to exist. The atomic mv
+# then carries that mode onto the real path, tightening an existing 0644 config
+# too. Fail CLOSED like every gate above: on a chmod failure drop the staged file
+# and leave the real config untouched rather than publish a world-readable one.
+if ! chmod 600 "$CONFIG_FILE.tmp"; then
+  rm -f "$CONFIG_FILE.tmp"
+  echo "❌ Could not restrict config.json to owner-only (mode 0600) — $CONFIG_FILE left untouched." >&2
   exit 1
 fi
 mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
@@ -606,6 +655,15 @@ Print a clean summary block:
   scheduled-task prompt with any changes — it is idempotent and the
   recommended refresh path.
 
+  🔒 Privacy — generated reports (~/Documents/Claude/Reports) and your data dir
+     (~/.claude/plugins/data/workbench-ynab-claude-workbench) are UNENCRYPTED
+     plaintext financial records — full transaction history, balances, and tax
+     detail. They are created owner-only (files mode 0600, directories mode
+     0700). ⚠️ ~/Documents/Claude may sync to iCloud Drive on macOS: keep these
+     on local, FileVault-encrypted storage and don't point .report.output_dir at
+     a shared or cloud-synced folder. Prune old reports with
+     /workbench-ynab:ynab-prune. Full inventory: SECURITY.md → Generated Artifacts.
+
   ⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.
 ═══════════════════════════════════════════
 ```
@@ -619,6 +677,11 @@ if Step 6 failed), the review line from Step 8 (`cron "<REV_CRON>"` when deploye
 Step 7 (`cron "<MON_CRON>"` when deployed, `disabled` when
 `schedules.monitor.enabled: false`, or `skipped` when the scheduled-tasks MCP was
 unreachable).
+
+Print the **🔒 Privacy notice verbatim** too — it identifies the report and data
+directories as unencrypted financial records and warns about the iCloud sync risk
+(issue #65). It is the user's first notice that these artifacts exist and where
+they live; do not abbreviate or drop it.
 
 ## Notes — idempotency & boundaries
 

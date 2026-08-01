@@ -176,7 +176,27 @@ plugin's out-of-repo config so the user doesn't re-enter it.
    ```bash
    CONFIG_DIR="$HOME/.claude/plugins/data/workbench-ynab-claude-workbench"
    CONFIG_FILE="$CONFIG_DIR/config.json"
-   mkdir -p "$CONFIG_DIR"
+   # The data dir holds config.json (tax profile + business identity) and other
+   # generated artifacts, so it is owner-only (mode 0700) from creation (issue
+   # #65). /ynab-migrate seeds config without requiring /setup first, so it may be
+   # the FIRST creator of this dir — harden at creation like commands/setup.md
+   # rather than a bare `mkdir -p` that leaves it world-traversable (0755).
+   #
+   # Both steps fail CLOSED, exactly as commands/setup.md does. The chmod half
+   # matters most here: seed-config below returns EARLY (success) when the config
+   # already exists, without touching the directory — so on a pre-privacy install
+   # (a 0755 dir with a config already in it) this chmod is the ONLY code that
+   # re-tightens it. Swallowing its failure would let the migration report success
+   # while $CONFIG_DIR — which also holds audit/, monitor-state.json, and
+   # tax-tracker.json — stays world-traversable to other local users.
+   if ! ( umask 077; mkdir -p "$CONFIG_DIR" ); then
+     echo "❌ Could not create the data directory $CONFIG_DIR — aborting migration." >&2
+     exit 1
+   fi
+   if ! chmod 700 "$CONFIG_DIR"; then
+     echo "❌ Could not restrict $CONFIG_DIR to owner-only (mode 0700) — aborting migration so no financial artifact lands in a world-traversable directory." >&2
+     exit 1
+   fi
    # Seed on first run via the tested helper: it copies the shipped example with
    # the placeholder `budgets` array, `default_budget`, and the example
    # `timezone` STRIPPED (so the real migrated values can land below —

@@ -287,11 +287,12 @@ Report output configuration.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `output_dir` | string | optional | Directory where generated HTML reports are written. Supports `~` and env-var expansion at use time. When absent or empty, the writer applies the shipped default `~/Documents/Claude/Reports` (see below). |
+| `output_dir` | string | optional | Directory where generated HTML reports are written. Supports `~` and env-var expansion at use time. A **relative** value resolves against the current working directory — identically for the report writer and `bin/ynab-prune.sh`, so prune always sweeps the directory the writer wrote to. Prefer an absolute path: a relative one makes the report location depend on where the review happened to run. When absent or empty, the writer applies the shipped default `~/Documents/Claude/Reports` (see below). |
 | `template_path` | string \| null | optional | Path to the frozen HTML report template. When `null`, the plugin's bundled template under `assets/` is used (frozen in Sprint 3, issue #42). |
+| `retention_days` | integer | optional | Maximum age, in days, a generated report is kept before [`bin/ynab-prune.sh`](../SECURITY.md#generated-artifacts) treats it as a pruning candidate. When absent, the shipped default of **30 days** applies. Reports are unencrypted plaintext financial records, so this bounds how much history accumulates on disk (issue #65). |
 
 ```json
-"report": { "output_dir": "~/Documents/Claude/Reports", "template_path": null }
+"report": { "output_dir": "~/Documents/Claude/Reports", "template_path": null, "retention_days": 30 }
 ```
 
 `output_dir` lives **outside the repo** (this whole `config.json` does — see the

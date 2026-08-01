@@ -84,14 +84,17 @@ report-writer.sh \
   template path (`--template` /
   `.report.template_path`) is resolved the same way. Any number of **trailing
   slashes** on the directory is tolerated. A path that resolves to **empty**
-  (e.g. an unset variable) — or to the bare filesystem **root `/`** — is
-  **refused**; the writer never writes to the filesystem root. A path that
-  **cannot be fully resolved** — a `$VAR` that survives expansion (a
-  self-referential value like `FOO='$FOO/x'`, or one the shell cannot expand),
-  or a `~` that still begins **any** path component (a `~user` form the helper
-  does not expand, or a `~` a variable's value shoved mid-path such as
-  `prefix/$VAR` with `VAR='~/x'` → `prefix/~/x`) — is also **refused** (usage
-  error, no file) rather than written to a wrong location. A **relative** resolved directory is made
+  (e.g. a variable **set** to an empty value) — or to the bare filesystem
+  **root `/`** — is **refused**; the writer never writes to the filesystem root.
+  A path that **cannot be fully resolved** — a reference to an **unset** variable
+  (a typo'd `$TYPO`, refused rather than swallowed to `""` — which, embedded in a
+  longer path like `$TYPO/reports`, would otherwise collapse to `/reports`), a
+  `$VAR` that survives expansion (a self-referential value like `FOO='$FOO/x'`,
+  or one the shell cannot expand), or a `~` that still begins **any** path
+  component (a `~user` form the helper does not expand, or a `~` a variable's
+  value shoved mid-path such as `prefix/$VAR` with `VAR='~/x'` → `prefix/~/x`) —
+  is also **refused** (usage error, no file) rather than written to a wrong
+  location. A **relative** resolved directory is made
   absolute against the current working directory, so the emitted path is always
   absolute.
 - The directory is created with **`mkdir -p`** before writing (no error if it

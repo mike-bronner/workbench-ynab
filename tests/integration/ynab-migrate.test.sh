@@ -377,6 +377,79 @@ test_seed_config_strips_placeholder_budgets() {
   rm -rf "$sb"
 }
 
+# /ynab-migrate can be the FIRST creator of the plugin data dir on the legacy-
+# prototype path (it seeds config without requiring /setup first), so it must
+# create that dir owner-only (0700) — a bare `mkdir -p` left it world-traversable
+# (0755) under a loose umask, leaking filenames + mtimes of every artifact to
+# other local users (issue #65). Seed into a data dir that does NOT exist yet, run
+# under a LOOSE umask so a regression to bare `mkdir -p` would land 0755, and
+# assert the created dir is exactly 0700.
+test_seed_config_creates_data_dir_owner_only() {
+  local sb dir cfg rc=0
+  sb="$(mktemp -d)"; dir="$sb/data"; cfg="$dir/config.json"   # $dir does not exist yet
+  ( umask 022; bash "$MIGRATE" seed-config "$cfg" ) >/dev/null || rc=$?
+  assert_eq 0 "$rc" "seed-config should exit 0 while creating the data dir"
+  assert_eq "$dir" "$(find "$dir" -maxdepth 0 -perm 700)" "the created data dir must be owner-only (0700)"
+  rm -rf "$sb"
+}
+
+# The guard has TWO halves and the mkdir half cannot cover the chmod half:
+# `mkdir -p` is a no-op on a directory that already exists, so when a pre-privacy
+# install left the data dir 0755 (and no config in it yet, or seeding would
+# early-return), the explicit `chmod 700` is the only thing that re-tightens it.
+#
+# Mutation-checked: dropping `|| ! chmod 700 "$dir"` from the guard condition
+# means the chmod never runs and the dir stays 0755, reddening the assertion.
+test_seed_config_retightens_pre_existing_loose_data_dir() {
+  local sb dir cfg rc=0
+  sb="$(mktemp -d)"; dir="$sb/data"; cfg="$dir/config.json"
+  mkdir -p "$dir"; chmod 755 "$dir"          # a dir left loose by a pre-privacy install
+  assert_eq "$dir" "$(find "$dir" -maxdepth 0 -perm 755)" "the data dir pre-exists 0755"
+  ( umask 022; bash "$MIGRATE" seed-config "$cfg" ) >/dev/null || rc=$?
+  assert_eq 0 "$rc" "seed-config should exit 0 while tightening a pre-existing data dir"
+  assert_eq "$dir" "$(find "$dir" -maxdepth 0 -perm 700)" \
+    "a pre-existing 0755 data dir is tightened to owner-only (0700)"
+  rm -rf "$sb"
+}
+
+# The data-dir creation above is a fail-CLOSED gate, added with the 0700
+# hardening — a new error branch the happy-path test never reaches. Force the
+# mkdir failure by planting a REGULAR FILE where the parent directory must be
+# (the technique tests/unit/report-writer.test.sh's `test_write_failure_gate`
+# already uses).
+#
+# Asserting only "rc==2 and nothing written" would be VACUOUS here, which is what
+# the round-5 review caught: if the guard is deleted entirely, execution rolls on
+# to `mv "$tmp" "$config"`, which fails anyway (the dir was never created) and
+# hits the function's generic `return 2` — same exit code, same absent config,
+# same missing *Seeded*. Both assertions below are therefore about WHICH branch
+# produced the failure, not merely that one did:
+#
+#   1. the guard's own message must be present  — deleting the guard removes it;
+#   2. the downstream `Failed to seed config` message must be ABSENT — it can
+#      only appear if execution reached `mv`, i.e. the guard printed but did not
+#      return.
+#
+# Mutation-checked, both mutations reproduced live: deleting the whole `if !
+# … fi` block reddens (1); deleting just the `return 2` while keeping the printf
+# reddens (2). With the guard intact, both pass.
+test_seed_config_fails_closed_when_data_dir_cannot_be_created() {
+  local sb blocker cfg out rc=0
+  sb="$(mktemp -d)"; blocker="$sb/not-a-dir"; cfg="$blocker/data/config.json"
+  : > "$blocker"                      # a regular file where a directory is needed
+  out="$(bash "$MIGRATE" seed-config "$cfg" 2>&1)" || rc=$?
+  assert_eq 2 "$rc" "seed-config must fail closed (exit 2) when the data dir can't be created"
+  assert_contains "$out" "Could not create the data directory owner-only" \
+    "the data-dir guard's own message identifies it as the branch that aborted"
+  case "$out" in
+    *"Failed to seed config"*)
+      fail "seed-config reached the mv/write stage after the data-dir guard failed — the guard must return BEFORE any write is attempted" ;;
+  esac
+  case "$out" in *Seeded*) fail "a failed data-dir creation must not report a successful seed" ;; esac
+  [ ! -e "$cfg" ] || fail "a config was seeded despite a failed data-dir creation"
+  rm -rf "$sb"
+}
+
 # The #31 baked-timezone regression: onboarding must NEVER produce a timezone the
 # user didn't choose. seed-config leaves no `.timezone`, and the ceremony's
 # timezone step (migrate-config '["timezone"]' …) lands the user's zone on the
