@@ -11,14 +11,19 @@
 #      type. The wrong verb has now been written into this table twice (once
 #      `list_accounts` for reconcile, once `get_month` for allocate) because the
 #      capability map is missing `get_account`/`get_category` (issue #247), so an
-#      author deferring to the map lands on a wrong-but-map-conformant name. Each
-#      row is checked against the wiring `assets/test/e2e-write-back.test.js`
-#      actually drives through the real executor.
+#      author deferring to the map lands on a wrong-but-map-conformant name.
+#      EVERY row is checked against the wiring
+#      `assets/test/e2e-write-back.test.js` actually drives through the real
+#      executor, and the row count is itself asserted — a row added to the table
+#      without a matching tuple below fails the suite rather than drifting
+#      unchecked, which is how two rows went uncovered before.
 #
 # Assertions about the document are scoped to the row or callout they name, never
 # a whole-file grep. Every verb in the tie-breaker table is also discussed in the
 # prose below it, so an unscoped search stays green through a straight cell swap —
-# the very drift class 1 exists to catch.
+# the very drift class 1 exists to catch. The e2e side is scoped the same way, to
+# the one `readLiveState` branch that serves the row: `get_transaction` is wired
+# twice in that function alone, so a whole-file match cannot tell the two apart.
 #   2. Fail-closed premises. The document's reconcile vacuity argument rests on
 #      `reconcileOp.before`/`.after` having no `required` array in the schema, and
 #      on `isReconcileStale` existing to delegate to. Both are read from source.
@@ -41,6 +46,7 @@ DOC="docs/write-back-idempotency.md"
 E2E="assets/test/e2e-write-back.test.js"
 SCHEMA="assets/changeset-schema.json"
 RECONCILE="assets/reconcile-handler.js"
+RECONCILE_SKILL="skills/reconcile-write-path.md"
 AUDIT="bin/audit-log.sh"
 
 PASS=0
@@ -70,17 +76,24 @@ else
   exit 1
 fi
 
-# --- 1. tie-breaker verbs: doc ROW  <->  real e2e wiring ---------------------
-# Each triple is (verb, the table row that must name it, op label). The verb must
-# appear BOTH in that row of the doc's tie-breaker table AND in the wiring the e2e
-# harness drives through the real applyChangeset. Checking only the doc would pass
-# on a fabricated name; checking only the code would pass while the doc named
-# something else entirely.
+# --- 1. tie-breaker verbs: doc ROW  <->  real e2e wiring BRANCH ---------------
+# Each tuple is (verb, the table row that must name it, op label, the e2e
+# `readLiveState` branch that serves it). The verb must appear BOTH in that row of
+# the doc's tie-breaker table AND in that branch of the wiring the e2e harness
+# drives through the real applyChangeset. Checking only the doc would pass on a
+# fabricated name; checking only the code would pass while the doc named something
+# else entirely.
 #
-# The doc side is scoped to a single table ROW, never the whole document. Every
-# verb in this table is also discussed in the prose under it, so a whole-document
-# grep stays green even when two table cells are swapped — and a swapped cell is
-# the exact drift this section exists to catch.
+# Both sides are scoped. The doc side is one table ROW, never the whole document:
+# every verb in this table is also discussed in the prose under it, so a
+# whole-document grep stays green even when two table cells are swapped — the
+# exact drift this section exists to catch. The e2e side is one BRANCH of
+# `readLiveState`, never the whole file: `get_transaction` is wired twice in that
+# one function (the transaction branch and, per listed id, the reconcile branch),
+# so a whole-file match cannot tell a row's own wiring from a sibling's.
+#
+# There is one tuple per row of the table, all five. A row with no tuple is a row
+# that drifts silently, which is how two of them went unchecked before.
 echo "  -- live-read verbs cross-checked against $E2E"
 
 # The tie-breaker table alone: its header row through the blank line ending it.
@@ -93,23 +106,78 @@ fi
 # row <first-cell> — the one table row whose leading cell is <first-cell>.
 row() { printf '%s\n' "$table" | grep -F -- "| $1 |"; }
 
-while IFS='@' read -r verb rowcell optype; do
+# e2e_branch <label> — the lines of e2e's `readLiveState` that serve <label>.
+# Branch boundaries are the op.type guards themselves, so the cut tracks the
+# wiring rather than line numbers. `categorize` and `delete_duplicate` genuinely
+# share one branch in the source; both map to `transaction`.
+e2e_branch() {
+  awk -v want="$1" '
+    /const readLiveState/ { fn = 1 }
+    /const applyOp/       { fn = 0 }
+    !fn { next }
+    /op\.type === .categorize./    { b = "transaction" }
+    /op\.type === .allocate./      { b = "allocate" }
+    /^[[:space:]]*\/\/ reconcile:/ { b = "reconcile" }
+    b == want { print }
+  ' "$REPO_ROOT/$E2E"
+}
+
+covered=0
+while IFS='@' read -r verb rowcell optype branch; do
   [ -n "$verb" ] || continue
+  covered=$((covered + 1))
   this_row="$(row "$rowcell")"
+  wiring="$(e2e_branch "$branch")"
   if [ -z "$this_row" ]; then
     no "the tie-breaker table has a row for $optype"
   elif ! in_text "$this_row" "$verb"; then
     no "the $optype table row names \`$verb\` as its tie-breaker verb"
-  elif ! has "$E2E" "TOOLS.$verb"; then
-    no "e2e wiring really resolves \`$verb\` (the $optype row claims it)"
+  elif [ -z "$wiring" ]; then
+    no "the e2e \`readLiveState\` $branch branch is locatable"
+  elif ! in_text "$wiring" "TOOLS.$verb"; then
+    no "the e2e $branch branch really resolves \`$verb\` (the $optype row claims it)"
   else
-    ok "$optype tie-breaker \`$verb\` — named in ITS OWN row AND wired in e2e"
+    ok "$optype tie-breaker \`$verb\` — named in ITS OWN row AND wired in the e2e $branch branch"
   fi
 done <<'PAIRS'
-get_transaction@`categorize`@categorize
-get_category@`allocate`@allocate
-get_account@`reconcile` (reconcile account)@reconcile-account
+get_transaction@`categorize`@categorize@transaction
+get_category@`allocate`@allocate@allocate
+get_transaction@`delete_duplicate`@delete_duplicate@transaction
+get_transaction@`reconcile` (mark cleared)@reconcile-mark-cleared@reconcile
+get_account@`reconcile` (reconcile account)@reconcile-account@reconcile
 PAIRS
+
+# Every row above is checked — but only the rows that HAVE a tuple. Twice now the
+# table has held more rows than the loop covered, and the suite stayed green both
+# times because nothing compared the two counts. So compare them: a row added to
+# the doc without a tuple here fails immediately, instead of drifting unchecked
+# until someone re-reads the table by hand.
+table_rows="$(printf '%s\n' "$table" | grep -c '^| `')"
+if [ "$table_rows" -eq "$covered" ]; then
+  ok "every tie-breaker row has a cross-check ($covered of $table_rows)"
+else
+  no "every tie-breaker row has a cross-check — table has $table_rows, PAIRS covers $covered"
+fi
+
+# The mark-cleared row names a SECOND verb, `list_transactions`. The e2e harness
+# never drives it — it reads each listed id individually — so it has no branch to
+# cross-check and cannot join the loop above without breaking that loop's e2e
+# invariant. Its source of truth is the write path's own readLiveState spec, so
+# pin it there, scoped to the `mark_cleared` bullet that names it.
+# shellcheck disable=SC2016  # a literal table cell: the backticks are markdown
+                            # code fences in the document, not a command to run.
+mc_row="$(row '`reconcile` (mark cleared)')"
+mc_spec="$(awk '/^  - `mark_cleared`/{f=1;print;next} f&&(/^  - /||/^[^ ]/){exit} f' \
+  "$REPO_ROOT/$RECONCILE_SKILL")"
+if [ -z "$mc_row" ] || ! in_text "$mc_row" "list_transactions"; then
+  no "the mark-cleared row names \`list_transactions\` as its second read verb"
+elif [ -z "$mc_spec" ]; then
+  no "the \`mark_cleared\` readLiveState spec is locatable in $RECONCILE_SKILL"
+elif ! in_text "$mc_spec" "list_transactions"; then
+  no "the write path's \`mark_cleared\` read really names \`list_transactions\`"
+else
+  ok "mark-cleared second verb \`list_transactions\` — in ITS OWN row AND in the write path's \`mark_cleared\` read"
+fi
 
 # `get_month` is the specific wrong answer for allocate (it appears on the
 # allocate path, but only in the advisory dry-run preview, never as the drift
