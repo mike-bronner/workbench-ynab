@@ -211,6 +211,27 @@ You can also run a file directly — `bash tests/unit/x.test.sh` or
 `node --test tests/unit/x.test.mjs` — but going through `scripts/test.sh` keeps
 discovery/exit semantics identical to CI.
 
+## How to: put a new test in the bash-3.2 lane
+
+`scripts/test.sh` auto-discovers every test file, so a new test gates the
+`test` job with no edit. That job runs on `ubuntu-latest` — Linux bash 5.x and
+GNU tooling. If your test covers a script that is 3.2-compatible by design, or
+that depends on BSD `find` / `stat` / `grep` behaviour, it also needs the macOS
+`bash-3-2` lane, and that lane runs an **explicit list**, not auto-discovery.
+
+Declare membership in the test file's own header:
+
+```bash
+# bash-3.2-lane: <why this file needs a real bash 3.2 / BSD runner>
+```
+
+then add the file to the `bash-3-2` job's `run:` step in
+`.github/workflows/ci.yml`, to the job table in `docs/ci.md`, and to that
+document's local-repro command. `tests/unit/bash-3-2-lane.test.sh` fails the
+build if the marker set and the lane's list disagree, so writing the marker and
+forgetting the rest is caught in your own PR rather than leaving the file
+silently Linux-only. Full rationale: [docs/ci.md](ci.md).
+
 ## How to: add a new fixture
 
 1. Drop a YNAB-shaped JSON file under `tests/fixtures/` (or `tests/fixtures/hostile/`

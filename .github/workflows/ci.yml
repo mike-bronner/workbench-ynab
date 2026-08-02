@@ -11,9 +11,10 @@ name: ci
 #                       ubuntu-latest, on BOTH the pinned Node floor
 #                       (vendor/ynab-mcp/NODE_VERSION, issue #3) and current
 #                       LTS, including the offline-boot proof (#14)
-#   * bash-3-2        — the persona footer-escaping tests under macOS's
-#                       bash 3.2, mechanically enforcing the dual-bash
-#                       guarantee (issue #126 AC-3)
+#   * bash-3-2        — every suite carrying the `# bash-3.2-lane:` marker,
+#                       run under macOS's bash 3.2, mechanically enforcing
+#                       the dual-bash guarantee (issue #126 AC-3) and the
+#                       BSD half of the cross-platform tool claims (#231)
 #   * assets-tests    — the assets/ Node integration suites (needs npm ci)
 #   * docs-links      — offline relative-link + fragment check over
 #                       assets/**/*.md, docs/**/*.md (recursive), and the
@@ -102,9 +103,13 @@ jobs:
 
   # The dual-bash guarantee (issue #126 AC-3): bin/persona.sh's footer escaping
   # must be correct on macOS's default bash 3.2.x AND bash ≥5.0. The `test` job
-  # covers modern bash; this lane runs the escaping-relevant suites under the
-  # macOS runner's bash 3.2 so an inverse-class regression (green on 5.x, broken
-  # on 3.2) fails the PR mechanically instead of relying on manual local runs.
+  # covers modern bash; this lane runs the 3.2-targeted suites under the macOS
+  # runner's bash 3.2 so an inverse-class regression (green on 5.x, broken on
+  # 3.2) fails the PR mechanically instead of relying on manual local runs.
+  #
+  # This is also the repo's ONLY macOS/BSD lane, so it carries a second job:
+  # proving the BSD half of any "works on GNU and BSD alike" tool claim — which
+  # is why the secret-scan self-test runs here (issue #231).
   bash-3-2:
     runs-on: macos-latest
     steps:
@@ -125,17 +130,19 @@ jobs:
               ;;
           esac
 
-      # tests/unit/watchdog.test.sh joins this lane because the shared watchdog's
-      # process-group kill (issue #188) is job-control behaviour, and job control
-      # differs across bash majors — its TIMEOUT path must be proven on 3.2, not
-      # just on the ubuntu runner's bash 5.x. Since issue #251 the other three
-      # files each drive their OWN call site down that same timeout path
-      # (render_tmpl_timed / run_voice_timed / escape_timed / the report-writer
-      # output-dir guard), so they carry the identical job-control dependency and
-      # belong here too — which is why tests/unit/report-writer.test.sh joined the
-      # lane. They also still exercise the helper's pass path.
-      - name: Run the persona footer-escaping tests under bash 3.2
-        run: bash scripts/test.sh tests/persona-loader.test.sh tests/unit/html-escape.test.sh tests/unit/watchdog.test.sh tests/unit/report-writer.test.sh
+      # MEMBERSHIP IS A MARKER CONVENTION, NOT A JUDGEMENT CALL (issue #231).
+      # The list below stays an explicit, closed enumeration — the full suite is
+      # not known to be 3.2-safe end to end, so blanket auto-discovery would
+      # bring unrelated false failures onto the macOS runner. But a hand-kept
+      # enumeration silently omits every NEW 3.2/BSD-relevant test file by
+      # default, which is exactly how ynab-prune/path-expand and the secret-scan
+      # suite ended up Linux-only. So each member file carries a
+      # `# bash-3.2-lane: <reason>` marker in its header, and
+      # tests/unit/bash-3-2-lane.test.sh fails the build when the marker set and
+      # this list disagree in either direction. To add a file: write the marker,
+      # then add it here. To remove one: delete both. See docs/ci.md.
+      - name: Run the bash-3.2-targeted suites under bash 3.2
+        run: bash scripts/test.sh tests/persona-loader.test.sh tests/secret-scan.test.sh tests/unit/html-escape.test.sh tests/unit/report-writer.test.sh tests/unit/watchdog.test.sh tests/unit/ynab-prune.test.sh
 
   # The assets/ change-set integration suites (M4) exercise the real apply
   # executor and the Ajv-backed validator end to end (assets/test/*.test.js),

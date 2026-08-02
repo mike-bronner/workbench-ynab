@@ -8,6 +8,11 @@
 # ends with `run_tests`. scripts/test.sh auto-discovers it via the `*.test.sh`
 # glob.
 #
+# bash-3.2-lane: bin/ynab-prune.sh and bin/path-expand.sh both declare themselves
+# bash 3.2 compatible and carry 3.2-only constructs (a manual NUL-delimited read
+# loop in place of mapfile, the self-referential-$VAR fixpoint loop) plus BSD
+# `find`/`stat` branches that only macOS exercises (issue #65).
+#
 # Seams used:
 #   * --output-dir / --days flags — point prune at a sandbox dir and threshold.
 #   * YNAB_CONFIG_FILE — the loader's documented test seam, so the

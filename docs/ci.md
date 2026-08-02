@@ -39,7 +39,7 @@ Workflow hygiene, common to all jobs:
 |---|---|---|---|
 | `lint` | ubuntu | `shellcheck` at **default severity** over every repo-authored `.sh` (`bin/`, `hooks/`, `scripts/`, `tests/` — helpers included), then `jq empty` over every git-tracked `.json` (an empty file list fails closed — the gate never reports success having validated nothing) | A script has a shellcheck finding (any severity fails), a JSON file doesn't parse, or `git ls-files` found no JSON at all |
 | `test` | ubuntu (Node floor + `lts/*` matrix) | First the swap-ready tool-name guard (`bin/check-tool-name-sources.sh`, issues #87/#131), then the M2 read-only guard (`scripts/check-readonly.sh`, issue #39 — no callable YNAB write tool and no bare `mcp__ynab__` namespace on any review surface) as explicit fail-fast steps, then the full bash + Node suite via `scripts/test.sh`, including the offline-boot proof (#14) against `node vendor/ynab-mcp/index.cjs` | A concrete YNAB tool name appeared outside the documented allowlist, a read-only review surface can call a write tool (or uses a bare namespace), or a test failed — the runner prints which file; the offline-boot proof failing usually means a bad re-vendor |
-| `bash-3-2` | macOS | The persona footer-escaping suites (`tests/persona-loader.test.sh`, `tests/unit/html-escape.test.sh`), the shared watchdog (`tests/unit/watchdog.test.sh`), and the report writer (`tests/unit/report-writer.test.sh`) under the runner's **bash 3.2** | The escaping regressed on macOS's default bash while staying green on bash ≥5 (issue #126 AC-3); the watchdog's process-group kill is job-control behaviour, which differs across bash majors (issue #188), and since issue #251 all four files drive their own call site down that timeout path — or the runner image no longer ships bash 3.2 on PATH (the lane fails loudly rather than test the wrong interpreter) |
+| `bash-3-2` | macOS | Every suite carrying the `# bash-3.2-lane:` marker, under the runner's **bash 3.2**: the persona footer-escaping suites (`tests/persona-loader.test.sh`, `tests/unit/html-escape.test.sh`), the shared watchdog (`tests/unit/watchdog.test.sh`), the report writer (`tests/unit/report-writer.test.sh`), the report pruner and path expander (`tests/unit/ynab-prune.test.sh`), and the secret-scan guard (`tests/secret-scan.test.sh`) | The escaping regressed on macOS's default bash while staying green on bash ≥5 (issue #126 AC-3); the watchdog's process-group kill is job-control behaviour, which differs across bash majors (issue #188), and since issue #251 the escaping/report files drive their own call site down that timeout path; a 3.2-only construct or a BSD `find`/`stat`/`grep` branch broke (issues #65, #231) — or the runner image no longer ships bash 3.2 on PATH (the lane fails loudly rather than test the wrong interpreter) |
 | `assets-tests` | ubuntu | `npm --prefix assets ci && npm --prefix assets test` — the `assets/test/*.test.js` integration suites (apply executor, write-safety guardrail, handlers) against real installed deps | An assets integration test failed, or `package-lock.json` no longer reproduces an install |
 | `docs-links` | ubuntu | `lychee --offline --include-fragments` over `assets/**/*.md`, `docs/**/*.md`, and the root `README.md` — recursive, so nested docs (`assets/tax/README.md`, `assets/persona/*.md`, `docs/decisions/*.md`, …) are covered alongside the top-level files, and the README's links to the docs/ set are checked too | A relative link or `#fragment` cross-reference anywhere in the docs tree or the README points at nothing |
 
@@ -54,6 +54,40 @@ uses **stubbing only**: every launcher/boot test provides `YNAB_ACCESS_TOKEN`
 `ubuntu-latest` with no Keychain anywhere. The one macOS job (`bash-3-2`)
 exists for the bash *version*, not for the Keychain — it never touches
 `security(1)` either.
+
+**`bash-3-2` membership is a marker convention, enforced by a test.** The lane
+runs an **explicit, closed file list**, not `scripts/test.sh` auto-discovery:
+the full suite is not known to be 3.2-safe end to end, so blanket discovery
+would drag unrelated false failures onto the macOS runner. But a hand-kept
+enumeration omits every *new* 3.2/BSD-relevant test file by default, which is
+how `bin/ynab-prune.sh`, `bin/path-expand.sh`, and the secret-scan guard stayed
+Linux-only after they landed (issue #231). So membership is declared at the file
+that needs it:
+
+1. The test file carries a `# bash-3.2-lane: <reason>` marker line in its header
+   comment, stating *why* it needs a real bash 3.2 / BSD runner.
+2. The same file is listed in the `bash-3-2` job's `run:` step in
+   `.github/workflows/ci.yml`, and in the table row and local-repro command
+   above.
+3. [`tests/unit/bash-3-2-lane.test.sh`](../tests/unit/bash-3-2-lane.test.sh)
+   fails the build whenever those disagree in either direction — a marked file
+   missing from the lane, or a lane file with no marker.
+
+So writing the marker is what puts a file in the lane: forget step 2 and CI
+tells you, in the PR that adds the file, instead of the file silently never
+running on macOS. Removing a file from the lane means deleting both its marker
+and its list entries — a deliberate act, visible in the diff.
+
+**`secret-scan.yml` stays `ubuntu-latest`; the BSD half runs in `bash-3-2`.**
+`bin/secret-scan.sh`'s rules are grep patterns whose comments claim they hold
+"on GNU and BSD grep alike", so that claim needs BSD execution in CI (issue
+#231). Adding a macOS leg to `secret-scan.yml` would spend a 10x-billed runner
+re-scanning the same tree for the same rules, so instead
+`tests/secret-scan.test.sh` carries the lane marker and drives every rule
+through synthetic fixtures under BSD grep on the macOS runner the repo already
+pays for. What stays ubuntu-only is that workflow's scan of the **real tree** —
+a data check over repo content, not a portability check over grep, and its
+result does not vary by platform.
 
 **Lint scope excludes `vendor/`.** The gate lints code this repo authors.
 `vendor/ynab-mcp/` holds the vendored third-party bundle; its integrity is
@@ -97,8 +131,11 @@ bash bin/check-tool-name-sources.sh
 bash scripts/check-readonly.sh
 bash scripts/test.sh
 
-# bash-3-2 — on any Mac, /bin/bash IS bash 3.2
-/bin/bash scripts/test.sh tests/persona-loader.test.sh tests/unit/html-escape.test.sh tests/unit/watchdog.test.sh tests/unit/report-writer.test.sh
+# bash-3-2 — on any Mac, /bin/bash IS bash 3.2. scripts/test.sh launches each
+# test file via PATH `bash`, so putting /bin first is what actually pins 3.2 —
+# invoking the runner as `/bin/bash scripts/test.sh` does not (the test files
+# would still run under whatever `bash` your PATH resolves, e.g. Homebrew's 5.x).
+PATH="/bin:$PATH" bash scripts/test.sh tests/persona-loader.test.sh tests/secret-scan.test.sh tests/unit/html-escape.test.sh tests/unit/report-writer.test.sh tests/unit/watchdog.test.sh tests/unit/ynab-prune.test.sh
 
 # assets-tests
 npm --prefix assets ci && npm --prefix assets test
