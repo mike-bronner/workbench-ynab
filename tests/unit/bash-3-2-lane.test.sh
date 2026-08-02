@@ -100,6 +100,15 @@ doc_table_row() {
   grep -F '| `bash-3-2` |' "$CI_DOC" || true
 }
 
+# require_nonempty <list> <label> — every check below iterates a list extracted
+# from a file. An extraction that silently yields nothing would make its loop
+# body run zero times and the test pass having asserted nothing, so each looping
+# test states its non-emptiness precondition rather than relying on a sibling
+# test to notice.
+require_nonempty() {
+  [ -n "$1" ] || fail "$2 came back empty — the check below would assert nothing"
+}
+
 # The files the acceptance criteria and the issues behind them name explicitly.
 # Pinned BY NAME as well as by set-equality below: set-equality alone is
 # satisfied by dropping a file from the marker AND the lane at the same time,
@@ -130,6 +139,7 @@ test_lane_list_is_explicit_not_auto_discovery() {
 
 test_every_lane_file_exists_and_is_a_bash_test() {
   local f
+  require_nonempty "$(lane_files)" "the bash-3-2 lane's file list"
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     assert_file_exists "$REPO_ROOT/$f"
@@ -154,6 +164,7 @@ test_marked_files_and_lane_list_agree() {
 
 test_every_marker_states_a_reason() {
   local f line
+  require_nonempty "$(marked_files)" "the set of files carrying the lane marker"
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     line="$(grep -E -- "$MARKER_RE" "$REPO_ROOT/$f" | head -1)"
@@ -203,6 +214,7 @@ test_doc_table_row_names_every_lane_file() {
   local row f
   row="$(doc_table_row)"
   [ -n "$row" ] || fail "docs/ci.md's job table has no bash-3-2 row"
+  require_nonempty "$(lane_files)" "the bash-3-2 lane's file list"
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     assert_contains "$row" "$f" \
