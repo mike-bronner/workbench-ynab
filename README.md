@@ -186,6 +186,7 @@ This path is deliberately outside the installed plugin tree, so **plugin updates
 
 - **⚠️ `~/Documents` may sync to iCloud Drive.** With macOS Desktop & Documents syncing enabled, your financial reports can be silently uploaded to iCloud. Keep them on local, disk-encrypted storage (enable **FileVault**) and don't point `.report.output_dir` at a shared or cloud-synced folder unless you intend those records to travel there.
 - **Prune old reports.** Reports accumulate one file per run. [`bin/ynab-prune.sh`](bin/ynab-prune.sh) removes reports older than a retention threshold (default 30 days, dry-run by default). See the [**Generated Artifacts**](SECURITY.md#generated-artifacts) section of `SECURITY.md` for the full artifact inventory, locations, and retention policy.
+- **Removing the plugin leaves all of this behind.** Uninstalling `workbench-ynab` does not remove the scheduled tasks, the Keychain token, the `settings.json` pre-approvals, or the data directory. Run `/workbench-ynab:uninstall` **before** you remove the plugin — it tears down each one, asks before touching your financial records, and keeps them by default. If the plugin is already gone, follow the by-hand checklist in [`docs/uninstall.md`](docs/uninstall.md). Either way, **revoke the token at YNAB** — deleting the Keychain entry does not revoke server-side access.
 
 ## Commands
 
@@ -202,6 +203,7 @@ Every command is namespaced under `/workbench-ynab:`. The plugin is mid-build; t
 | `/workbench-ynab:ynab-apply` | Review a proposed change-set and, on explicit approval, apply the ledger-only writes (dry-run by default). | Sprint 4 |
 | `/workbench-ynab:ynab-migrate` | Retire the legacy hand-run prototype: the old Desktop connector, its token, and the prototype scheduled tasks/directories. | Sprint 5 |
 | `/workbench-ynab:ynab-prune` | Prune old generated reports under the retention policy — previews by default, deletes only with `--apply`. Keeps unencrypted financial history from accumulating unbounded. | Sprint 5 |
+| `/workbench-ynab:uninstall` | Tear down every piece of system state setup created — the two scheduled tasks, the Keychain token, the `settings.json` pre-approvals, and (only on explicit confirmation) the plaintext data directory. Idempotent. By-hand equivalent: [`docs/uninstall.md`](docs/uninstall.md). | Sprint 5 |
 | `/workbench-ynab:ynab-monitor` | Run one proactive between-run monitoring pass: advance the monitor state store from fresh YNAB data, run the four alert detectors (overdrawn, large/unusual transaction, budget overrun, bill due), dispatch any new finding, and exit silently when nothing is alert-worthy. | Sprint 6 (v-Next) |
 | `/workbench-ynab:ynab-portfolio` | Run the cross-budget portfolio rollup: one consolidated report across every configured budget — combined net worth, aggregate income vs spending, cross-budget Ready-to-Assign, a unified health score, and a single YTD tax picture across the business-tagged budgets. Read-only. See [`docs/portfolio-rollup.md`](docs/portfolio-rollup.md). | Sprint 6 (v-Next) |
 
