@@ -152,7 +152,10 @@ The single delete tool is resolved from the guardrail's exported `ALLOWED_TOOLS`
 by suffix (`DELETE_TOOL`, via `resolveDeleteTool` — which asserts **exactly one**
 match and throws fail-closed on zero or several, issue #151, so a future
 allow-list entry sharing the suffix can never silently receive irreversible
-deletes), and `buildToolMap()` supplies `{ delete_duplicate:
+deletes; since issue #216 that assertion is the shared `resolveUniqueTool` in
+`assets/resolve-tool.js`, which every write path resolves through, and
+`resolveDeleteTool` is the thin wrapper pinning this path's diagnostics onto it),
+and `buildToolMap()` supplies `{ delete_duplicate:
 DELETE_TOOL }` as the executor's registration point — **no literal
 `mcp__plugin_workbench-ynab_ynab__*` name lives in the module** (the issue #87
 guard stays green). The read tools the runtime wires into the ports — the

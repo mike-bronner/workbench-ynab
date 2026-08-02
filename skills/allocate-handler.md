@@ -66,6 +66,14 @@ of truth). The handler resolves `update_category` from the guardrail's allow-lis
 by suffix and takes `get_month` as the injected `getMonth` read port — so **no
 literal `mcp__plugin_workbench-ynab_ynab__*` name appears in the handler**.
 
+That resolution is **fail-closed on ambiguity** (issue #216): `applyToolName()`
+goes through the shared `resolveUniqueTool` (`assets/resolve-tool.js`, the same
+resolver the categorize and delete paths use), which asserts the `_update_category`
+suffix matches **exactly one** allow-list entry and **throws** on zero or several,
+naming every colliding tool. The earlier `.find()` spelling only ever caught the
+zero-match case — a future allow-list entry sharing the suffix would have been
+picked by array order, silently sending budget writes to the wrong tool.
+
 ## Milliunits and negative budgeted
 
 Every monetary value is a **raw integer milliunit**, passed to the YNAB API
