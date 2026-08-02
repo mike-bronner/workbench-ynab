@@ -18,15 +18,28 @@
 #      without a matching tuple below fails the suite rather than drifting
 #      unchecked, which is how two rows went uncovered before.
 #
-# Assertions about the document are scoped to the row or callout they name, never
-# a whole-file grep. Every verb in the tie-breaker table is also discussed in the
-# prose below it, so an unscoped search stays green through a straight cell swap —
-# the very drift class 1 exists to catch. The e2e side is scoped the same way, to
-# the one `readLiveState` branch that serves the row: `get_transaction` is wired
-# twice in that function alone, so a whole-file match cannot tell the two apart.
+# Assertions about the document are scoped to the row, bullet or callout they
+# name, never a whole-file grep. Every verb in the tie-breaker table is also
+# discussed in the prose below it, so an unscoped search stays green through a
+# straight cell swap — the very drift class 1 exists to catch. The e2e side is
+# scoped the same way, to the one `readLiveState` branch that serves the row:
+# `get_transaction` is wired twice in that function alone, so a whole-file match
+# cannot tell the two apart.
+#
+# Scoping also means EXCLUDING THE HEADING when a section is extracted. A heading
+# that restates its own section's topic word ("…live YNAB unconfirmable") hands
+# that word to any assertion searching the section, which then passes even when
+# the body says the opposite. Where an assertion pins a specific outcome, it is
+# scoped to that bullet, not to the section containing it.
 #   2. Fail-closed premises. The document's reconcile vacuity argument rests on
 #      `reconcileOp.before`/`.after` having no `required` array in the schema, and
 #      on `isReconcileStale` existing to delegate to. Both are read from source.
+#      Delegation is checked PER SUB-ACTION, not per op type: `isReconcileStale`
+#      guards `mark_cleared` and does NOT guard `reconcile_account`, so a doc
+#      claiming "production solved this" for `reconcile` as a whole would send an
+#      implementer to a guard half the op type never had. The doc's #282 gap
+#      marker is pinned to that branch in both directions, like the fsync marker
+#      in class 3.
 #   3. The fsync gap. The document marks fsync-per-record a requirement that is
 #      not implemented (issue #275). That marker must come down when the code
 #      lands, so the test asserts the gap is REAL — if `bin/audit-log.sh` gains an
@@ -275,6 +288,59 @@ else
   no "isReconcileStale still fails closed on a missing \`before.cleared\` baseline"
 fi
 
+# That guard is `mark_cleared`'s ALONE. The doc used to claim "production already
+# solved this" for the `reconcile` op type as a whole; it is only true of one of
+# the two sub-actions, and a design instructing resume to delegate a guard that
+# half the op type never had would silently skip a real money op. The doc's claim
+# is now sub-action-scoped and flags `reconcile_account` as an open gap (#282).
+# Pin BOTH directions against the real branch, so the doc must follow the code
+# whichever way it moves — the same marker-rot check section 4 runs for fsync:
+#   guard still absent → the doc must still flag the gap and cite #282
+#   guard landed       → the doc's "not yet wired" marker is stale, so fail
+recon_fn="$(awk '/^function isReconcileStale\(/{f=1} f{print} f&&/^}/{exit}' \
+  "$REPO_ROOT/$RECONCILE")"
+ra_branch="$(printf '%s\n' "$recon_fn" \
+  | awk '/RECONCILE_ACCOUNT/{f=1} f{print} f&&/^  }/{exit}')"
+# The branch's executable body: drop the `if (…) {` line, the closing brace, and
+# surrounding whitespace. Bare delegation === no baseline guard.
+ra_body="$(printf '%s\n' "$ra_branch" \
+  | sed -e '1d' -e '$d' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$')"
+
+# Scoped to the doc's own `reconcile_account` bullet, never the whole file: the
+# phrase "Designed, not yet wired" is also used for the GAP-10 freshness gate, so
+# a whole-document grep would stay green with this bullet's marker deleted.
+ra_doc="$(awk '
+  substr($0, 1, 2) == "- " && index($0, "reconcile_account") { f = 1; print; next }
+  f && (substr($0, 1, 2) == "- " || substr($0, 1, 1) == "#") { exit }
+  f { print }
+' "$REPO_ROOT/$DOC" | tr '\n' ' ' | tr -s ' ')"
+
+if [ -z "$recon_fn" ] || [ -z "$ra_branch" ]; then
+  no "isReconcileStale's \`reconcile_account\` branch is locatable in $RECONCILE"
+elif [ -z "$ra_doc" ]; then
+  no "the doc has a \`reconcile_account\` bullet stating its guard status"
+elif [ "$ra_body" = "return isStale(op.before, live);" ]; then
+  if in_text "$ra_doc" "#282" && in_text "$ra_doc" "not yet wired"; then
+    ok "\`reconcile_account\` still delegates bare to isStale — doc flags that gap, cites #282"
+  else
+    no "\`reconcile_account\` still delegates bare to isStale — doc must flag it and cite #282"
+  fi
+elif in_text "$ra_doc" "not yet wired"; then
+  no "\`reconcile_account\`'s branch changed — the doc's not-yet-wired marker is stale (see #282)"
+else
+  ok "\`reconcile_account\` no longer delegates bare, and the doc no longer calls it a gap"
+fi
+
+# The doc says delegation answers "is it stale?", NOT "is it already applied",
+# because `isReconcileStale` never reads `after`. That is the reason resume has to
+# compute the `live == after` branch itself. If the function grows an `after`
+# read, the doc's division of labour is wrong and must be rewritten.
+if [ -n "$recon_fn" ] && ! in_text "$recon_fn" "op.after"; then
+  ok "isReconcileStale reads only \`before\` — ALREADY-APPLIED genuinely has no delegate"
+else
+  no "isReconcileStale reads only \`before\` — ALREADY-APPLIED genuinely has no delegate"
+fi
+
 # `isStale`'s subset comparison is what makes `{}` vacuously non-stale. If it
 # stops being a subset comparison the doc's whole trap description is obsolete.
 if grep -q 'Object.keys(before).some(' "$REPO_ROOT/assets/apply-executor.js" 2>/dev/null; then
@@ -286,22 +352,62 @@ fi
 # --- 3. failed-live-read branch in BOTH interleavings ------------------------
 # A thrown read is neither a match nor a mismatch. Both procedures must say so;
 # covering only one leaves the other's literal reading dispatching on no
-# information. Each interleaving section is isolated before matching, so a single
-# mention elsewhere in the document cannot satisfy both.
+# information.
+#
+# Scoped to the BULLET, never the section. Interleaving A's own heading reads
+# `### Interleaving A — audit says "applied", live YNAB unconfirmable`, so a
+# section-scoped check that swallows the heading is handed "unconfirmable" for
+# free: the bullet's OUTCOME could be rewritten to the blind dispatch this whole
+# document argues against and the check would stay green. B's heading happens not
+# to carry the word, but that is luck rather than design, so both sides get the
+# same bullet scoping. The assertions pin the outcome itself — the verdict word,
+# the do-nothing instruction, and the explicit refusal to dispatch — because the
+# verdict word alone is what the heading can forge.
 echo "  -- failed-read branch present in both interleaving procedures"
-sec_a="$(awk '/^### Interleaving A/{f=1} /^### Interleaving B/{f=0} f' "$REPO_ROOT/$DOC")"
-sec_b="$(awk '/^### Interleaving B/{f=1} /^## Resume prerequisites/{f=0} f' "$REPO_ROOT/$DOC")"
 
-for pair in "A:$sec_a" "B:$sec_b"; do
-  label="${pair%%:*}"
-  body="${pair#*:}"
+# doc_between <start> <end> — the lines BETWEEN two heading regexes, the start
+# heading EXCLUDED: `f` is set only after the print test, so the matched start
+# line never prints and cannot lend its wording to an assertion below.
+doc_between() {
+  awk -v s="$1" -v e="$2" '$0 ~ e {f=0} f {print} $0 ~ s {f=1}' "$REPO_ROOT/$DOC"
+}
+
+# failed_read_bullet <section-text> — the one top-level list item about a failing
+# live read, from its first line to the line before the next bullet or heading,
+# flattened to a single line so an assertion is not defeated by where the
+# document happens to wrap. Matched with string ops rather than a regex so no
+# backslash has to survive `awk -v`.
+failed_read_bullet() {
+  printf '%s\n' "$1" | awk '
+    substr($0, 1, 2) == "- " && index($0, "the live read") && index($0, "fails") {
+      f = 1; print; next
+    }
+    f && (substr($0, 1, 2) == "- " || substr($0, 1, 1) == "#") { exit }
+    f { print }
+  ' | tr '\n' ' ' | tr -s ' '
+}
+
+sec_a="$(doc_between '^### Interleaving A' '^### Interleaving B')"
+sec_b="$(doc_between '^### Interleaving B' '^## Resume prerequisites')"
+
+for label in A B; do
+  case "$label" in
+    A) body="$sec_a" ;;
+    B) body="$sec_b" ;;
+  esac
+  fr="$(failed_read_bullet "$body")"
   if [ -z "$body" ]; then
     no "interleaving $label section is locatable"
-  elif printf '%s' "$body" | grep -qF "unconfirmable" \
-    && printf '%s' "$body" | grep -qiE "read (itself )?fails|live read fails"; then
-    ok "interleaving $label specifies the failed-live-read branch"
+  elif [ -z "$fr" ]; then
+    no "interleaving $label has a failed-live-read bullet"
+  elif ! in_text "$fr" "unconfirmable"; then
+    no "interleaving $label's failed-read bullet calls the outcome unconfirmable"
+  elif ! in_text "$fr" "Do nothing to this op"; then
+    no "interleaving $label's failed-read bullet says to do nothing to the op"
+  elif ! printf '%s\n' "$fr" | grep -qE 'neither .* nor dispatch'; then
+    no "interleaving $label's failed-read bullet refuses to dispatch outright"
   else
-    no "interleaving $label specifies the failed-live-read branch"
+    ok "interleaving $label failed-read bullet — unconfirmable, do nothing, never dispatch"
   fi
 done
 
