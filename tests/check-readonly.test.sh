@@ -163,6 +163,7 @@ reset_sandbox() {
   : > "$SANDBOX/commands/ynab-monthly-review.md"
   : > "$SANDBOX/commands/ynab-quarterly-tax-review.md"
   : > "$SANDBOX/commands/ynab-annual-review.md"
+  : > "$SANDBOX/commands/ynab-portfolio.md"
 }
 
 # run_case "<desc>" <expected-exit> <file-relative-to-sandbox> "<content>"
@@ -223,6 +224,9 @@ echo "Self-test: fail closed when a required surface is missing"
 run_case_rm "missing orchestrator fails closed"             1 "agents/ynab-orchestrator.md"
 run_case_rm "missing protocol skill fails closed"           1 "skills/protocol/SKILL.md"
 run_case_rm "missing a review command fails closed"         1 "commands/ynab-annual-review.md"
+# The cross-budget rollup command (M6-7) is a read-only surface too — removing it
+# must fail closed, which is only true while it stays in the guard's enumeration.
+run_case_rm "missing the portfolio command fails closed"    1 "commands/ynab-portfolio.md"
 run_case_rm "no review skill at all fails closed"           1 "skills/review/ynab-review.md"
 
 echo "Self-test: WRITE_VERBS is pinned to the authoritative mutating-tool inventory"

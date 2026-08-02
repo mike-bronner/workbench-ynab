@@ -49,7 +49,7 @@ The template path is resolved the same way: `--template` flag →
 
 ```bash
 report-writer.sh \
-  --tier   <Weekly|Monthly|Quarterly-Tax|Annual> \
+  --tier   <Weekly|Monthly|Quarterly-Tax|Annual|Portfolio> \
   --date   <YYYY-MM-DD> \
   [--template   <path>]      # default: .report.template_path, else bundled asset
   [--output-dir <dir>]       # default: .report.output_dir, else ~/Documents/Claude/Reports

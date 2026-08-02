@@ -33,7 +33,7 @@
 #
 # USAGE
 #   report-writer.sh \
-#     --tier   <Weekly|Monthly|Quarterly-Tax|Annual> \
+#     --tier   <Weekly|Monthly|Quarterly-Tax|Annual|Portfolio> \
 #     --date   <YYYY-MM-DD> \
 #     [--template   <path>]    # default: .report.template_path, else bundled asset
 #     [--output-dir <dir>]     # default: .report.output_dir, else ~/Documents/Claude/Reports
@@ -181,10 +181,13 @@ while [ "$#" -gt 0 ]; do
 done
 
 # --- validate tier + date ---------------------------------------------------
+# `Portfolio` is the cross-budget rollup (M6-7, issue #85) — not a lookback tier
+# but a report kind, and it reuses this same writer (and therefore the same
+# frozen template, print CSS included) rather than growing a second assembler.
 case "$tier" in
-  Weekly|Monthly|Quarterly-Tax|Annual) : ;;
-  "") usage_err "--tier is required (one of: Weekly, Monthly, Quarterly-Tax, Annual)" ;;
-  *)  usage_err "invalid --tier '$tier' (expected: Weekly, Monthly, Quarterly-Tax, Annual)" ;;
+  Weekly|Monthly|Quarterly-Tax|Annual|Portfolio) : ;;
+  "") usage_err "--tier is required (one of: Weekly, Monthly, Quarterly-Tax, Annual, Portfolio)" ;;
+  *)  usage_err "invalid --tier '$tier' (expected: Weekly, Monthly, Quarterly-Tax, Annual, Portfolio)" ;;
 esac
 # Shape AND range: month 01-12, day 01-31 (a real calendar day-of-month check —
 # e.g. Feb 30 — is beyond the AC and left to the caller, but obviously-invalid

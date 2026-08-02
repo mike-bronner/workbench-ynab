@@ -98,6 +98,7 @@ enumerated=(
   "commands/ynab-monthly-review.md"
   "commands/ynab-quarterly-tax-review.md"
   "commands/ynab-annual-review.md"
+  "commands/ynab-portfolio.md"       # the cross-budget rollup (M6-7) — read-only too
 )
 
 surfaces=()
