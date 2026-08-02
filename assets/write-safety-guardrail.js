@@ -84,6 +84,14 @@ const ALLOWED_TOOLS = Object.freeze([
  * state) and may NEVER run. The deny-list is belt-and-suspenders to the
  * fail-closed allow-list: even if the allow-list were widened by mistake, these
  * stay explicitly forbidden.
+ *
+ * The three scheduled-transaction mutations arrived with the 0.27.1 re-vendor
+ * (#157), which was done to obtain the scheduled-transactions READ. A scheduled
+ * transaction becomes a real ledger entry on its due date, so creating, editing,
+ * or deleting one is money movement on a delay — it belongs here. The allow-list
+ * is fail-closed and would already block them; naming them keeps
+ * `ALLOWED_TOOLS ∪ DENIED_TOOLS` a true inventory of the bundle's mutating verbs,
+ * which is what `scripts/check-readonly.sh`'s `WRITE_VERBS` is pinned against.
  * @type {readonly string[]}
  */
 const DENIED_TOOLS = Object.freeze([
@@ -92,6 +100,9 @@ const DENIED_TOOLS = Object.freeze([
   'mcp__plugin_workbench-ynab_ynab__ynab_create_receipt_split_transaction',
   'mcp__plugin_workbench-ynab_ynab__ynab_create_account',
   'mcp__plugin_workbench-ynab_ynab__ynab_set_default_budget',
+  'mcp__plugin_workbench-ynab_ynab__ynab_create_scheduled_transaction',
+  'mcp__plugin_workbench-ynab_ynab__ynab_update_scheduled_transaction',
+  'mcp__plugin_workbench-ynab_ynab__ynab_delete_scheduled_transaction',
 ]);
 
 /**

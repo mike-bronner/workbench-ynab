@@ -184,8 +184,8 @@ SHA-1), and `signature_status` / `signature_method` (+ `signature_note` when
 unavailable). Together with the existing `tarball_sha256` and `bundle_sha256`,
 the marker is the single auditable record of the full provenance chain.
 
-> **`@dizzlkheinz/ynab-mcpb@0.26.10` — verified.** This procedure was executed
-> against the pinned version: SHA-512 SRI and SHA-1 both match the registry, and
+> **`@dizzlkheinz/ynab-mcpb@0.27.1` — verified.** This procedure was executed
+> against the pinned version (and, before it, against `0.26.10`): SHA-512 SRI and SHA-1 both match the registry, and
 > the registry signature verified against npm's published keys
 > (`signature_status: "verified"`). The outcome is recorded in the marker.
 

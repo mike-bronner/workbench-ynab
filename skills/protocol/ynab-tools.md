@@ -37,11 +37,19 @@ mcp__plugin_workbench-ynab_ynab__ynab_list_accounts
 mcp__plugin_workbench-ynab_ynab__ynab_list_categories
 mcp__plugin_workbench-ynab_ynab__ynab_list_transactions
 mcp__plugin_workbench-ynab_ynab__ynab_list_payees
+mcp__plugin_workbench-ynab_ynab__ynab_list_scheduled_transactions
 mcp__plugin_workbench-ynab_ynab__ynab_get_month
 mcp__plugin_workbench-ynab_ynab__ynab_export_transactions
 mcp__plugin_workbench-ynab_ynab__ynab_get_transaction
 mcp__plugin_workbench-ynab_ynab__ynab_compare_transactions
 ```
+
+`ynab_list_scheduled_transactions` is the read the fetch-once cache uses for the
+`scheduled_transactions` resource (**#157**). The 0.26.10 bundle registered no
+such tool; the 0.27.1 re-vendor added it, which is what made scheduled
+transactions a real cached resource — see
+[`docs/ynab-read-path.md`](../../docs/ynab-read-path.md) §1. It is read-only and
+matched by the `ynab_list_*` pre-approval glob below.
 
 `ynab_get_transaction` and `ynab_compare_transactions` are reads added for the
 Sprint 4 delete-duplicate write path (M4-8): the apply executor re-reads the
@@ -107,6 +115,12 @@ mcp__plugin_workbench-ynab_ynab__ynab_reconcile_account
 - `mcp__plugin_workbench-ynab_ynab__ynab_create_transaction` and
   `mcp__plugin_workbench-ynab_ynab__ynab_create_transactions` — no M4 write path
   creates transactions, so they are not pre-approved either.
+- The three **scheduled-transaction mutations** the 0.27.1 re-vendor added
+  (`create` / `update` / `delete`). No write path uses them, and they are money-
+  adjacent (a scheduled transaction becomes a real one on its due date), so they
+  sit in the guardrail's `DENIED_TOOLS` rather than any allow-list. The read-phase
+  globs cannot reach them: `ynab_list_*` and `ynab_get_*` match only the two new
+  *reads*, `ynab_list_scheduled_transactions` and `ynab_get_scheduled_transaction`.
 
 The human-approval gate for a write **batch** is the `/ynab-apply` command
 (**M4-5**) plus the write-safety guardrail — *not* a per-call Claude Code

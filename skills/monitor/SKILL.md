@@ -155,18 +155,22 @@ configured threshold, not an independent hard-coded figure.
 
 ### Bill due — history-derived fallback (scheduled-transactions unavailable)
 
-**The vendored MCP exposes no scheduled-transactions tool** — this is the
-verified, decided gap in
+**The vendored MCP now exposes a scheduled-transactions tool** — the 0.27.1
+re-vendor registered `ynab_list_scheduled_transactions`, superseding the "tool
+absent" verdict in
 [`docs/decisions/GAP-3-scheduled-transactions.md`](../../docs/decisions/GAP-3-scheduled-transactions.md)
-(28 registered `ynab_` tools, none for scheduled transactions). So there is no
-direct "upcoming bills" read. `detectBillsDue` therefore consumes a list of
+(see [`docs/ynab-read-path.md`](../../docs/ynab-read-path.md) §1a). The read path
+caches it as the `scheduled_transactions` resource. **Wiring `detectBillsDue` to
+that real source is not done here** — it is monitor work, tracked separately; #157
+delivered the source, not the consumer. Until that wiring lands, `detectBillsDue`
+still consumes a list of
 **upcoming bills derived from recurring history** — recurring/subscription
 payees and prior-month transaction patterns from the same **`list_transactions`**
 / **`get_month`** reads (the GAP-3 §2 fallback contract). Each derived bill needs
 a stable `id` (used in the dedupe key in the `scheduled_txn_id` slot), a `name`,
 a `date` (`YYYY-MM-DD`), and an `amount`. **This is a history estimate, not
-authoritative scheduled data — surface it as such**, and re-verify the gap on any
-`@dizzlkheinz/ynab-mcpb` bump past `0.26.10` (re-run the GAP-3 §1 grep).
+authoritative scheduled data — surface it as such** until the real source is
+wired in.
 
 ## Hard rules
 
