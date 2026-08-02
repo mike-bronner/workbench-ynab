@@ -221,8 +221,8 @@ directory, `~/.claude/plugins/data/workbench-ynab-claude-workbench/`.
 | Monitor state | `<data-dir>/monitor-state.json` | Latest between-run monitoring snapshot (balances / transaction deltas). | Single live file, overwritten in place — no accumulation. |
 | Alert log | `<data-dir>/alert-log.jsonl` | Append-only monitoring alerts. | User-managed. |
 | Estimated-tax tracker | `<data-dir>/tax-tracker.json` | Running estimated-tax totals. | Single live file, overwritten in place. |
-| Tax profile | `<data-dir>/tax-profile.json` | Your tax configuration (filing status, rates, thresholds). | Live config — removed at uninstall. |
-| Config | `<data-dir>/config.json` | Budget ids, business/tax/persona/report settings (never the token — that is Keychain-only). | Live config — removed at uninstall. |
+| Tax profile | `<data-dir>/tax-profile.json` | Your tax configuration (filing status, rates, thresholds). | Live config — removed at uninstall **only if you choose to delete `<data-dir>`**; kept by default. |
+| Config | `<data-dir>/config.json` | Budget ids, business/tax/persona/report settings (never the token — that is Keychain-only). | Live config — removed at uninstall **only if you choose to delete `<data-dir>`**; kept by default. |
 | Change-set proposals *(future — M4-10)* | `<data-dir>/proposals/changeset-<stamp>.json` (default; override `.apply.proposal_path`) | The pending proposed ledger writes a review emits ([design](assets/changeset-lifecycle.md)). Not written yet — the review write path (**M4-10**) will emit them. | **Not yet swept.** When M4-10 lands it must create these `0600`, add them to this inventory, and give them a retention story (extend `bin/ynab-prune.sh` to `proposals/`), since they accumulate unbounded like reports. |
 
 **Retention & pruning.** Review reports are the one artifact that grows without
@@ -240,9 +240,14 @@ bash bin/ynab-prune.sh --apply      # actually delete them
 ```
 
 **Uninstall.** The uninstall / teardown flow
-([#67](https://github.com/mike-bronner/workbench-ynab/issues/67)) references this
-inventory so it can enumerate the correct paths when prompting you to remove
-residual financial data — the report directory and every `<data-dir>` file above.
+([#67](https://github.com/mike-bronner/workbench-ynab/issues/67)) —
+`/workbench-ynab:uninstall`, with the by-hand equivalent in
+[`docs/uninstall.md`](docs/uninstall.md) — references this inventory so it can
+name the correct paths when it asks what to do with your residual financial
+data. It prompts before touching `<data-dir>` and **keeps it by default**, since
+deleting it destroys the write-back audit trail irreversibly. It never deletes
+`<report-dir>`: that path is user-chosen and may hold unrelated files, so
+reports stay yours to prune with [`bin/ynab-prune.sh`](bin/ynab-prune.sh).
 
 ## Reporting a vulnerability
 
