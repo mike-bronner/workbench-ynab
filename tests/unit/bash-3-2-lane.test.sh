@@ -37,6 +37,7 @@ source "$REPO_ROOT/tests/lib/assert.sh"
 
 CI_YML="$REPO_ROOT/.github/workflows/ci.yml"
 CI_DOC="$REPO_ROOT/docs/ci.md"
+TESTING_DOC="$REPO_ROOT/docs/testing.md"
 SECRET_SCAN_YML="$REPO_ROOT/.github/workflows/secret-scan.yml"
 
 # The marker regex, kept in one place. Written as a variable (never as a literal
@@ -218,6 +219,20 @@ test_doc_documents_the_marker_convention() {
     "docs/ci.md must document how a file joins the lane, so a new 3.2-targeted test is added in its own PR"
   assert_contains "$(cat "$CI_DOC")" 'tests/unit/bash-3-2-lane.test.sh' \
     "docs/ci.md must name the guard that enforces the convention"
+}
+
+test_testing_doc_tells_contributors_how_to_join_the_lane() {
+  # docs/ci.md explains the lane to someone reading about CI; docs/testing.md is
+  # what someone WRITING a new test reads, so the how-to has to live there too or
+  # the convention is documented where nobody will look for it.
+  local doc
+  doc="$(cat "$TESTING_DOC")"
+  assert_contains "$doc" '## How to: put a new test in the bash-3.2 lane' \
+    "docs/testing.md must tell a test author how to join the bash-3.2 lane"
+  assert_contains "$doc" 'bash-3.2-lane:' \
+    "docs/testing.md's how-to must show the marker syntax verbatim"
+  assert_contains "$doc" 'tests/unit/bash-3-2-lane.test.sh' \
+    "docs/testing.md must name the guard that catches a half-declared lane member"
 }
 
 # --- secret-scan.yml's ubuntu-only posture is deliberate and documented ---------
