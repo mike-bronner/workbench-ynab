@@ -80,6 +80,7 @@ Your initial prompt contains:
 - `review_scope` *(optional)* — an explicit tier (`weekly` / `monthly` / `quarterly-tax` / `annual`) and/or an explicit period. **When present it is authoritative**: plan exactly that scope and skip eligibility computation (this is the ad-hoc wrapper/router path). When absent, compute eligibility from `today` (the scheduled path).
 - Schedule overrides *(all optional; the dispatcher resolves them from config where configured)* — `weekly_day`, `quarterly_due_dates`, `annual_window`. Defaults are documented in [Tier eligibility](#tier-eligibility--the-schedule-is-owned-here); when an override is absent, use the default and proceed — no warning needed.
 - `report_dir` *(optional)* — the resolved report output directory (config `.report.output_dir`, resolved by the dispatcher). When present, inspect report history for anomalies; when absent, skip that inspection and record `report_history: false` in `state_inspected`.
+- `tax_year` *(optional)* — the user's explicit tax-year override, resolved from `config.tax_year` by the dispatcher through `bin/config.sh` `_cfg_tax_year` (issue #17). This is the **only** way the override reaches you: you never read `config.json`, so an absent line means the user set none. Copy it into `plan.tax_year.override` **unread** — never validate it, never second-guess it, never substitute a year of your own; the engine's `resolveTaxYear` refuses a malformed one. When the line is absent, emit `override: null` and let the engine derive the year from the review date. A missing line is the normal case, not an anomaly — never warn about it.
 
 You receive every one of these values **via this prompt**. You do **not** read `config.json` (or any plugin config file) yourself — the dispatching skill resolves config through the shared loader and hands you the relevant values. Only read a config file if your prompt explicitly gives you its path. This keeps you a thin planner with no config-loading responsibilities.
 
@@ -135,7 +136,7 @@ Emit `plan.tax_year` on **every** plan, whatever the tiers:
 |---|---|
 | `review_date` | `plan.data_pull.transactions.until_date` — the window end, already resolved in the configured timezone. The engine's "as of" anchor and its year input. |
 | `timezone` | The configured IANA zone passed to you alongside `today`. Copy it through verbatim; **never** substitute the system zone. |
-| `override` | The `tax_year` integer from `config.json` when the user set one, else `null`. Pass it through unread — you never validate or second-guess it; the engine refuses a malformed one. |
+| `override` | The `tax_year` value from **your prompt** (see [Inputs](#inputs)) when the dispatcher sent one, else `null`. That prompt line is the dispatcher's `_cfg_tax_year` resolution of `config.tax_year` — you never read the config file yourself. Pass it through unread — you never validate or second-guess it; the engine refuses a malformed one. |
 | `changeover` | The prior-year state (below), or `null`. |
 
 **The January changeover window.** One tax year's estimated payments span two

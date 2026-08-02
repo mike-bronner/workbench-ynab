@@ -51,6 +51,36 @@ shell, `resolveTaxYear` in the engine) rather than being ignored: silently falli
 back to the review date would report a different year than the user asked for, with
 no signal.
 
+#### How the override reaches a run
+
+`config.tax_year` sits in a file no engine function reads, so every hop between
+the file and `resolveTaxYear` is explicit. Breaking any one of them makes the key
+inert — set by the user, ignored by the run — with nothing to signal it:
+
+| Hop | Who | What it does |
+|---|---|---|
+| 1 | `bin/config.sh` `_cfg_tax_year` | Reads `.tax_year`, checks it is a four-digit JSON **number**, echoes it (or nothing when absent). Fails closed on anything else. |
+| 2 | the entry command — `commands/ynab-review.md` Step 1a and each ad-hoc tier command's Phase 1 | `tax_year="$(_cfg_tax_year)" \|\| exit 1`. The dispatcher is the only layer that reads config. |
+| 3 | the same command's orchestrator prompt | Sends `tax_year: <value>`, and **omits the line** when the value is empty. |
+| 4 | [`agents/ynab-orchestrator.md`](../agents/ynab-orchestrator.md) | Copies that prompt field into `plan.tax_year.override` unread, or `null` when the line is absent. It never reads `config.json` itself. |
+| 5 | [`skills/review/ynab-review.md`](../skills/review/ynab-review.md) §12 | Passes `taxYearOverride: plan.tax_year.override` to `computeTaxSummary`, which calls `resolveTaxYear`. |
+
+The `/ynab-tax` tracker takes a shorter path to the same rule: its skill
+([`skills/estimated-tax/SKILL.md`](../skills/estimated-tax/SKILL.md)) sources the
+loader directly and passes the resolved override straight to `resolveTaxYear`,
+using hops 1 and 5 only, so the tracker and the report always count the same year.
+
+The chain is pinned end to end by
+[`tests/unit/tax-year-wiring.test.sh`](../tests/unit/tax-year-wiring.test.sh) —
+each hop has its own assertion, because a hop that silently stops forwarding is
+invisible in the output of every other hop.
+
+**The quarterly reminder is not on this chain, by design.**
+`commands/ynab-review.md` Step 1d sizes its due-date window from the **calendar**
+year of `today`, never the resolved tax year: a reminder answers "which deadlines
+land soon", so a pinned `tax_year: 2031` must not send it hunting for 2031 and
+2030 deadlines while the calendar sits in 2026.
+
 ## Quarterly due dates and the Q4 rollover
 
 A single tax year's four estimated-tax due dates span **two calendar years**. For

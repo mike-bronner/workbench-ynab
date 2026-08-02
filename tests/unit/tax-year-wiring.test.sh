@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # tests/unit/tax-year-wiring.test.sh — the active tax-year rule is actually WIRED
-# into the review path, not just implemented in lib/tax (issue #17, AC #5 / #7).
+# into the review path, not just implemented in lib/tax
+# (issue #17, AC #5 / #6 / #7).
 #
 # WHY THIS FILE EXISTS
 #   lib/tax/taxYear.mjs and computeTaxSummary's boundary branch are covered by
@@ -11,8 +12,12 @@
 #   markdown planner (agents/ynab-orchestrator.md), so for that half the prose IS
 #   the implementation. A first pass at this issue shipped a correct, well-tested
 #   library that no document ever called — the January changeover would have thrown
-#   on a real run, and the header label had no producer connected to it. This file
-#   pins the connections so that regression cannot recur silently.
+#   on a real run, and the header label had no producer connected to it. A second
+#   pass shipped the same shape one layer up: `_cfg_tax_year` and `resolveTaxYear`
+#   were both correct and both unit-tested, while no command resolved the first or
+#   forwarded its value to the second — a user could set `config.tax_year` and see
+#   no behavioural change anywhere. This file pins the connections, hop by hop, so
+#   neither regression can recur silently.
 #
 # SCOPING RULE (repo lesson: whole-file greps go vacuous on documents)
 #   Every assertion here is scoped to the SECTION it names, via section_of(), and
@@ -34,6 +39,19 @@ source "$REPO_ROOT/tests/lib/assert.sh"
 SKILL="$REPO_ROOT/skills/review/ynab-review.md"
 AGENT="$REPO_ROOT/agents/ynab-orchestrator.md"
 TAX_SKILL="$REPO_ROOT/skills/estimated-tax/SKILL.md"
+
+# Every command that dispatches the orchestrator. The router is the scheduled
+# path; the other four are the ad-hoc single-tier paths. The override has to
+# reach ALL of them — a user who pins config.tax_year and then runs
+# /ynab-weekly-review must not silently get a different year than the scheduled
+# run gives them.
+DISPATCH_COMMANDS=(
+  "$REPO_ROOT/commands/ynab-review.md"
+  "$REPO_ROOT/commands/ynab-weekly-review.md"
+  "$REPO_ROOT/commands/ynab-monthly-review.md"
+  "$REPO_ROOT/commands/ynab-quarterly-tax-review.md"
+  "$REPO_ROOT/commands/ynab-annual-review.md"
+)
 
 # section_of <file> <heading-literal> — the BODY of the markdown section whose
 # heading line contains <heading-literal>, up to the next heading of the same or a
@@ -70,7 +88,60 @@ assert_section_lacks() {
   return 0
 }
 
+# prompt_block_of <file> — the body of the FENCED CODE BLOCK that carries the
+# orchestrator dispatch prompt, identified by its `budget_name:` line. Fences
+# themselves are excluded. Scoping to this block matters: `tax_year` appears in
+# prose in every one of these files, so a section- or file-scoped grep would pass
+# on a command that resolved the override and then forgot to forward it — which is
+# the exact regression AC #6 shipped with. The block is buffered and only emitted
+# once `budget_name:` is seen inside it, so preceding shell/js blocks (which also
+# mention tax_year) are skipped rather than matched.
+prompt_block_of() {
+  awk '
+    /^```/ { if (inside) { if (found) printf "%s", buf; inside = 0; found = 0; buf = "" }
+             else { inside = 1; found = 0; buf = "" }
+             next }
+    inside { buf = buf $0 "\n"; if (index($0, "budget_name:") > 0) found = 1 }
+  ' "$1"
+}
+
 # --- the extractor itself, proven before anything relies on it ----------------
+
+test_prompt_block_of_selects_only_the_dispatch_block() {
+  # If this returned the whole file (or the wrong block), the boundary assertions
+  # below would be unscoped greps wearing a disguise. The fixture plants the needle
+  # in three places it must NOT be found: prose, an earlier fenced block, and a
+  # later fenced block — none of which carry `budget_name:`.
+  local fixture body
+  fixture="$(mktemp)"
+  printf '%s\n' \
+    'tax_year: DECOY_PROSE' \
+    '```bash' \
+    'tax_year: DECOY_EARLIER_BLOCK' \
+    '```' \
+    'more prose' \
+    '```' \
+    'budget_name: <the real one>' \
+    'tax_year: REAL' \
+    '```' \
+    '```' \
+    'tax_year: DECOY_LATER_BLOCK' \
+    '```' > "$fixture"
+  body="$(prompt_block_of "$fixture")"
+  rm -f "$fixture"
+
+  assert_contains "$body" "tax_year: REAL" "the dispatch block's own lines are returned"
+  assert_contains "$body" "budget_name:" "the block is the one carrying budget_name"
+  for decoy in DECOY_PROSE DECOY_EARLIER_BLOCK DECOY_LATER_BLOCK; do
+    case "$body" in
+      *"$decoy"*) fail "prompt_block_of leaked $decoy — it is not scoped to the dispatch block" ;;
+    esac
+  done
+  case "$body" in
+    *'```'*) fail "prompt_block_of returned a fence line" ;;
+  esac
+  return 0
+}
 
 test_section_of_excludes_the_heading_and_stops_at_the_next_peer() {
   # If section_of silently returned the whole file (or the heading line), every
@@ -98,6 +169,104 @@ test_section_of_excludes_the_heading_and_stops_at_the_next_peer() {
     *"in beta"*) fail "section_of ran past the next peer heading into Beta" ;;
   esac
   return 0
+}
+
+# --- AC #6: the config override actually reaches a run ------------------------
+#
+# `_cfg_tax_year` (shell) and `resolveTaxYear` (engine) were both correct and both
+# unit-tested while NOTHING called the first or forwarded its value to the second.
+# A user could set config.tax_year and see zero behavioural change. These pin the
+# two hops in between: command resolves it, command forwards it.
+
+test_every_dispatch_command_resolves_the_tax_year_override() {
+  local file
+  for file in "${DISPATCH_COMMANDS[@]}"; do
+    local name; name="$(basename "$file")"
+    assert_contains "$(cat "$file")" '_cfg_tax_year' \
+      "$name resolves config.tax_year through the shared loader"
+    # Fail-closed, like _cfg_timezone beside it: a malformed year must stop the run,
+    # not fall back to the review date and report a year the user did not ask for.
+    # shellcheck disable=SC2016  # single quotes are deliberate: these are literal
+    # needles searched for in a document, not expansions to perform.
+    assert_contains "$(cat "$file")" 'tax_year="$(_cfg_tax_year)" || exit 1' \
+      "$name resolves the override as a hard stop"
+  done
+}
+
+test_every_dispatch_command_forwards_tax_year_in_its_prompt() {
+  # The hop that was missing. Scoped to the dispatch prompt block itself, because
+  # every one of these files already says "tax_year" in prose.
+  local file
+  for file in "${DISPATCH_COMMANDS[@]}"; do
+    local name block; name="$(basename "$file")"
+    block="$(prompt_block_of "$file")"
+    [ -n "$block" ] || fail "$name has no orchestrator dispatch prompt block"
+    assert_contains "$block" "tax_year:" \
+      "$name forwards tax_year to the orchestrator"
+    # An unset override must send NO line, so plan.tax_year.override is null and the
+    # engine derives the year. A command that sent an empty `tax_year:` would hand
+    # the planner a value to interpret.
+    assert_contains "$block" "omit this line entirely when it is empty" \
+      "$name omits the tax_year line when no override is set"
+  done
+}
+
+test_orchestrator_inputs_contract_accepts_tax_year() {
+  # The receiving end. The planner is barred from reading config.json, so if its
+  # Inputs contract has no tax_year field, a forwarded value has nowhere to land.
+  local h='## Inputs'
+  # Single quotes are deliberate: these are literal needles searched for in a
+  # document, not expansions to perform.
+  # shellcheck disable=SC2016
+  assert_section_contains "$AGENT" "$h" '`tax_year`' \
+    "the orchestrator's Inputs contract declares tax_year"
+  assert_section_contains "$AGENT" "$h" '_cfg_tax_year' \
+    "the Inputs contract names the dispatcher-side resolver it comes from"
+  assert_section_contains "$AGENT" "$h" 'plan.tax_year.override' \
+    "the Inputs contract says where the value goes"
+}
+
+test_orchestrator_override_row_points_at_the_prompt_not_the_config_file() {
+  # The contradiction Holmes found: the override row told the planner to read
+  # `config.tax_year` while a bullet above forbade it reading config at all. The row
+  # must name the prompt as the source, or the instruction is unfollowable.
+  local h='Tax-year inputs' body
+  body="$(section_of "$AGENT" "$h")"
+  [ -n "$body" ] || fail "the orchestrator's tax-year section is missing"
+  local row
+  row="$(printf '%s\n' "$body" | grep -F "| \`override\` |")"
+  [ -n "$row" ] || fail "the tax-year table has no override row"
+  assert_contains "$row" 'your prompt' \
+    "the override row sources the value from the dispatch prompt"
+  assert_contains "$row" 'never read the config file yourself' \
+    "the override row restates that the planner does not read config.json"
+}
+
+test_estimated_tax_tracker_resolves_the_override_itself() {
+  # The parallel path. /ynab-tax does not go through the orchestrator, so it has to
+  # source the loader itself; it previously referenced `config.tax_year` as if some
+  # earlier step had already resolved it, and no step had.
+  local h='Procedure'
+  # Single quotes are deliberate: these are literal needles searched for in a
+  # document, not expansions to perform.
+  # shellcheck disable=SC2016
+  assert_section_contains "$TAX_SKILL" "$h" 'tax_year="$(_cfg_tax_year)" || exit 1' \
+    "the tracker resolves the override as a hard stop"
+  assert_section_contains "$TAX_SKILL" "$h" '_cfg_timezone' \
+    "the tracker resolves the zone from the same loader"
+}
+
+test_the_reminder_window_is_deliberately_off_the_override_chain() {
+  # A guard against a plausible WRONG fix: Step 1d's due-date window is the CALENDAR
+  # year by design. Applying config.tax_year there would silence every reminder for a
+  # user who pinned a year. Pinned so the reasoning survives the next reader.
+  local body
+  body="$(section_of "$REPO_ROOT/commands/ynab-review.md" 'Dispatch quarterly estimated-tax reminders')"
+  [ -n "$body" ] || fail "the reminder step is missing from the router"
+  assert_contains "$body" 'Number(today.slice(0, 4))' \
+    "the reminder window keys on the calendar year of today"
+  assert_contains "$body" 'deliberately NOT the resolved' \
+    "the reminder step says the tax-year override does not apply to it"
 }
 
 # --- AC #5 / #7: the review skill actually calls the engine -------------------

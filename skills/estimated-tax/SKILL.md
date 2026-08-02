@@ -70,15 +70,31 @@ milliunit amount against a profile or tracker number.
    > **The active tax year is not `profile.taxYear`.** That field records which
    > year the profile's rates and brackets were authored for. The year this run
    > is *about* comes from the same rule the review uses — issue #17's
-   > `resolveTaxYear(today, timezone, config.tax_year)`, exported from
+   > `resolveTaxYear(today, timezone, tax_year)`, exported from
    > [`../../lib/tax/index.mjs`](../../lib/tax/index.mjs) — so the tracker and the
    > report can never disagree about which year they are counting. Resolve it once
    > here as `taxYear` and use it for every `year`-keyed call below
    > (`getIncomeTaxBrackets`, `getQuarterlyDueDates`, `reconcilePayments`,
-   > `upsertQuarterEstimate`, `renderYtdSummary`). `today` and `timezone` come from
-   > the command's resolved config (`bin/config.sh` `_cfg_timezone` + `_today_in_tz`),
-   > never from the host clock or zone; a bad or missing zone throws rather than
-   > answering the wrong year near midnight on Dec 31 (issue #31).
+   > `upsertQuarterEstimate`, `renderYtdSummary`). All three inputs come from the
+   > shared loader ([`bin/config.sh`](../../bin/config.sh)) — resolve them yourself
+   > at the start of this run, never from the host clock or zone:
+   >
+   > ```bash
+   > source "${CLAUDE_PLUGIN_ROOT}/bin/config.sh"
+   > _require_config || exit 1
+   > timezone="$(_cfg_timezone)" || exit 1   # required IANA zone — fail closed
+   > today="$(_today_in_tz "$timezone")"     # today in THAT zone, not the host's
+   > tax_year="$(_cfg_tax_year)" || exit 1   # optional override; empty → derive
+   > ```
+   >
+   > `tax_year` above **is** the `config.tax_year` override — that shell variable is
+   > the only name this skill uses for it. Empty means the user set none, so pass it
+   > as `undefined` and let `resolveTaxYear` derive the year from `today`. Both
+   > `_cfg_timezone` and `_cfg_tax_year` **fail closed** — resolve each as a hard
+   > stop. Without this block there is no override in scope at all and the key
+   > silently never applies, which is the whole reason it exists
+   > (issue #17). A bad or missing zone throws rather than answering the wrong year
+   > near midnight on Dec 31 (issue #31).
 
    > **🔒 Never surface `error.errors[]`.** The per-violation array is
    > **intentionally raw** for programmatic callers (#225 AC #3): each entry's
