@@ -25,6 +25,9 @@ tested compute libraries; it does not re-implement tax math inline.
   profile (bundled US defaults merged with the user's instance), with accessors
   `getThreshold('seTaxRate')`, `getIncomeTaxBrackets(year, status)`,
   `getQuarterlyDueDates(year)`, and `getEstimatedTaxPaymentMatchers()`.
+- [`lib/tax/index.mjs`](../../lib/tax/index.mjs) — `resolveTaxYear`, the single
+  rule that decides which tax year a run is about (issue #17). Shared with the
+  review skill so the tracker and the report always count the same year.
 - [`lib/tax/estimatedTax.mjs`](../../lib/tax/estimatedTax.mjs) — the tax math
   (`summarizeBusinessActivity`, `computeEstimate`, `quarterlyEstimate`) plus the
   tracker state (`loadTracker`, `upsertQuarterEstimate`, `detectPayments`,
@@ -62,7 +65,20 @@ milliunit amount against a profile or tracker number.
    reduced to a content-free violation count); tell the user to inspect their own
    `tax-profile.json` against
    [`assets/tax/tax-profile.schema.json`](../../assets/tax/tax-profile.schema.json)
-   for the offending key. On success, note `taxYear` and `filingStatus`.
+   for the offending key. On success, note `filingStatus`.
+
+   > **The active tax year is not `profile.taxYear`.** That field records which
+   > year the profile's rates and brackets were authored for. The year this run
+   > is *about* comes from the same rule the review uses — issue #17's
+   > `resolveTaxYear(today, timezone, config.tax_year)`, exported from
+   > [`../../lib/tax/index.mjs`](../../lib/tax/index.mjs) — so the tracker and the
+   > report can never disagree about which year they are counting. Resolve it once
+   > here as `taxYear` and use it for every `year`-keyed call below
+   > (`getIncomeTaxBrackets`, `getQuarterlyDueDates`, `reconcilePayments`,
+   > `upsertQuarterEstimate`, `renderYtdSummary`). `today` and `timezone` come from
+   > the command's resolved config (`bin/config.sh` `_cfg_timezone` + `_today_in_tz`),
+   > never from the host clock or zone; a bad or missing zone throws rather than
+   > answering the wrong year near midnight on Dec 31 (issue #31).
 
    > **🔒 Never surface `error.errors[]`.** The per-violation array is
    > **intentionally raw** for programmatic callers (#225 AC #3): each entry's
@@ -83,7 +99,8 @@ milliunit amount against a profile or tracker number.
    command may pass an explicit quarter.
 
 3. **Fetch YTD business transactions** for the tax year with the list-transactions
-   read tool (since `${taxYear}-01-01`; concrete name in
+   read tool (since `${taxYear}-01-01`, where `taxYear` is the resolved year from
+   step 1 — never `profile.taxYear`; concrete name in
    [`../protocol/ynab-tools.md`](../protocol/ynab-tools.md)). Pass the raw
    transactions straight into the library — it normalizes YNAB's snake_case
    fields itself.

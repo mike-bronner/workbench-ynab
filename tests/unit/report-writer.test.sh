@@ -972,6 +972,21 @@ test_tax_year_label_is_rendered_into_the_header() {
   esac
 }
 
+test_plain_tax_year_label_is_accepted_and_rendered() {
+  # The ~350-day-a-year case, and the first alternative of the writer's regex. It was
+  # untested while only the changeover shape was exercised as an accept — so a regex
+  # that had dropped the plain alternative (or made the changeover suffix mandatory)
+  # would have rejected every ordinary review's header and still passed this suite.
+  local out
+  out="$(run_writer_fixture --tier Quarterly-Tax --date 2026-06-22 \
+           --output-dir "$SANDBOX/taxyear-plain" --tax-year 'Tax Year 2026')"
+  assert_contains "$(cat "$out")" '<p class="meta">Tax Year 2026</p>' \
+    "the plain label reaches the rendered header, alone in the slot"
+  case "$(cat "$out")" in
+    *'{{tax_year}}'*) fail "the {{tax_year}} placeholder survived substitution" ;;
+  esac
+}
+
 test_tax_year_is_optional_and_renders_empty() {
   # A tier with no tax section passes nothing; the slot collapses to empty rather
   # than leaking the raw placeholder into the report.

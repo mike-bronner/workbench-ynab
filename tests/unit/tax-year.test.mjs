@@ -147,6 +147,45 @@ test('AC#6 a malformed tax_year override is refused, never silently ignored', ()
   }
 });
 
+test('AC#6 the timezone gate runs BEFORE the override — a valid pin does not excuse a bad zone', () => {
+  // The ordering inside resolveTaxYear is load-bearing, not incidental: it validates
+  // `timezone` first, so a caller holding a perfectly good `config.tax_year` STILL
+  // fails closed when `config.timezone` is missing or bogus. Short-circuiting on the
+  // override instead would let a config with a valid pin and a broken zone through,
+  // and every OTHER date that config drives (window ends, due-date compares) would
+  // then be resolved against the host zone with nothing having complained.
+  //
+  // Pinned per unusable-zone shape, not just one representative, because each takes a
+  // different branch of requireTimezone (absent / denied-structure / unknown-to-runtime)
+  // and the override check could be hoisted above any one of them independently.
+  const validOverride = 2024;
+  const zones = [
+    [undefined, /requires an IANA timezone/],
+    ['', /requires an IANA timezone/],
+    ['/etc/localtime', /not a selectable IANA zone/],
+    ['Factory', /not a selectable IANA zone/],
+    ['America/Nowhere', /does not know this zone/],
+  ];
+  for (const [tz, re] of zones) {
+    assert.throws(
+      () => resolveTaxYear('2026-03-01', tz, validOverride),
+      re,
+      `a valid tax_year override must not rescue timezone ${JSON.stringify(tz)}`,
+    );
+  }
+  // Both bad: the ZONE error is the one reported, confirming the order rather than
+  // just that something threw — an override-first implementation would surface the
+  // 'four-digit integer year' message here instead.
+  assert.throws(
+    () => resolveTaxYear('2026-03-01', 'America/Nowhere', 'not-a-year'),
+    /does not know this zone/,
+    'with both inputs bad, the timezone must be the reported failure',
+  );
+  // Control: the same override on a good zone is honored, so the throws above are
+  // provably the zone gate and not a rejection of the override itself.
+  assert.equal(resolveTaxYear('2026-03-01', 'America/Phoenix', validOverride), 2024);
+});
+
 // --- AC #2: the budget display name is never a source -----------------------
 
 test('AC#2 no module in lib/tax reads or parses a budget name', () => {
@@ -226,10 +265,22 @@ test('AC#3 a payment on Jan 15 of year N+1 attributes to tax year N Q4', () => {
     matchers,
     dueDates,
   );
-  const byId = Object.fromEntries(payments.map((p) => [p.ynab_transaction_id ?? p.id, p]));
   const tagged = payments.map((p) => [p.quarter, p.tax_year]);
   assert.deepEqual(tagged, [[4, 2025], [1, 2026], [3, 2025]], `unexpected attribution: ${JSON.stringify(payments)}`);
-  assert.ok(byId, 'payments carry a transaction identity');
+
+  // The attribution above is positional, so it holds only while every payment
+  // carries the transaction identity reconcilePayments dedupes on
+  // (`ynab_transaction_id`, not the raw `id`). Key BY that field — no `?? p.id`
+  // fallback, which would let a payment that lost its identity keep passing — and
+  // assert the per-id attribution, so a mis-tagged or identity-less payment fails
+  // here rather than silently breaking dedupe downstream.
+  const byId = Object.fromEntries(payments.map((p) => [p.ynab_transaction_id, p]));
+  assert.deepEqual(Object.keys(byId).sort(), ['a', 'b', 'c']);
+  assert.deepEqual(
+    { a: byId.a.tax_year, b: byId.b.tax_year, c: byId.c.tax_year },
+    { a: 2025, b: 2026, c: 2025 },
+    `payments lost their identity or their year: ${JSON.stringify(payments)}`,
+  );
 });
 
 test('AC#3 the wrapping quarter is identified structurally, not by a month literal', () => {
@@ -322,7 +373,7 @@ test('AC#5 a changeover review without prior-year figures is refused', () => {
   assert.throws(
     () =>
       computeTaxSummary(profile, {
-        taxYear: 2026,
+        timezone: 'America/Phoenix',
         filingStatus: 'single',
         asOfDate: '2026-01-05',
         scheduleCLines: OPENING_LINES,
@@ -335,7 +386,7 @@ test('AC#5 a changeover review without prior-year figures is refused', () => {
     assert.throws(
       () =>
         computeTaxSummary(profile, {
-          taxYear: 2026,
+          timezone: 'America/Phoenix',
           filingStatus: 'single',
           asOfDate: '2026-01-05',
           scheduleCLines: OPENING_LINES,
@@ -350,7 +401,7 @@ test('AC#5 a changeover review without prior-year figures is refused', () => {
 test('AC#5 a changeover review carries the prior year close AND the new year opening', () => {
   const profile = loadFixtureProfile();
   const summary = computeTaxSummary(profile, {
-    taxYear: 2026,
+    timezone: 'America/Phoenix',
     filingStatus: 'single',
     asOfDate: '2026-01-05',
     scheduleCLines: OPENING_LINES,
@@ -380,7 +431,7 @@ test('AC#5 a changeover review carries the prior year close AND the new year ope
 test('AC#7 the resolved tax year reaches the report header, naming both years in the window', () => {
   const profile = loadFixtureProfile();
   const midYear = computeTaxSummary(profile, {
-    taxYear: 2025,
+    timezone: 'America/Phoenix',
     filingStatus: 'single',
     asOfDate: '2025-05-01',
   });
@@ -389,7 +440,7 @@ test('AC#7 the resolved tax year reaches the report header, naming both years in
   assert.equal(midYear.yearBoundary.priorYearClose, null);
 
   const changeover = computeTaxSummary(profile, {
-    taxYear: 2026,
+    timezone: 'America/Phoenix',
     filingStatus: 'single',
     asOfDate: '2026-01-05',
     priorYearClose: { asOfDate: '2025-12-31' },

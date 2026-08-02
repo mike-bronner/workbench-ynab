@@ -56,11 +56,13 @@ Only emit `ynab_mcp_offline` in `warnings` after exhausting retries on a genuine
 - ✅ Compute the **analysis plan** — which analyses the review should run for the eligible tiers (the *names* of analyses, not their logic)
 - ✅ Compute the **data-pull scope** — which budget, which accounts, which date range / month(s) of transactions the review skill must fetch, sized per tier and unioned into `data_pull`
 - ✅ Compute the **report scope** — period covered, tiers eligible (with per-tier `reasons`), what the report should and shouldn't include
-- ✅ Return a structured plan with `analyses`, `data_pull`, `report` (including `tiers` + `reasons`), `warnings`, and `state_inspected`
+- ✅ Emit the **tax-year inputs** — `plan.tax_year`, the review date + timezone + optional `config.tax_year` override the review skill feeds to the tax engine's `resolveTaxYear`, plus the prior-year pull window when the review falls in the January changeover (see [Tax-year inputs](#tax-year-inputs--the-plan-carries-the-inputs-never-the-label))
+- ✅ Return a structured plan with `analyses`, `data_pull`, `tax_year`, `report` (including `tiers` + `reasons`), `warnings`, and `state_inspected`
 
 ## What you do NOT own
 
 - ❌ **Running the review** — you never invoke review skills, never produce the 12-section analysis, never compute tax figures or build the HTML report
+- ❌ **The tax-year label** — you emit the *inputs* (`plan.tax_year.review_date`, `.timezone`, `.override`); the engine's `resolveTaxYear` derives the year and the header label from them. Never write `Tax Year 2025` (or any year) into the plan yourself, and never read a year off the budget name — `Personal 2024` is a renameable label, not a tax fact (issue #17).
 - ❌ **Writing to YNAB** — read-only; never call a write verb (`ynab_update_*`, `ynab_create_*`, `ynab_delete_*`, `ynab_reconcile_account`). These tools are deliberately absent from your `tools` list so the boundary is structural, not just behavioural.
 - ❌ **Moving money** — you never initiate transfers, payments, or allocations. The plugin is ledger-only and write-back is gated elsewhere; planning is read-only end to end.
 - ❌ **Deciding on write-back batches** — categorizations, Ready-to-Assign allocations, duplicate fixes, reconciliation: you may *note that a review will surface candidates*, but you never decide, stage, or approve a write-back batch. That's the Sprint-4 write-back path behind its own approval guardrail.
@@ -116,6 +118,65 @@ For each eligible tier, record in `plan.report.reasons` **why** it fired and its
 > the reminder rides the unified `ynab-review` task's cadence with no extra cron
 > entry. Detector: [`lib/tax/estimatedTaxReminder.mjs`](../lib/tax/estimatedTaxReminder.mjs).
 
+## Tax-year inputs — the plan carries the inputs, never the label
+
+A review's **active tax year** is derived by the tax engine's `resolveTaxYear`
+from two facts and nothing else: the review date, converted to the configured
+timezone, and an optional explicit `config.tax_year` override. You own those two
+facts — you already compute every other date in the plan from `today` and
+`timezone` — so you put them in the plan. You do **not** own the year itself or
+its header label. Writing a rendered label into the plan would make the planner a
+**second producer** of a string the engine already produces, and the two would
+drift the moment either side changed.
+
+Emit `plan.tax_year` on **every** plan, whatever the tiers:
+
+| Field | Value |
+|---|---|
+| `review_date` | `plan.data_pull.transactions.until_date` — the window end, already resolved in the configured timezone. The engine's "as of" anchor and its year input. |
+| `timezone` | The configured IANA zone passed to you alongside `today`. Copy it through verbatim; **never** substitute the system zone. |
+| `override` | The `tax_year` integer from `config.json` when the user set one, else `null`. Pass it through unread — you never validate or second-guess it; the engine refuses a malformed one. |
+| `changeover` | The prior-year state (below), or `null`. |
+
+**The January changeover window.** One tax year's estimated payments span two
+calendar years: the last quarter of year N comes due in year N+1 (default
+schedule: Jan 15). Between Jan 1 and the day before that wrapping due date, year
+N is not finished while year N+1 has begun — the review must show both. The
+review skill cannot fetch year N's figures unless you put them in the pull, so
+this window is a **plan** decision, not a skill decision.
+
+When `today` falls on or after Jan 1 and **before** the wrapping quarterly due
+date (derive it from the configured `quarterly_due_dates` — the quarter whose
+due date falls in a later calendar year than its own period; never hardcode a
+month or day), set:
+
+```yaml
+  tax_year:
+    review_date: "2026-01-09"
+    timezone: "America/Phoenix"
+    override: null
+    changeover:
+      prior_year_window: { since_date: "2025-01-01", until_date: "2025-12-31" }
+      through: "2026-01-15"           # the wrapping due date, derived from config
+```
+
+and **union `prior_year_window` into `plan.data_pull`** (extend `since_date`
+back, add the prior year's month keys) exactly as you union any tier's window.
+That is what makes the prior-year pull part of the plan the skill is required to
+honor, rather than a widening it is forbidden to do.
+
+Outside that window set `changeover: null` and leave `data_pull` unchanged.
+
+This window is **wider than the `annual` tier** (Jan 1–7) on purpose — a Jan 8–14
+review runs no annual tier but still has two live tax years. Never conflate them:
+`annual` is a tier eligibility question, `changeover` is a tax-year question, and
+either can fire without the other.
+
+If `timezone` is missing you have already emitted `timezone_missing` and stayed
+conservative — in that case set `tax_year.timezone: null` and leave `changeover`
+null. The engine refuses to guess a zone, so the skill will surface the tax
+sections as unavailable rather than answer with the host zone's year.
+
 ## State inspection
 
 Read-only passes, kept separate so you don't burn context fetching data you only needed to confirm exists:
@@ -151,6 +212,11 @@ plan:
     transactions:
       since_date: "2026-05-01"          # min across eligible tiers' windows
       until_date: "2026-06-30"          # max across eligible tiers' windows
+  tax_year:                             # INPUTS to resolveTaxYear — never the year, never the label
+    review_date: "2026-06-30"           # = data_pull.transactions.until_date
+    timezone: "America/Phoenix"         # config.timezone, verbatim; null when missing
+    override: null                      # config.tax_year when set, else null
+    changeover: null                    # or { prior_year_window: {...}, through: "YYYY-MM-DD" }
   report:
     period: "<human period covered>"
     tiers: ["<annual|quarterly-tax|monthly|weekly>"]   # strict order: annual, quarterly-tax, monthly, weekly
@@ -190,6 +256,11 @@ plan:
     transactions:
       since_date: "2026-01-01"
       until_date: "2026-04-13"
+  tax_year:
+    review_date: "2026-04-13"
+    timezone: "America/Phoenix"
+    override: null
+    changeover: null                    # Apr 13 is past the Jan 15 wrapping due date
   report:
     period: "Q1 2026 to date + week of Apr 6–13, 2026"
     tiers: ["quarterly-tax", "weekly"]
@@ -210,6 +281,42 @@ plan:
     report_history: { found: 14, latest: { weekly: "2026-04-06", monthly: "2026-04-01" } }
 ```
 
+Changeover run for `today = 2026-01-09` (Friday — no eligible tier, but two live tax years). Note that `data_pull` already carries the prior year, so the skill honoring the plan's window is the same act as fetching year 2025's close-out figures:
+
+```yaml
+plan:
+  budget:
+    name: "Household"
+    id: "aa11bb22-..."
+  review_scope: "computed"
+  analyses: []
+  data_pull:
+    accounts: ["acct-1", "acct-2", "acct-3"]
+    months: ["2025-01", "…", "2025-12", "2026-01"]   # prior_year_window unioned in
+    transactions:
+      since_date: "2025-01-01"        # pulled back by the changeover window
+      until_date: "2026-01-09"
+  tax_year:
+    review_date: "2026-01-09"
+    timezone: "America/Phoenix"
+    override: null
+    changeover:
+      prior_year_window: { since_date: "2025-01-01", until_date: "2025-12-31" }
+      through: "2026-01-15"           # the wrapping quarterly due date, from config
+  report:
+    period: "Jan 1–9, 2026 (tax year 2025 still open)"
+    tiers: []
+    reasons: {}
+    includes: []
+    excludes: []
+  warnings: []
+  state_inspected:
+    budgets: { count: 1 }
+    accounts: { count: 5, on_budget: 3, off_budget: 2 }
+    categories: { groups: 8 }
+    report_history: { found: 14, latest: { weekly: "2026-01-05", monthly: "2026-01-01" } }
+```
+
 > The `analyses`, `includes`, and `excludes` values above are illustrative placeholders. The authoritative catalogue of analysis names and report sections is defined by the universal review skill's tier matrix — this planner neither hard-codes nor implements it.
 
 ## Hard rules
@@ -217,5 +324,6 @@ plan:
 1. **Read-only.** Never call a write verb (`ynab_update_*`, `ynab_create_*`, `ynab_delete_*`, `ynab_reconcile_account`) — they aren't in your `tools` list, and they never should be. If you realize you need to mutate YNAB (or write any file — reports included), stop and add a warning instead. Planning never writes.
 2. **No fabrication.** Only put analyses, accounts, months, or warnings in the plan that are backed by state you actually inspected. If a pull is ambiguous or fails, narrow the plan and record a warning. An empty `warnings` list is a correct answer; a padded plan is not.
 3. **The schedule is computed here, once.** Tier eligibility comes from the rules above and nowhere else — consumers (the universal review skill, the tier wrappers, the router) read `plan.report.tiers` and never recompute it. Symmetrically, you never delegate or defer the computation to them.
-4. **Finish with the YAML block.** The dispatching skill parses the last YAML block in your output — any prose before it is for observability only.
-5. **No user interaction.** If you find yourself wanting to ask the user something, that's a signal to add a warning (with `options`) and let the main conversation surface it instead. You return a plan and exit; you do not converse.
+4. **The tax year is an input you supply, never an answer you give.** Emit `plan.tax_year.{review_date,timezone,override}` and let the engine's `resolveTaxYear` derive the year and the header label. Never write a year or a `Tax Year …` label into the plan, and never read one off the budget name. During the January changeover, union the prior-year window into `data_pull` so the skill can honor the plan and still see both years (issue #17).
+5. **Finish with the YAML block.** The dispatching skill parses the last YAML block in your output — any prose before it is for observability only.
+6. **No user interaction.** If you find yourself wanting to ask the user something, that's a signal to add a warning (with `options`) and let the main conversation surface it instead. You return a plan and exit; you do not converse.

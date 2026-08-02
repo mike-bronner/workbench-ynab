@@ -41,14 +41,21 @@ already did that and handed you a single YAML `plan:` block. Treat it as
 authoritative and **do not recompute it** (same contract as bujo: the
 orchestrator owns the schedule, the protocol owns the analysis).
 
-Every date you use — the lookback window, month/quarter boundaries, the tax-year
-label — comes **exclusively** from this plan, whose windows the dispatcher
-computed from the configured `timezone` (`config.timezone`, issue #31). **Never
-call the host clock** (`new Date()`, `date`, `now`, the shell's `TZ`) to derive
-or widen a date: a review run in the wrong zone misplaces near-midnight
-transactions and the wrong tax year. When a downstream tax read needs an "as of"
-date, pass the review window's end date (`plan.data_pull.transactions.until_date`)
-— never a host-clock default.
+Every date you use — the lookback window, month/quarter boundaries, the review
+date the tax year is derived from — comes **exclusively** from this plan, whose
+windows the dispatcher computed from the configured `timezone`
+(`config.timezone`, issue #31). **Never call the host clock** (`new Date()`,
+`date`, `now`, the shell's `TZ`) to derive or widen a date: a review run in the
+wrong zone misplaces near-midnight transactions and the wrong tax year. When a
+downstream tax read needs an "as of" date, pass the review window's end date
+(`plan.data_pull.transactions.until_date`) — never a host-clock default.
+
+The **tax-year label is the one thing the plan does not carry.** The plan gives
+you the *inputs* (`plan.tax_year`, below); the tax engine derives the year and
+its header label from them via `resolveTaxYear`, and you pass that label through
+verbatim. There is exactly one producer of that string in the tree — see
+[§12](#the-12-section-methodology) and
+[docs/tax-year-resolution.md](../../docs/tax-year-resolution.md).
 
 From the plan you consume:
 
@@ -61,6 +68,10 @@ From the plan you consume:
 | `plan.data_pull.months` | Month keys in scope. |
 | `plan.data_pull.transactions.{since_date,until_date}` | The lookback window — already sized by the orchestrator. |
 | `plan.report.period` | Human period label for the report header. |
+| `plan.tax_year.review_date` | The review date the active tax year is derived from (same value as `until_date`). Pass as `ytdData.asOfDate`. |
+| `plan.tax_year.timezone` | The configured IANA zone. Pass as `ytdData.timezone`. `null` means the orchestrator had none — render the tax sections unavailable (see §12); never substitute the host zone. |
+| `plan.tax_year.override` | The user's `config.tax_year`, or `null`. Pass through as `ytdData.taxYearOverride` — don't interpret it. |
+| `plan.tax_year.changeover` | `null` on an ordinary review. When present (`{prior_year_window, through}`), the prior tax year is still open and §12 must report both years. |
 | `plan.warnings` | Pre-existing warnings (e.g. `budget_not_found`); surface them, don't silently drop them. |
 
 If the plan is missing or minimal (e.g. the orchestrator recorded a
@@ -129,7 +140,15 @@ out of scope for the read-only phase and absent from any review path.
 ### Fetch discipline
 
 - **Honor the plan's window.** Fetch only `plan.data_pull` accounts/months and
-  the `since_date`/`until_date` window. Don't widen the pull.
+  the `since_date`/`until_date` window. Don't widen the pull. **The January
+  changeover needs no widening**: when `plan.tax_year.changeover` is present, the
+  orchestrator has already unioned `changeover.prior_year_window` into
+  `plan.data_pull`, so the prior tax year's transactions are inside the plan's own
+  window — fetching them *is* honoring the plan. If `changeover` is present but
+  `data_pull` does not reach back to `prior_year_window.since_date`, that is a
+  planning bug: do **not** widen the pull yourself. Add a
+  `changeover_window_missing` note to the dispatch summary and render §12 with the
+  prior-year close-out marked unavailable.
 - **Paginate and handle deltas.** `list_transactions` may page; follow the
   server's pagination until exhausted rather than truncating. Treat a partial
   page as "more to fetch," not "done."
@@ -284,12 +303,14 @@ Which sections run, and over what window, is set by the [tier matrix](#7-tier-ma
     finding above that the user can act on, highest-impact first (categorize
     these, fund that, dedup these, reconcile that). → `SLOT:section-11-recommendations`.
 12. **Tax Summary YTD.** Year-to-date roll-up by schedule: Schedule C P&L
-    (business net), Schedule A itemizables vs. the standard deduction
-    (`getStandardDeduction`), medical above the AGI threshold
-    (`getThreshold('medicalAgiPercent')`), SE-tax exposure
-    (`getThreshold('seTaxRate')`), and quarterly estimated-tax status against
-    `getQuarterlyDueDates(year)`. **Tier-dependent** (see matrix); empty string
-    for the slot when the tier carries no tax section. → `SLOT:section-12-tax-summary`.
+    (business net), Schedule A itemizables vs. the standard deduction, medical
+    above the AGI threshold, SE-tax exposure, and quarterly estimated-tax status.
+    You do **not** assemble these by hand — aggregate the classified transactions
+    into `ytdData` and call the engine's `computeTaxSummary`, which composes all
+    five fragments and resolves the active tax year. **Tier-dependent** (see
+    matrix); empty string for the slot when the tier carries no tax section. →
+    `SLOT:section-12-tax-summary`. Full call contract:
+    [§12 call](#12-call--the-tax-summary-and-the-active-tax-year).
 
 The remaining template slots are fed by the standard YNAB review content the
 sections above already compute: **income** (`SLOT:section-2-income`) from inflows
@@ -297,6 +318,70 @@ in §1/§10; the four **KPI cards** (`SLOT:kpi-dashboard`: income, spending, net
 cash flow, health score) from §1/§3/§10/§9. Every one of the 14 slots is filled
 (an out-of-scope section is replaced with an **empty string** — the surrounding
 `<section>` stays in the document; see §8).
+
+### §12 call — the tax summary and the active tax year
+
+Section 12's figures **and** the report's tax-year label both come from one call
+to the tax-engine facade
+([`../../lib/tax/index.mjs`](../../lib/tax/index.mjs)). Aggregate the classified
+transactions into `ytdData` yourself; the year is not yours to decide.
+
+```js
+import { computeTaxSummary } from '…/lib/tax/index.mjs';
+
+const summary = computeTaxSummary(profile, {
+  // --- the tax-year inputs, straight from plan.tax_year, unmodified ---------
+  asOfDate:        plan.tax_year.review_date,   // = data_pull.transactions.until_date
+  timezone:        plan.tax_year.timezone,      // config.timezone — never the host zone
+  taxYearOverride: plan.tax_year.override,      // config.tax_year, or null/undefined
+  filingStatus:    profile.filingStatus,
+  // --- the YTD figures you aggregated from the window's transactions --------
+  scheduleCLines, itemizedDeductionsTotal, medicalExpenses, agi,
+  // --- ONLY during the changeover (see below) ------------------------------
+  priorYearClose,
+});
+```
+
+**Never pass a tax year.** `ytdData.taxYear` was removed in issue #17 and now
+throws: a stored year keeps answering last year once the calendar rolls over,
+which is the same staleness bug as reading `Personal 2024` off the budget name.
+The engine derives the year from `asOfDate` + `timezone` via `resolveTaxYear`,
+and returns it as `summary.meta.taxYear`. Use *that* for every year-keyed profile
+accessor in this section — `getStandardDeduction(summary.meta.taxYear, …)`,
+`getQuarterlyDueDates(summary.meta.taxYear)` — not `profile.taxYear`, which
+records only which year the profile's rates were authored for.
+
+**The header label.** `summary.meta.taxYearLabel` is the report header string.
+Pass it verbatim to `--tax-year` (§8). Do not build it, reformat it, or
+substitute a year of your own: exactly one place in the tree produces it, and the
+report writer refuses any other shape.
+
+**The January changeover.** When `plan.tax_year.changeover` is present, the prior
+tax year is still open (its final estimated payment has not come due) and the
+review reports **both** years:
+
+1. Aggregate a **second** `ytdData` from the prior-year transactions — the ones
+   inside `changeover.prior_year_window`, already in the plan's pull — and pass
+   it as `priorYearClose`, carrying its own `asOfDate` (where that year's books
+   were cut, normally the window's `until_date`). Give it no `taxYear`: the
+   engine derives the close-out year from the boundary.
+2. `computeTaxSummary` **throws** if you omit it in this window. That is
+   deliberate — a summary that quietly dropped the close-out would look complete
+   while hiding a whole tax year. Do not catch and continue.
+3. Render both in the §12 fragment: `summary.yearBoundary.priorYearClose` is the
+   prior year's close-out (identical shape), and the summary's own figures are
+   the **new** year's opening state. Label each with its year so the two are never
+   confused, and lead with the prior year — it is the one with a deadline.
+4. The changeover signal reaches the header automatically:
+   `summary.meta.taxYearLabel` already names both years and the date the prior
+   year closes through.
+
+**When the tax year cannot be resolved.** If `plan.tax_year.timezone` is `null`,
+or `computeTaxSummary` throws on the tax-year inputs, treat it exactly like a
+failed profile load (§4): render §12 as `tax year unresolvable (<error kind>)`,
+pass **no** `--tax-year`, and add a `tax_year_error` note to the dispatch summary.
+Never fall back to the host zone, the budget name, or `profile.taxYear` — a
+plausible wrong year is worse than a visible gap.
 
 ### Empty-state & degenerate-budget handling
 
@@ -419,10 +504,12 @@ writer, M2-9 — pass it through, don't hardcode it).
 
 The `{{tax_year}}` scalar slot carries the **active tax year**. Whenever the tier
 renders Section 12, pass the engine's `summary.meta.taxYearLabel` verbatim to
-`--tax-year` — it comes from `resolveTaxYear` and names both years during the
-January changeover. Never write the year by hand and never read it off the budget
-name: `Personal 2024` is a renameable label, not a tax fact. A tier with no tax
-section passes nothing. See [docs/tax-year-resolution.md](../../docs/tax-year-resolution.md).
+`--tax-year` — it comes from `resolveTaxYear` (via the [§12
+call](#12-call--the-tax-summary-and-the-active-tax-year)) and names both years
+during the January changeover. Never write the year by hand and never read it off
+the budget name: `Personal 2024` is a renameable label, not a tax fact. A tier
+with no tax section — or one whose tax year would not resolve — passes nothing.
+See [docs/tax-year-resolution.md](../../docs/tax-year-resolution.md).
 
 ### Trust boundary — escape every YNAB string
 

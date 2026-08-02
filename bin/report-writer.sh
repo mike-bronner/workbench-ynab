@@ -202,11 +202,23 @@ fi
 # OPTIONAL: a tier with no tax section passes nothing and the {{tax_year}} slot
 # renders empty, mirroring the tier-dependent Section-12 block slot. When supplied
 # it must be one of the two shapes the tax engine's resolveTaxYear path produces —
-# the plain label, or the January changeover label naming both years. Pinning the
-# shape here is what makes "sourced exclusively from resolveTaxYear" enforceable
-# rather than a convention: a hand-written or budget-name-derived year (e.g.
-# "Personal 2024") cannot pass, and a config-sourced string never reaches the
-# rendered header unchecked.
+# the plain label, or the January changeover label naming both years.
+#
+# WHAT THIS CHECK DOES AND DOES NOT PROVE. It is a SHAPE gate, not a provenance
+# gate: a shell script receiving a string cannot tell where that string came from,
+# so a hand-typed "Tax Year 2025" passes exactly like an engine-produced one. What
+# it does buy is that the obviously-wrong sources cannot pass at all — a budget
+# name ("Personal 2024"), a bare year, a config string, a locale-formatted date —
+# and that the changeover label's two-year shape survives to the header intact.
+#
+# The actual "sourced exclusively from resolveTaxYear" guarantee is upstream, in
+# the SINGLE-PRODUCER rule: exactly one place in the tree builds this label
+# (`headerLabel` in lib/tax/taxYear.mjs), exactly one place surfaces it
+# (`meta.taxYearLabel` in lib/tax/index.mjs, whose year comes from resolveTaxYear
+# and from nowhere else), and every consumer is contracted to pass it verbatim.
+# That rule is pinned by tests/unit/tax-year.test.mjs (the label has one producer)
+# and tests/unit/tax-engine.test.mjs (meta.taxYear is resolved, never echoed).
+# This gate is the last line of defence behind it, not the guarantee itself.
 if [ -n "$tax_year" ] && [[ ! "$tax_year" =~ ^Tax\ Year\ [0-9]{4}(\ \([0-9]{4}\ close-out\ through\ [0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])\))?$ ]]; then
   usage_err "invalid --tax-year '$tax_year' (expected 'Tax Year YYYY', optionally followed by ' (YYYY close-out through YYYY-MM-DD)') — pass the engine's meta.taxYearLabel verbatim"
 fi
