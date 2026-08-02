@@ -46,12 +46,18 @@ source "${CLAUDE_PLUGIN_ROOT}/bin/config.sh"
 _require_config || exit 1
 budget_entry="$(_cfg_default_budget)"        # → budget_name (or budget_id) + label
 report_dir="$(_cfg '.report.output_dir')"    # default: ~/Documents/Claude/Reports
-timezone="$(_cfg '.timezone')"               # fall back to the system timezone when unset
+timezone="$(_cfg_timezone)" || exit 1        # required IANA tz — fail closed, never the host clock
+today="$(_today_in_tz "$timezone")"          # authoritative today (YYYY-MM-DD) in the configured tz
 ```
 
-Compute `today` as an ISO date (`YYYY-MM-DD`) in that timezone (`timezone`
-falls back to the system timezone until the timezone-ownership config field
-lands — note the fallback, don't fail on it).
+`today` is the authoritative review date, computed **in the configured
+timezone** by `_today_in_tz` — the single source both this router and the ad-hoc
+tier commands use, so a scheduled run and an interactive run on the same day
+agree on the window and the tax-year label. `_cfg_timezone` **fails closed**: a
+missing or invalid `.timezone` stops the run with a descriptive error rather
+than silently defaulting to the system timezone, which would misplace
+near-midnight transactions and the wrong tax year. Never compute `today` from
+the host clock.
 
 ### 1b. Pre-warm the YNAB MCP (best-effort)
 
@@ -97,6 +103,58 @@ agent's reasoning, for observability only. From the plan you consume:
   (`annual`, `quarterly-tax`, `monthly`, `weekly`). Never recompute or reorder.
 - `plan.report.reasons.<tier>.window` — each tier's own review window.
 - `plan.warnings` — anomalies for Step 2.
+
+### 1d. Dispatch quarterly estimated-tax reminders (M6-5)
+
+Independently of which review tiers run, nudge the user ahead of each quarterly
+estimated-tax due date. This is the **unified task's** home for the reminder —
+**no separate cron entry** (issue #83, AC: extend M2-11): it keys on the same
+quarterly due-date window the orchestrator's tier-routing owns, reads amounts
+from the M6-4 tracker, and delivers through the **M6-2** dispatch channel like
+every other alert. The decision logic is the pure detector
+[`lib/tax/estimatedTaxReminder.mjs`](../lib/tax/estimatedTaxReminder.mjs); the
+full contract is [`docs/alerts-config.md`](../docs/alerts-config.md#estimated-tax-reminders-m6-5).
+
+Run it once per review, using the `today`/`timezone` resolved in Step 1a — all
+date comparisons happen in the configured timezone:
+
+```bash
+node --input-type=module <<EOF
+import { loadAlertsConfig, dispatchAlerts } from '${CLAUDE_PLUGIN_ROOT}/lib/monitor/alerts.mjs';
+import { loadProfile } from '${CLAUDE_PLUGIN_ROOT}/lib/tax/loadProfile.mjs';
+import { loadTracker } from '${CLAUDE_PLUGIN_ROOT}/lib/tax/estimatedTax.mjs';
+import { computeQuarterlyTaxReminders, resolveCandidateDueDates } from '${CLAUDE_PLUGIN_ROOT}/lib/tax/estimatedTaxReminder.mjs';
+
+const today = '${today}';                 // YYYY-MM-DD in the configured tz (Step 1a)
+const alerts = loadAlertsConfig();        // includes alerts.tax (lead_time_days, reminders_enabled)
+const profile = loadProfile();
+if (!profile.ok) { process.stderr.write('[tax-reminder] tax profile unavailable — skipping\n'); process.exit(0); }
+
+// This tax year's four quarters PLUS last year's (whose Q4 falls on Jan 15 of
+// this year), so a January run still sees the prior year's Q4 deadline.
+const dueDates = resolveCandidateDueDates(profile.getQuarterlyDueDates, Number(today.slice(0, 4)));
+
+let tracker = null;
+try { tracker = loadTracker(); }
+catch (err) { process.stderr.write('[tax-reminder] tracker unreadable — reminding without amounts\n'); }
+
+const findings = computeQuarterlyTaxReminders({
+  today,
+  dueDates,
+  tracker,
+  leadTimeDays: alerts.tax.leadTimeDays,
+  remindersEnabled: alerts.tax.remindersEnabled,
+});
+const result = dispatchAlerts(findings, { config: alerts });
+// Diagnostics to STDERR only — never leak into stdout/dispatch on an MCP path.
+process.stderr.write('[tax-reminder] ' + findings.length + ' finding(s); dispatched=' + result.dispatched + '\n');
+EOF
+```
+
+This is read-only to YNAB — the dispatch only appends to the alert log and fires
+the configured notification; it never touches the budget or moves money. A
+disabled master switch (`alerts.enabled: false`) or `alerts.tax.reminders_enabled:
+false` makes it a silent no-op. Proceed to Step 2 regardless of the outcome.
 
 ## Step 2 — Surface warnings (INTERACTIVE when present)
 

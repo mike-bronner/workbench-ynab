@@ -82,7 +82,31 @@ Two layers keep credentials out of version control:
    `vendor/` to avoid false positives. The **cleartext-token and PEM rules still
    scan `vendor/`** — those shapes never legitimately appear in the bundle, so
    the ~1.46 MB vendored artifact (the repo's highest-risk supply-chain surface)
-   is scanned for the unambiguous secret shapes. Bundle *integrity* verification
+   is scanned for the unambiguous secret shapes.
+
+   **Every file is scanned as text, in the C locale.** The scan deliberately does
+   *not* skip "binary" files: a single NUL byte anywhere in a file is enough for
+   `grep` to classify the whole file as binary and skip it, which would hide a
+   credential in that file from all three rules above — and this scan is the
+   repo's only content-scanning CI gate, so one stray byte would silently shrink
+   it to nothing (issue #255). The scanning `grep`s are pinned to `LC_ALL=C` for
+   the same reason: under a UTF-8 locale `grep` decodes input as UTF-8, and a
+   byte that is not valid UTF-8 makes it silently fail to match — no error, no
+   warning, the credential simply reports as absent. CI runs under `LANG=C.UTF-8`,
+   so that pin is what keeps the gate honest there. Scanning as text means grep would otherwise print raw
+   file bytes, so reported hits are **sanitized and reported as `grep -o`
+   matches**: a hit shows the matched shape rather than the whole physical line,
+   bytes outside printable ASCII become `?`, and the text after the `path:line:`
+   locator is capped at 200 characters with a `...` marker. The cap keeps the
+   **head *and* the tail** of that text: because `grep -o` makes the match the
+   record's suffix, keeping the tail guarantees the matched shape reaches the
+   report even when the locator split mis-anchors — which it does on any path
+   containing `:<digits>:`, since the split takes the leftmost one. (No such path
+   is tracked here, but git accepts them, so the report does not rely on their
+   absence.) That keeps a finding actionable (`path:line:match`) on a minified
+   bundle, where the whole file can be one 500,000-character line and reporting
+   the *line* would show unrelated code while silently truncating away the secret
+   that tripped the rule. Bundle *integrity* verification
    is a **complementary** control, not a substitute for this scan:
    `verify-bundle.sh` detects drift, not secret content (see
    [Bundle integrity](#bundle-integrity)). The scanner is itself covered by a
@@ -175,6 +199,79 @@ The outcome is recorded in `vendor/ynab-mcp/vendored.json`
 auditable from one file: **registry hash → downloaded tarball → extracted CJS →
 committed copy**. The exact commands and pass/fail criteria live in
 [`docs/vendoring.md`](docs/vendoring.md#verifying-upstream-provenance).
+
+## Generated Artifacts
+
+The token and the vendored bundle are not the only sensitive surfaces. Every
+review run writes **unencrypted, plaintext files** to your local disk that
+together contain your **complete financial detail** — transaction history,
+balances, payees, category assignments, and tax figures. They are **not
+encrypted at rest** by this plugin; their only protection is owner-only file
+permissions and the privacy of the machine they live on.
+
+Two guarantees apply to all of them:
+
+- **Owner-only permissions.** Every artifact is written mode **0600** (owner
+  read/write only) and every directory the plugin creates is mode **0700**. The
+  data directory is created *at creation time* under `umask 077` (`commands/setup.md`,
+  `commands/ynab-migrate.md`) so there is never a window in which it is
+  world-traversable. Every file artifact is likewise owner-only *from the moment it
+  exists*, never by a later `chmod`: `config.json` is staged inside a `umask 077`
+  subshell before it is atomically published, the report writer creates a `0600`
+  temp file, `bin/audit-log.sh` writes under a `umask 077` subshell, and the
+  monitor-state and tax-tracker writers pass an explicit `mode: 0o600`. Each site
+  additionally `chmod`s as defense-in-depth, which re-tightens a stale temp file
+  from an interrupted run — a second layer, never the only one. `commands/setup.md`
+  and `commands/ynab-migrate.md` (the data dir + `config.json`), the `.mjs` state
+  writers, `bin/audit-log.sh`, and `bin/report-writer.sh` all enforce this.
+- **Not for shared or cloud-synced locations.** The default report directory,
+  `~/Documents/Claude/Reports`, sits under `~/Documents`, which **macOS may sync
+  to iCloud Drive** when Desktop & Documents syncing is enabled — silently
+  uploading your full financial reports to cloud storage. Keep the report and
+  data directories on local, disk-encrypted storage (enable **FileVault**), and
+  do **not** point `.report.output_dir` at a shared drive, a synced folder, or a
+  cloud-backed location unless you intend those records to be copied there.
+
+### Artifact inventory
+
+Every file the plugin generates that contains financial data, where it lives, and
+who is responsible for pruning it. `<data-dir>` is the update-stable plugin data
+directory, `~/.claude/plugins/data/workbench-ynab-claude-workbench/`.
+
+| Artifact | Path pattern | Contains | Pruning |
+|---|---|---|---|
+| Review report | `<report-dir>/YNAB-<Tier>-Review-<YYYY-MM-DD>.html` (default `<report-dir>` = `~/Documents/Claude/Reports/`) | Full review: classifications, income/spending, balances, cash-flow, net worth, tax summary — and the proposed change-set ([#53](https://github.com/mike-bronner/workbench-ynab/issues/53)). Accumulates one file per run. | **`bin/ynab-prune.sh`** — retention policy (see below). |
+| Write-back audit log | `<data-dir>/audit/audit-<YYYY-MM>.jsonl` | Append-only record of every applied ledger write (categorize / allocate / reconcile / delete-duplicate) with tool + result. | Retained deliberately as the write-back trail — user-managed. |
+| Monitor state | `<data-dir>/monitor-state.json` | Latest between-run monitoring snapshot (balances / transaction deltas). | Single live file, overwritten in place — no accumulation. |
+| Alert log | `<data-dir>/alert-log.jsonl` | Append-only monitoring alerts. | User-managed. |
+| Estimated-tax tracker | `<data-dir>/tax-tracker.json` | Running estimated-tax totals. | Single live file, overwritten in place. |
+| Tax profile | `<data-dir>/tax-profile.json` | Your tax configuration (filing status, rates, thresholds). | Live config — removed at uninstall **only if you choose to delete `<data-dir>`**; kept by default. |
+| Config | `<data-dir>/config.json` | Budget ids, business/tax/persona/report settings (never the token — that is Keychain-only). | Live config — removed at uninstall **only if you choose to delete `<data-dir>`**; kept by default. |
+| Change-set proposals *(future — M4-10)* | `<data-dir>/proposals/changeset-<stamp>.json` (default; override `.apply.proposal_path`) | The pending proposed ledger writes a review emits ([design](assets/changeset-lifecycle.md)). Not written yet — the review write path (**M4-10**) will emit them. | **Not yet swept.** When M4-10 lands it must create these `0600`, add them to this inventory, and give them a retention story (extend `bin/ynab-prune.sh` to `proposals/`), since they accumulate unbounded like reports. |
+
+**Retention & pruning.** Review reports are the one artifact that grows without
+bound (once the proposal writer lands, its `proposals/` files will be a second —
+see the inventory row above), so [`bin/ynab-prune.sh`](bin/ynab-prune.sh) enforces
+a documented retention
+policy: it removes report files older than a maximum age (default **30 days**,
+overridable per-install via `.report.retention_days` in `config.json` or
+per-invocation via `--days N`). It is **dry-run by default** — it previews exactly
+what would be deleted and removes nothing unless `--apply` is passed:
+
+```bash
+bash bin/ynab-prune.sh              # preview reports older than the threshold
+bash bin/ynab-prune.sh --apply      # actually delete them
+```
+
+**Uninstall.** The uninstall / teardown flow
+([#67](https://github.com/mike-bronner/workbench-ynab/issues/67)) —
+`/workbench-ynab:uninstall`, with the by-hand equivalent in
+[`docs/uninstall.md`](docs/uninstall.md) — references this inventory so it can
+name the correct paths when it asks what to do with your residual financial
+data. It prompts before touching `<data-dir>` and **keeps it by default**, since
+deleting it destroys the write-back audit trail irreversibly. It never deletes
+`<report-dir>`: that path is user-chosen and may hold unrelated files, so
+reports stay yours to prune with [`bin/ynab-prune.sh`](bin/ynab-prune.sh).
 
 ## Reporting a vulnerability
 

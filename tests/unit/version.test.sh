@@ -10,7 +10,7 @@
 # exactly one bump target and no hidden ones can creep back in:
 #   - the plugin's own version is 0.1.0 in .claude-plugin/plugin.json
 #   - the vendored YNAB MCP version is frozen, provenance-only in
-#     vendor/ynab-mcp/vendored.json (@dizzlkheinz/ynab-mcpb@0.26.10)
+#     vendor/ynab-mcp/vendored.json (@dizzlkheinz/ynab-mcpb@0.27.1)
 #   - no other manifest in the repo carries a standalone `version` field
 #   - the README documents the model and names the sole bump target
 
@@ -73,8 +73,8 @@ echo "vendored YNAB MCP version is frozen provenance:"
 if [ -f "$VENDORED" ]; then
   assert_eq "vendored.json name is @dizzlkheinz/ynab-mcpb" \
     "@dizzlkheinz/ynab-mcpb" "$(jq -r '.name' "$VENDORED")"
-  assert_eq "vendored.json version is 0.26.10" \
-    "0.26.10" "$(jq -r '.version' "$VENDORED")"
+  assert_eq "vendored.json version is 0.27.1" \
+    "0.27.1" "$(jq -r '.version' "$VENDORED")"
 else
   FAIL=$((FAIL + 1)); echo "  ❌ vendor/ynab-mcp/vendored.json not found at $VENDORED"
 fi

@@ -134,6 +134,17 @@ handler (the swap-ready single-source-of-truth invariant, issue #87). Names trac
 to [`skills/protocol/ynab-tools.md`](protocol/ynab-tools.md); bare `mcp__ynab__*`
 names are never produced.
 
+Resolution is **fail-closed on ambiguity** (issue #216). `resolveTools()` runs both
+suffixes through the shared `resolveUniqueTool` (`assets/resolve-tool.js`, the same
+resolver the delete path uses), which asserts each suffix matches **exactly one**
+allow-list entry and **throws** on zero or several — naming the suffix and every
+colliding tool. An unchecked `.find()` would return the first match, so a future
+allow-list entry sharing a suffix (say `..._bulk_update_transaction`) could silently
+receive single-transaction writes; that can no longer happen. Matching is anchored
+`endsWith`, not a substring scan, which is what keeps the nesting suffix pair
+(`_update_transaction` is a substring of `_update_transactions`) unambiguous: the
+singular suffix never matches the bulk tool.
+
 ## Injected ports (agent runtime)
 
 Like the executor, the handler holds no MCP coupling — the caller wires:

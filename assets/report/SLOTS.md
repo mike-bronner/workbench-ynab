@@ -77,7 +77,7 @@ skill substitutes a **single string** for each — never an HTML block.
 
 | Placeholder | Meaning | Where it appears |
 |---|---|---|
-| `{{tier}}` | Review tier label, e.g. `Monthly`, `Quarterly Tax`, `Annual`. | `<title>`, `<meta name="report-tier">`, the header `<h1>`, and the print footer line. |
+| `{{tier}}` | Review tier label, e.g. `Monthly`, `Quarterly Tax`, `Annual`, `Portfolio` (the cross-budget rollup). | `<title>`, `<meta name="report-tier">`, the header `<h1>`, and the print footer line. |
 | `{{report_date}}` | The report date — the template carries the date in a slot, never a hardcoded value. | `<title>`, `<meta name="report-date">`, the header `.meta`. |
 | `{{output_path}}` | The save path/filename, **decided by the report writer (M2-9)** — a slot value, never hardcoded in the template. | `<meta name="report-output-path">`. |
 

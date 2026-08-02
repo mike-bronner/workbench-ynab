@@ -71,7 +71,14 @@ ALLOWLIST=(
 # Scan the whole tree — skills, agents, commands, hooks, bin, assets, docs,
 # README, JSON config, everything. Exclude the vendored MCP bundle (it
 # legitimately defines the names) plus VCS / dependency dirs.
-all_hits="$(grep -rlE --binary-files=without-match "$PATTERN" . \
+# --binary-files=text, NOT the default without-match: a single NUL byte anywhere
+# in a file would otherwise make grep classify it as binary and skip it whole,
+# silently shrinking this guard's coverage. That is not hypothetical —
+# assets/allocate-handler.js carried a raw NUL as a cache-key separator and hid
+# an unhardened write-tool resolution site from this guard and from three
+# `ALLOWED_TOOLS.find(` sweeps (issue #216). Scanning as text closes the class at
+# the root; -l prints filenames only, so binary content never reaches stdout.
+all_hits="$(grep -rlE --binary-files=text "$PATTERN" . \
   --exclude-dir=.git \
   --exclude-dir=vendor \
   --exclude-dir=node_modules \

@@ -14,7 +14,9 @@
 // the dollars→milliunits boundary conversion, the dedupe_key format, the top-N
 // cap, malformed-finding tolerance (the NEVER-throws contract), the always-on
 // alert log and its enforced owner-only modes, the config-file fallback seam,
-// the channel switch, and the stdout discipline.
+// the channel switch, the stdout discipline, and the #206/#244 path-containment
+// guard on both the config read and the alert-log write (an escaping path is
+// refused unread/unwritten; dispatchAlerts degrades the refusal, never throws).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -37,6 +39,7 @@ import {
   dollarsToMilliunits,
   dedupeKey,
   sanitizeAlertsConfig,
+  sanitizeTaxAlertsConfig,
   loadAlertsConfig,
   sortFindings,
   renderAlerts,
@@ -50,8 +53,12 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const MODULE_PATH = join(ROOT, 'lib', 'monitor', 'alerts.mjs');
 
 const TMP = mkdtempSync(join(tmpdir(), 'ynab-alerts-'));
+// A sibling root OUTSIDE the data-dir allowlist — config/log paths resolving
+// here must be refused by the containment guard (#206/#244).
+const OUTSIDE = mkdtempSync(join(tmpdir(), 'ynab-alerts-outside-'));
 let seq = 0;
 const freshPath = (name) => join(TMP, `${seq++}-${name}`);
+const outsidePath = (name) => join(OUTSIDE, `${seq++}-${name}`);
 
 const finding = (severity, n = 1) => ({
   severity,
@@ -106,6 +113,44 @@ test('sanitizeAlertsConfig boundaries: 0 lookahead days is valid, negative rates
   assert.equal(cfg.budgetOverrunPct, 100);
 });
 
+// --- alerts.tax: the estimated-tax reminder block (M6-5, issue #83) ----------
+
+test('zero-config: the alerts.tax block defaults to lead_time_days 7, reminders on', () => {
+  // An absent, null, or malformed tax block resolves to the documented defaults.
+  for (const raw of [undefined, null, 'nope', []]) {
+    const tax = sanitizeAlertsConfig({ tax: raw }).tax;
+    assert.equal(tax.leadTimeDays, 7);
+    assert.equal(tax.remindersEnabled, true);
+  }
+  // Omitting the whole alerts block still yields the tax defaults.
+  assert.deepEqual(sanitizeAlertsConfig(undefined).tax, { leadTimeDays: 7, remindersEnabled: true });
+  // The default block itself carries the raw (snake_case) shape.
+  assert.equal(DEFAULT_ALERTS_CONFIG.tax.lead_time_days, 7);
+  assert.equal(DEFAULT_ALERTS_CONFIG.tax.reminders_enabled, true);
+});
+
+test('sanitizeTaxAlertsConfig: valid overrides honoured, invalid fields fall back per-field', () => {
+  assert.deepEqual(sanitizeTaxAlertsConfig({ lead_time_days: 14, reminders_enabled: false }), {
+    leadTimeDays: 14,
+    remindersEnabled: false,
+  });
+  // 0 is the valid edge (due-day-only); negatives, non-integers, and non-booleans fall back.
+  assert.equal(sanitizeTaxAlertsConfig({ lead_time_days: 0 }).leadTimeDays, 0);
+  assert.equal(sanitizeTaxAlertsConfig({ lead_time_days: -1 }).leadTimeDays, 7);
+  assert.equal(sanitizeTaxAlertsConfig({ lead_time_days: 3.5 }).leadTimeDays, 7);
+  assert.equal(sanitizeTaxAlertsConfig({ reminders_enabled: 'yes' }).remindersEnabled, true);
+});
+
+test('loadAlertsConfig surfaces the tax block from a partial config file', () => {
+  const partial = freshPath('config-tax.json');
+  writeFileSync(partial, JSON.stringify({ alerts: { tax: { lead_time_days: 10, reminders_enabled: false } } }));
+  const cfg = loadAlertsConfig({ configFile: partial, dataDir: TMP });
+  assert.equal(cfg.tax.leadTimeDays, 10);
+  assert.equal(cfg.tax.remindersEnabled, false);
+  // Sibling alert fields still take their defaults.
+  assert.equal(cfg.channel, CHANNEL_MACOS);
+});
+
 test('dollar thresholds are converted to milliunits at the config boundary (× 1000)', () => {
   assert.equal(dollarsToMilliunits(500), 500000);
   assert.equal(dollarsToMilliunits(0.5), 500);
@@ -115,8 +160,6 @@ test('dollar thresholds are converted to milliunits at the config boundary (× 1
 });
 
 test('loadAlertsConfig: missing file, absent block, and partial block all degrade safely', () => {
-  // dataDir: TMP names the containment root (#244) — every freshPath lives under
-  // TMP, so these contained reads pass the guard and exercise the degrade paths.
   // Missing file → defaults (zero-config requirement), never a throw.
   const missing = loadAlertsConfig({ configFile: freshPath('no-such-config.json'), dataDir: TMP });
   assert.equal(missing.largeTransactionMilliunits, 500000);
@@ -310,17 +353,12 @@ test('dispatchAlerts caps the log entry at MAX_FINDINGS, most-severe first', () 
 });
 
 test('dispatchAlerts never throws when the log append fails (unattended pass survives)', () => {
-  // A logPath that is itself a DIRECTORY: it canonicalizes INSIDE TMP so it
-  // passes the #244 containment guard, but appendFileSync then fails EISDIR — the
-  // write throws inside dispatchAlerts's try/catch, which must swallow it and
-  // keep the pass alive. (Testing the IO-failure catch specifically, distinct
-  // from a containment refusal — an escaping path is covered in
-  // containment.test.mjs.)
-  const logDir = freshPath('log-is-a-dir');
-  mkdirSync(logDir);
+  // A file path under a path that is itself a FILE → mkdir/append must fail.
+  const blocker = freshPath('not-a-dir');
+  writeFileSync(blocker, 'file in the way');
   const result = dispatchAlerts([finding(ACTION, 1)], {
     config: sanitizeAlertsConfig({ channel: CHANNEL_LOG_ONLY }),
-    logPath: logDir, dataDir: TMP,
+    logPath: join(blocker, 'alert-log.jsonl'), dataDir: TMP,
   });
   assert.equal(result.dispatched, true);
   assert.equal(result.logPath, null);
@@ -429,6 +467,72 @@ test('dispatchAlerts loads config through the configFile seam when none is pre-s
   const off = dispatchAlerts([finding(ACTION, 1)], { configFile: offFile, logPath: offLog, dataDir: TMP, env: {} });
   assert.equal(off.dispatched, false);
   assert.equal(existsSync(offLog), false);
+});
+
+// --- Path containment (#206/#244): the config read + the log write ------------
+
+test('(#244) loadAlertsConfig refuses a config path escaping the data-dir root — never read', () => {
+  // The config file is a trust boundary: an escaping configFile / YNAB_CONFIG_FILE
+  // must be refused BEFORE the read (fail closed), exactly as confidence.mjs
+  // loadThresholds guards the same read — never silently swallowed into defaults.
+  const escaping = outsidePath('evil-config.json');
+  writeFileSync(escaping, JSON.stringify({ alerts: { channel: 'log-only' } }));
+  assert.throws(
+    () => loadAlertsConfig({ configFile: escaping, dataDir: TMP }),
+    (err) => err.code === 'containment' && /outside the allowed roots/.test(err.message),
+  );
+  // The env seam is guarded too, and an ABSENT escaping path is still refused
+  // (no existence oracle) rather than degrading to defaults.
+  assert.throws(
+    () => loadAlertsConfig({}, { YNAB_CONFIG_FILE: outsidePath('absent-config.json'), YNAB_DATA_DIR: TMP }),
+    (err) => err.code === 'containment',
+  );
+});
+
+test('(#244) appendAlertLog refuses a log path escaping the data-dir root — nothing written', () => {
+  // The alert log carries real tax figures (remaining_due dollars, quarter
+  // labels): an escaping logPath must throw a structured containment error
+  // BEFORE any mkdir/write, so no financial data ever lands outside the root.
+  // Mirrors lib/monitor/state.mjs writeState.
+  const escaping = outsidePath('evil-log.jsonl');
+  assert.throws(
+    () => appendAlertLog({ remaining_due: 4200 }, { logPath: escaping, dataDir: TMP }),
+    (err) => err.code === 'containment' && /outside the allowed roots/.test(err.message),
+  );
+  assert.equal(existsSync(escaping), false, 'nothing is created on a refused path');
+});
+
+test('(#244) dispatchAlerts degrades to no-dispatch (never throws) when the config path escapes', () => {
+  // dispatchAlerts loads config when none is pre-supplied; a containment refusal
+  // on that config path degrades to the complete no-op instead of propagating —
+  // the NEVER-throws contract holds for an escaping path too.
+  const escaping = outsidePath('dispatch-evil-config.json');
+  writeFileSync(escaping, JSON.stringify({ alerts: { channel: 'log-only' } }));
+  const logPath = freshPath('never-written.jsonl');
+  let result;
+  assert.doesNotThrow(() => {
+    result = dispatchAlerts([finding(ACTION, 1)], { configFile: escaping, logPath, dataDir: TMP, env: {} });
+  });
+  assert.deepEqual(result, { dispatched: false, rendered: '', logPath: null, notified: false });
+  assert.equal(existsSync(logPath), false, 'a refused config path writes no log');
+});
+
+test('(#244) dispatchAlerts never throws when the log path escapes — no financial data leaves the root', () => {
+  // Config loads fine (pre-supplied), but the alert-log path escapes: the write
+  // is refused via the best-effort append try/catch, so the pass survives
+  // (logPath: null, dispatched still true) and — critically — no tax figures are
+  // written outside the data-dir root.
+  const escaping = outsidePath('dispatch-evil-log.jsonl');
+  let result;
+  assert.doesNotThrow(() => {
+    result = dispatchAlerts([finding(ACTION, 1)], {
+      config: sanitizeAlertsConfig({ channel: CHANNEL_LOG_ONLY }),
+      logPath: escaping, dataDir: TMP,
+    });
+  });
+  assert.equal(result.dispatched, true, 'delivery still proceeds best-effort');
+  assert.equal(result.logPath, null, 'the refused log write reports no path');
+  assert.equal(existsSync(escaping), false, 'no finding is written outside the root');
 });
 
 // --- Path seam ------------------------------------------------------------------

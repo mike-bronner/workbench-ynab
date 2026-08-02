@@ -66,9 +66,9 @@ The plugin's four prerequisites are `node` (at or above the pinned floor in
 [`../vendor/ynab-mcp/NODE_VERSION`](../vendor/ynab-mcp/NODE_VERSION)), `jq`,
 `security(1)`, and `workbench-core`. This check mirrors the dev-team setup
 Step 2 pattern — collect every miss, print actionable guidance, and **fail fast
-with a non-zero exit** if any is absent — and extends it to `workbench-core`,
-which the plugin's own `setup` Step 1a does not yet assert (see
-[Gaps found](#gaps-found)):
+with a non-zero exit** if any is absent. The plugin's own `setup` Step 1a
+asserts the same four (it originally checked only the three CLI tools — the gap
+this test surfaced, since closed; see [Gaps found](#gaps-found)):
 
 ```bash
 missing=()
@@ -342,13 +342,15 @@ human release gate before `1.0.0`.
 
 ## Gaps found
 
-- **`setup` does not assert the `workbench-core` prerequisite.** The README lists
-  `workbench-core` as a prerequisite and this test's Step 1 asserts all four, but
-  `setup` Step 1a ([`../commands/setup.md`](../commands/setup.md)) checks only
-  `node`, `jq`, and `security`. A clean profile missing `workbench-core` would
-  clear setup and only degrade later (persona name falls back, memory/session
-  features unavailable). Low severity; filed as a follow-up:
-  [#230](https://github.com/mike-bronner/workbench-ynab/issues/230).
+- **`setup` did not assert the `workbench-core` prerequisite** *(fixed)*. The
+  README lists `workbench-core` as a prerequisite and this test's Step 1 asserts
+  all four, but `setup` Step 1a
+  ([`../commands/setup.md`](../commands/setup.md)) checked only `node`, `jq`, and
+  `security`. A clean profile missing `workbench-core` would clear setup and only
+  degrade later (persona name falls back, memory/session features unavailable).
+  Low severity; filed as a follow-up
+  ([#230](https://github.com/mike-bronner/workbench-ynab/issues/230)) and since
+  fixed — Step 1a now hard-stops on all four prerequisites.
 - No other gaps surfaced in the sandbox-executed steps: the bundle boots offline,
   the config path is correct, the token stays Keychain-only, the pre-approval
   glob is namespaced, and first-connection latency is negligible.

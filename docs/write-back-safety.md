@@ -127,6 +127,9 @@ allow/deny classification is enforced by `ALLOWED_TOOLS` / `DENIED_TOOLS` in
 | `mcp__plugin_workbench-ynab_ynab__ynab_create_receipt_split_transaction` | — nothing | ⛔ denied (money movement) |
 | `mcp__plugin_workbench-ynab_ynab__ynab_create_account` | — nothing | ⛔ denied (account mutation) |
 | `mcp__plugin_workbench-ynab_ynab__ynab_set_default_budget` | — nothing | ⛔ denied (budget mutation) |
+| `mcp__plugin_workbench-ynab_ynab__ynab_create_scheduled_transaction` | — nothing | ⛔ denied (deferred money movement) |
+| `mcp__plugin_workbench-ynab_ynab__ynab_update_scheduled_transaction` | — nothing | ⛔ denied (deferred money movement) |
+| `mcp__plugin_workbench-ynab_ynab__ynab_delete_scheduled_transaction` | — nothing | ⛔ denied (deferred money movement) |
 
 > **Intentional divergence from the issue #71 wording, called out here:** the
 > design brief listed the two create tools among "write tools used." They are
@@ -134,8 +137,11 @@ allow/deny classification is enforced by `ALLOWED_TOOLS` / `DENIED_TOOLS` in
 > — they can fabricate money-shaped records, so the guardrail **deny-lists** them
 > (`denied_tool_money_movement`) and they appear in no pre-approval list.
 > Documenting them as "used" would be wrong; documenting them as denied is the
-> truth the code enforces. The three rows below the pair — `ynab_create_receipt_split_transaction`,
-> `ynab_create_account`, and `ynab_set_default_budget` — are the remaining
+> truth the code enforces. The six rows below the pair — `ynab_create_receipt_split_transaction`,
+> `ynab_create_account`, `ynab_set_default_budget`, and the three
+> scheduled-transaction mutations the 0.27.1 re-vendor added (**#157** — a
+> scheduled transaction becomes a real ledger entry on its due date, so these are
+> money movement on a delay) — are the remaining
 > `DENIED_TOOLS` entries the guardrail blocks, listed so this write-surface
 > reference matches
 > [`assets/write-safety-guardrail.js`](../assets/write-safety-guardrail.js)'s
@@ -164,6 +170,16 @@ guardrail — pre-approval never bypasses it. See the write-phase notes in
   proposes, never applies.
 - **The orchestrator holds no write tools** — its `tools:` list is a read-only
   subset ([`agents/ynab-orchestrator.md`](../agents/ynab-orchestrator.md)).
+- **The single-flight lock authorizes nothing.** A scheduled review and an
+  interactive `/ynab-apply` are serialized by the GAP-9 concurrency lock
+  ([`bin/apply-lock.sh`](../bin/apply-lock.sh)) so they can't clobber the same
+  proposal or double-apply — but that lock is a **concurrency guard only**. It
+  lives in the data dir (never `/tmp`), carries only pid + timestamp + operation,
+  and **neither the batch-approval gate nor the write-safety guardrail reads it**.
+  Holding the lock grants no write permission; every write still passes the
+  `/ynab-apply` approval loop and the guardrail. It exists so the approval gate can
+  never be *skipped* via a lockfile — the two concerns are kept physically and
+  semantically separate (issue #51).
 
 ---
 

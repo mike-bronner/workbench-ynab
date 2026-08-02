@@ -93,6 +93,14 @@ beyond an account boundary, or mutate account / default-budget state, and may
 - `mcp__plugin_workbench-ynab_ynab__ynab_create_receipt_split_transaction`
 - `mcp__plugin_workbench-ynab_ynab__ynab_create_account`
 - `mcp__plugin_workbench-ynab_ynab__ynab_set_default_budget`
+- `mcp__plugin_workbench-ynab_ynab__ynab_create_scheduled_transaction`
+- `mcp__plugin_workbench-ynab_ynab__ynab_update_scheduled_transaction`
+- `mcp__plugin_workbench-ynab_ynab__ynab_delete_scheduled_transaction`
+
+> **The three scheduled-transaction mutations** arrived with the 0.27.1
+> re-vendor (**#157**), taken to obtain the scheduled-transactions *read*. A
+> scheduled transaction becomes a real ledger entry on its due date, so creating,
+> editing, or deleting one is money movement on a delay. No write path uses them.
 
 > **Namespaced strings only.** The lists hold the fully qualified
 > `mcp__plugin_workbench-ynab_ynab__*` names so a typo can't accidentally allow a

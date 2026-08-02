@@ -15,11 +15,23 @@
 #   * the sole version-bump target stays .claude-plugin/plugin.json (issue
 #     #75): the frozen vendored marker must never become a bump target, and no
 #     wheel/uv build step may reappear from the bujo ancestor;
+#   * the supply-chain posture (issue #203): checkout persists no push
+#     credential, and the credential appears only later, in the push URL;
+#   * the credential-isolation posture (issue #252): the untrusted `assets/`
+#     install runs in its own job with no write scope, gating `release` via
+#     `needs:` — co-residency, not credential-on-disk, is what a backgrounded
+#     dependency process exploits — and the marketplace clone embeds no PAT,
+#     supplying it at push time only;
+#   * the atomicity of the main+tag push (issue #203) — split back into two
+#     pushes, a failed tag push strands a release the monotonicity guard then
+#     refuses to re-run;
 #   * the sterile-event chain (gh workflow run) that makes the marketplace pin
 #     fire at all;
 #   * the pin workflow's portability (plugin name read from plugin.json),
-#     annotated-tag dereference, loud missing-token and malformed-marketplace
-#     failures, and silent no-ops;
+#     annotated-tag dereference, manual-backfill tag consumption, loud
+#     missing-token and malformed-marketplace failures, silent no-ops, and the
+#     bounded rebase/retry that survives a sibling repo's concurrent pin
+#     (issue #203);
 #   * concurrency/permissions posture of both workflows;
 #   * the DEVELOPER_SETTINGS_TOKEN documentation contract in docs/ci.md.
 #
@@ -57,6 +69,52 @@ guard_block() { awk -v pat="$1" 'index($0, pat){f=1} f{print} f && /^ *fi$/{exit
 # step_block <step-name> <next-step-name> <file> — everything from one step's
 # `name:` line up to (excluding) the next step's.
 step_block() { awk -v from="$1" -v to="$2" 'index($0, to){exit} index($0, from){f=1} f' "$3"; }
+
+# job_block <job-id> <file> — one job's YAML: from its `  <id>:` key through
+# the line before the next job key. Job ids sit at exactly two spaces under
+# `jobs:`; every key INSIDE a job is indented four or more, so the terminator
+# regex cannot match a job's own `permissions:`/`steps:`. Scoping the issue
+# #252 assertions to a job (not to the file) is what makes them honest: move
+# the untrusted assets install back into the credentialed `release` job and
+# the assertions flip sides, red.
+job_block() {
+  awk -v id="  $1:" '$0 == id {f=1} f && $0 != id && /^  [A-Za-z0-9_-]+:$/ {exit} f' "$2"
+}
+
+# job_step_block <job-id> <step-name> <next-step-name> <file> — step_block,
+# scoped to a single job. `name: Checkout main` now appears in BOTH jobs
+# (issue #252), so a file-wide step_block spans from the assets job's checkout
+# into the release job's and would be satisfied by either one's
+# `persist-credentials: false` — green with the release job's deleted.
+#
+# ONE awk over the file, deliberately not `job_block ... | awk`: this suite runs
+# under `set -euo pipefail`, and an awk that `exit`s early closes the pipe on an
+# upstream awk still block-writing into it — SIGPIPE, 141, and pipefail fails
+# the whole test before a single assertion runs. Whether that fires depends on
+# buffering, so it passes locally and fails on the runner. No pipe, no race.
+job_step_block() {
+  awk -v id="  $1:" -v from="$2" -v to="$3" '
+    $0 == id { j = 1; next }
+    j && /^  [A-Za-z0-9_-]+:$/ { exit }
+    j && index($0, to) { exit }
+    j && index($0, from) { f = 1 }
+    f
+  ' "$4"
+}
+
+# exec_only <text> — drop comment lines. Negative assertions ("this command
+# must NOT appear here") have to run against executable YAML only: the
+# rationale comments deliberately quote the very patterns they forbid.
+exec_only() { printf '%s\n' "$1" | grep -v '^ *#' || true; }
+
+# cont_block <pattern> <text> — one shell command in full: the first line
+# containing <pattern> plus every backslash-continued line after it. Keying a
+# clone/push URL assertion to the whole command (not one hand-picked line)
+# survives reformatting — collapse the continuation onto one line and the
+# assertions still see the URL.
+cont_block() {
+  printf '%s\n' "$2" | awk -v pat="$1" 'index($0, pat){f=1} f{print} f && !/\\$/{exit}'
+}
 
 # --- release.yml: trigger + inputs ------------------------------------------
 
@@ -129,7 +187,11 @@ test_release_guards_precede_writes() {
   commit=$(first_line "name: Commit, tag, push" "$RELEASE")
   [ "$validate" -lt "$bump" ] || fail "Validate version step (line $validate) must precede the version bump (line $bump)"
   [ "$bump" -lt "$commit" ] || fail "version bump (line $bump) must precede commit/tag (line $commit)"
-  step=$(step_block "name: Validate version" "name: Set up Node" "$RELEASE")
+  # Scope to the release job: `name: Set up Node` also names a step in the
+  # assets-tests job ABOVE this one (issue #252), and a file-wide step_block
+  # would hit that terminator first and come back empty.
+  step=$(job_step_block "release" "name: Validate version" "name: Set up Node" "$RELEASE")
+  [ -n "$step" ] || fail "the release job must have a 'Validate version' step"
   # Needles are literal workflow text — $NEW_VERSION/$CURRENT expand on the runner.
   # shellcheck disable=SC2016
   assert_contains "$step" 'if ! [[ "$NEW_VERSION" =~' "the SemVer guard must live inside the Validate version step"
@@ -140,6 +202,35 @@ test_release_guards_precede_writes() {
 }
 
 # --- release.yml: frozen bundle, sole bump target ----------------------------
+
+test_release_gates_on_the_tree_the_assets_suite_tested() {
+  # The issue #252 job split buys isolation at the cost of a SECOND checkout of
+  # a moving `main`: without this re-check, the assets/ suite could pass on one
+  # tree while a later commit is the one bumped, tagged and released. The
+  # single-job version could not drift; this restores that guarantee.
+  assets_job=$(job_block "assets-tests" "$RELEASE")
+  assert_contains "$assets_job" "outputs:" "the assets-tests job must publish the commit it tested"
+  assert_contains "$assets_job" "sha: \${{ steps.tested.outputs.sha }}" "the published output must be the recorded SHA"
+  # Needles are literal workflow text — $(git rev-parse HEAD) runs on the runner.
+  # shellcheck disable=SC2016
+  assert_contains "$assets_job" 'sha=$(git rev-parse HEAD)' "the tested commit must be read from the checked-out tree, not assumed"
+  # Key the block on the condition, polarity included: inverted, it aborts
+  # every healthy release and waves through exactly the drift it exists to
+  # catch. The -z half is the fail-closed limb — a gate that cannot read its
+  # input has not passed.
+  # Needles are literal workflow text — $TESTED_SHA/$HEAD_SHA expand on the runner.
+  # shellcheck disable=SC2016
+  guard=$(guard_block 'if [ -z "$TESTED_SHA" ] || [ "$TESTED_SHA" != "$HEAD_SHA" ]' "$RELEASE")
+  # shellcheck disable=SC2016
+  [ -n "$guard" ] || fail 'the drift gate must abort on: if [ -z "$TESTED_SHA" ] || [ "$TESTED_SHA" != "$HEAD_SHA" ]'
+  assert_contains "$guard" "::error::" "a moved main must be an ::error:: annotation"
+  assert_contains "$guard" "exit 1" "a moved main must exit 1, never fall through into the release"
+  # It is only a gate if it runs ahead of the writes.
+  gate=$(first_line "name: Assert main has not moved" "$RELEASE")
+  bump=$(first_line "name: Bump version" "$RELEASE")
+  [ -n "$gate" ] || fail "the release job must re-check main against the tested SHA"
+  [ "$gate" -lt "$bump" ] || fail "the drift gate (line $gate) must run before the version bump (line $bump)"
+}
 
 test_release_bumps_plugin_json_only() {
   bump_step=$(awk '/name: Bump version/{f=1} f && /name: Run the test suite/{exit} f' "$RELEASE")
@@ -169,29 +260,45 @@ test_release_verifies_bundle_before_tagging() {
   verify=$(first_line "bi_assert_integrity" "$RELEASE")
   commit=$(first_line "name: Commit, tag, push" "$RELEASE")
   [ "$verify" -lt "$commit" ] || fail "bundle integrity (line $verify) must gate before commit/tag (line $commit)"
-  # The integrity step runs WITHOUT `set -e`, so this guard is the SOLE thing
-  # that aborts a release on a drifted bundle. Key the block on the condition,
-  # `!` included: inverted, a drifted bundle sails through while a good one
-  # is blocked — the block comes back empty and the test goes red.
+  # Shell flags, stated accurately (issue #203): Actions runs every `run:`
+  # under a `bash -e {0}` wrapper, so `-e` is ALWAYS active and `set` can only
+  # add flags — the step is NOT `-e`-less, as an earlier comment here and in
+  # the workflow both claimed. `set -euo pipefail` says so explicitly, and
+  # matches every other step in the file. Consequence for the guard below: a
+  # failed `source` aborts on `-e`, while a drifted bundle returns non-zero
+  # from an `if !` condition, which `-e` deliberately exempts — so the guard is
+  # what turns that specific case into a polished ::error:: abort.
+  integrity=$(step_block "name: Verify vendored bundle integrity" "name: Bump version" "$RELEASE")
+  assert_contains "$integrity" "set -euo pipefail" "the integrity step must declare -euo pipefail (-e is active regardless, under Actions' bash -e wrapper)"
+  # Key the block on the condition, `!` included: inverted, a drifted bundle
+  # sails through while a good one is blocked — the block comes back empty and
+  # the test goes red.
   guard=$(guard_block 'if ! bi_assert_integrity' "$RELEASE")
   [ -n "$guard" ] || fail "the integrity guard must abort on: if ! bi_assert_integrity"
   assert_contains "$guard" "::error::Vendored bundle integrity check failed" "a drift must fail with a descriptive error"
-  assert_contains "$guard" "exit 1" "a drifted bundle must exit 1 — nothing else stops the release"
+  assert_contains "$guard" "exit 1" "a drifted bundle must exit 1 — nothing else converts it into a release abort"
 }
 
 # --- release.yml: tests gate the release -------------------------------------
 
 test_release_runs_test_suite_before_tagging() {
-  assert_contains "$release" "bash scripts/test.sh" "must run the single suite entrypoint"
-  suite=$(first_line "bash scripts/test.sh" "$RELEASE")
-  assets=$(first_line "npm --prefix assets ci" "$RELEASE")
+  # Order the STEPS by their `name:` lines, never by their command text: the
+  # commands are also quoted in the surrounding rationale comments, so a
+  # command-keyed first_line resolves to prose and reports a bogus ordering.
+  suite=$(first_line "run: bash scripts/test.sh" "$RELEASE")
   commit=$(first_line "name: Commit, tag, push" "$RELEASE")
+  [ -n "$suite" ] || fail "must run the single suite entrypoint (run: bash scripts/test.sh)"
   [ "$suite" -lt "$commit" ] || fail "test suite (line $suite) must gate before commit/tag (line $commit)"
-  # assets/ deps install strictly AFTER the dependency-free suite, so no
-  # node_modules exists while the offline-boot proof runs (mirrors test.yml).
-  [ -n "$assets" ] || fail "the assets/ integration suite must gate the release too"
-  [ "$suite" -lt "$assets" ] || fail "scripts/test.sh (line $suite) must run before npm ci (line $assets) to keep the offline proof faithful"
-  [ "$assets" -lt "$commit" ] || fail "assets suite (line $assets) must gate before commit/tag (line $commit)"
+  # The offline-boot proof inside scripts/test.sh is only faithful with NO
+  # node_modules on the resolution path. Since issue #252 that is a separate-VM
+  # guarantee rather than a step-ordering one — the assets/ install lives in the
+  # `assets-tests` job — so what has to hold here is that the release job
+  # installs nothing at all. Gating of the assets suite is asserted by
+  # test_release_assets_suite_is_isolated_from_the_push_credential.
+  release_exec=$(exec_only "$(job_block "release" "$RELEASE")")
+  case "$release_exec" in
+    *"npm "*) fail "the release job must install/run no npm packages — node_modules would break the offline-boot proof and untrusted install scripts would share a runner with the push credential (issue #252)" ;;
+  esac
 }
 
 # --- release.yml: commit / tag / release / chain -----------------------------
@@ -201,13 +308,91 @@ test_release_commits_as_actions_bot() {
   assert_contains "$release" "41898282+github-actions[bot]@users.noreply.github.com" "must use the bot noreply email"
 }
 
-test_release_annotated_tag_and_pushes() {
+test_release_annotated_tag_and_atomic_push() {
   # Needles are literal workflow text — ${NEW_VERSION} expands on the runner.
   # shellcheck disable=SC2016
   assert_contains "$release" 'git tag -a "v${NEW_VERSION}"' "tag must be annotated"
-  assert_contains "$release" "git push origin main" "must push main"
+  # Issue #203: main and the tag must land in ONE atomic push. As two
+  # sequential pushes they are not atomic — a tag push failing after main was
+  # already bumped strands the release half-done, and the monotonicity guard
+  # then rejects a same-version re-run ($NEW_VERSION = $CURRENT), leaving no
+  # automated tag-backfill path. Scope every assertion to the push step so a
+  # header comment cannot satisfy them.
+  push=$(step_block "name: Commit, tag, push" "name: Create GitHub release" "$RELEASE")
+  assert_contains "$push" "git push --atomic" "main and the tag must be pushed in a single atomic transaction"
+  assert_contains "$push" "refs/heads/main:refs/heads/main" "the atomic push must carry main"
   # shellcheck disable=SC2016
-  assert_contains "$release" 'git push origin "v${NEW_VERSION}"' "must push the tag"
+  assert_contains "$push" 'refs/tags/v${NEW_VERSION}:refs/tags/v${NEW_VERSION}' "the atomic push must carry the tag"
+  # Exactly ONE push in the step. This is the assertion that actually pins
+  # atomicity: splitting the refs back into `git push origin main` +
+  # `git push origin "v$NEW_VERSION"` keeps all three needles above satisfiable
+  # in comments but takes this count to 2 and goes red.
+  count=$(printf '%s\n' "$push" | grep -c "git push" || true)
+  assert_eq "1" "$count" "the commit/tag/push step must contain exactly one git push (found $count)"
+}
+
+test_release_checkout_persists_no_credential_for_untrusted_deps() {
+  # Issue #203 — supply chain; defence in depth since the #252 job split.
+  # actions/checkout defaults to writing the job's GITHUB_TOKEN (this workflow
+  # grants it contents: write + actions: write) into .git/config, where it
+  # lives for the whole job. persist-credentials: false leaves nothing on disk
+  # to steal. Scope to the RELEASE job's checkout: `name: Checkout main` now
+  # appears in both jobs, and a file-wide step_block would stay green on the
+  # assets job's copy alone.
+  checkout=$(job_step_block "release" "name: Checkout main" "name: Validate version" "$RELEASE")
+  [ -n "$checkout" ] || fail "the release job must check out main"
+  assert_contains "$checkout" "persist-credentials: false" \
+    "the release job's checkout must not persist the push credential into .git/config"
+  # The credential must then be supplied explicitly at push time instead —
+  # otherwise persist-credentials: false just breaks the release.
+  push=$(step_block "name: Commit, tag, push" "name: Create GitHub release" "$RELEASE")
+  # The needle is literal workflow text — ${GH_TOKEN}/${GITHUB_REPOSITORY}
+  # expand on the runner.
+  # shellcheck disable=SC2016
+  assert_contains "$push" 'https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git' \
+    "the release push must authenticate explicitly, since checkout persists no credential"
+  # The credential must materialize exactly ONCE, in that push URL. A second
+  # occurrence is a second place it can leak from.
+  # shellcheck disable=SC2016
+  count=$(grep -cF 'x-access-token:${GH_TOKEN}' "$RELEASE" || true)
+  assert_eq "1" "$count" "the push credential must appear exactly once, in the push URL (found $count)"
+}
+
+test_release_assets_suite_is_isolated_from_the_push_credential() {
+  # Issue #252 — the residual #203 could not reach. `npm --prefix assets ci`
+  # runs third-party install scripts and `npm --prefix assets test` runs their
+  # module top-level code. Co-resident with the push credential — same runner,
+  # same UID — neither persist-credentials: false nor threading the token
+  # through env: helps: Actions does not reap detached children at step
+  # boundaries, so a dep can background a process that outlives its own step
+  # and read the token out of the push process's argv (/proc/<pid>/cmdline) or
+  # environment (/proc/<pid>/environ). Only a job with no write scope removes
+  # the token from existence anywhere near that code.
+  assets_job=$(job_block "assets-tests" "$RELEASE")
+  [ -n "$assets_job" ] || fail "the assets/ suite must live in its own 'assets-tests' job (issue #252)"
+  assert_contains "$assets_job" "npm --prefix assets ci" "the assets-tests job must install assets/ deps"
+  assert_contains "$assets_job" "npm --prefix assets test" "the assets-tests job must run the assets/ suite"
+  # The override is the whole point: without its own permissions: block the job
+  # inherits the workflow's contents: write + actions: write and the split buys
+  # nothing. Assert the grant AND the absence of any write scope.
+  assert_contains "$assets_job" "permissions:" "the assets-tests job must declare its own permissions: block, or it inherits contents: write + actions: write"
+  assert_contains "$assets_job" "contents: read" "the assets-tests job must be scoped to contents: read"
+  case "$(exec_only "$assets_job")" in
+    *": write"*) fail "the assets-tests job must grant no write scope — it executes untrusted third-party code (issue #252)" ;;
+  esac
+  # It must gate the release, not merely run beside it: without `needs:` the
+  # split moves the suite OFF the release path instead of ahead of it, and a
+  # red assets suite would no longer stop the tag.
+  release_job=$(job_block "release" "$RELEASE")
+  [ -n "$release_job" ] || fail "release.yml must define a 'release' job"
+  assert_contains "$(exec_only "$release_job")" "needs: assets-tests" \
+    "the release job must gate on assets-tests via needs:, or the assets suite stops gating the release"
+  # And the untrusted install must not have stayed behind in the credentialed
+  # job. Comments stripped — the rationale prose names the very command it
+  # forbids, so an unstripped match would pass on the comment alone.
+  case "$(exec_only "$release_job")" in
+    *"npm --prefix assets"*) fail "the release job must not run the assets/ suite — it is the job that holds the push credential (issue #252)" ;;
+  esac
 }
 
 test_release_fails_on_noop_bump() {
@@ -286,6 +471,115 @@ test_pin_triggers() {
   [ -n "$resolve" ] || fail 'tag resolution must branch on: if [ "$EVENT_NAME" = "release" ]'
   fallback=$(printf '%s\n' "$resolve" | awk '/^ *else$/{f=1} f')
   assert_contains "$fallback" "gh release view" "omitted tag must fall back to the latest release in the else branch"
+  # A SUPPLIED dispatch tag must actually be consumed. Asserting only that the
+  # `tag:` input exists and that the else-branch falls back leaves the middle
+  # branch unpinned: delete the `elif` and manual backfill silently resolves
+  # the latest release instead of the requested one, with the suite still
+  # green. Scope the assertion to the elif branch itself so the assignment
+  # cannot be satisfied from the release branch above it.
+  # Needles are literal workflow text — $INPUT_TAG expands on the runner, and
+  # awk -v escape-processes backslashes, so patterns stay backslash-free.
+  # shellcheck disable=SC2016
+  backfill=$(printf '%s\n' "$resolve" | awk -v pat='elif [ -n "$INPUT_TAG" ]; then' 'index($0, pat){f=1} f && /^ *else$/{exit} f')
+  # shellcheck disable=SC2016
+  [ -n "$backfill" ] || fail 'manual backfill must branch on: elif [ -n "$INPUT_TAG" ]; then'
+  # shellcheck disable=SC2016
+  assert_contains "$backfill" 'TAG="$INPUT_TAG"' "a supplied dispatch tag must be consumed, not ignored in favour of the latest release"
+}
+
+test_pin_push_retries_on_cross_repo_race() {
+  # Issue #203: `concurrency: update-marketplace-sha` serializes runs within
+  # THIS repo only, while every sibling workbench plugin pins its own entry in
+  # the SAME marketplace repo. A sibling's commit landing between our clone and
+  # our push makes ours non-fast-forward, and a bare `git push` would fail the
+  # pin outright. Scope to the push step so header prose cannot satisfy this.
+  update=$(awk 'index($0, "name: Update marketplace.json"){f=1} f' "$PIN")
+  assert_contains "$update" "git pull --rebase" "a rejected push must re-sync onto the marketplace tip before retrying"
+  assert_contains "$update" "MAX_PUSH_ATTEMPTS" "the retry must be bounded, never an unbounded loop"
+  # The retry must be a LOOP around the push, not one hopeful second attempt:
+  # pin the push INSIDE the while body. Unrolling it back to a single push
+  # leaves the loop empty of `git push` and goes red.
+  loop=$(printf '%s\n' "$update" | awk '/^ *while true; do$/{f=1} f && /^ *done$/{exit} f')
+  [ -n "$loop" ] || fail "the marketplace push must sit inside a bounded retry loop (while true; do ... done)"
+  # The push authenticates by explicit URL, not through `origin` (issue #252) —
+  # see test_pin_clone_persists_no_credential.
+  # The needle is literal workflow text — $PUSH_URL expands on the runner.
+  # shellcheck disable=SC2016
+  assert_contains "$loop" 'if git push "$PUSH_URL"' "the push itself must be the loop's success condition"
+  assert_contains "$loop" "exit 0" "a successful push must exit 0 from inside the loop"
+  # Exhausting the budget is a hard failure — a pin that silently gives up
+  # leaves the marketplace floating on a stale SHA while the release looks green.
+  # shellcheck disable=SC2016
+  assert_contains "$loop" 'if [ "$attempt" -ge "$MAX_PUSH_ATTEMPTS" ]; then' "the attempt budget must be checked, not just declared"
+  budget=$(printf '%s\n' "$loop" | awk -v pat='-ge "$MAX_PUSH_ATTEMPTS" ]; then' 'index($0, pat){f=1} f && /^ *fi$/{exit} f')
+  assert_contains "$budget" "::error::" "an exhausted retry budget must be a hard ::error::"
+  assert_contains "$budget" "exit 1" "an exhausted retry budget must exit 1, never fall through as a silent no-op"
+  # A conflicting rebase must abort rather than force the pin over a sibling's write.
+  conflict=$(printf '%s\n' "$loop" | awk '/if ! git pull --rebase; then/{f=1} f && /^ *fi$/{exit} f')
+  [ -n "$conflict" ] || fail "a failed rebase must be handled on: if ! git pull --rebase; then"
+  assert_contains "$conflict" "git rebase --abort" "a conflicted rebase must be aborted, leaving no half-rebased state"
+  assert_contains "$conflict" "exit 1" "a conflicted rebase must fail loudly, never force the pin"
+  case "$update" in
+    *"push --force"*|*"push -f "*) fail "the marketplace pin must never force-push over a sibling repo's write" ;;
+  esac
+}
+
+test_pin_clone_persists_no_credential() {
+  # Issue #252. A credential embedded in the clone URL is written straight into
+  # marketplace/.git/config as the `origin` remote — leaving
+  # DEVELOPER_SETTINGS_TOKEN (a long-lived, non-expiring PAT with Contents:
+  # write on the SHARED marketplace repo, materially higher-value than a
+  # job-scoped GITHUB_TOKEN) readable on disk for the rest of the step. Clone
+  # unauthenticated; supply it only at push time, as release.yml now does.
+  #
+  # Every assertion runs against executable YAML with comments stripped: the
+  # rationale comment above the clone quotes the exact pattern being forbidden,
+  # so an unstripped check would fail on its own explanation.
+  update_exec=$(exec_only "$(awk 'index($0, "name: Update marketplace.json"){f=1} f' "$PIN")")
+  clone=$(cont_block "git clone" "$update_exec")
+  [ -n "$clone" ] || fail "the pin must clone the marketplace repo"
+  assert_contains "$clone" "https://github.com/mike-bronner/claude-workbench.git" \
+    "the marketplace clone URL must be the plain, unauthenticated HTTPS URL"
+  case "$clone" in
+    *x-access-token*) fail "the marketplace clone must embed no credential — it persists into marketplace/.git/config for the whole step (issue #252)" ;;
+  esac
+  # The credential must still reach the push, or this just breaks the pin.
+  # The needle is literal workflow text — ${GH_TOKEN} expands on the runner.
+  # shellcheck disable=SC2016
+  assert_contains "$update_exec" 'PUSH_URL="https://x-access-token:${GH_TOKEN}@github.com/mike-bronner/claude-workbench.git"' \
+    "the PAT must be supplied at push time, in the push URL"
+  # Exactly one occurrence: this is what pins "at push time ONLY". Restore the
+  # authenticated clone and the count goes to 2 — red — even though every
+  # positive assertion above would still be satisfiable.
+  count=$(printf '%s\n' "$update_exec" | grep -cF 'x-access-token' || true)
+  assert_eq "1" "$count" "the PAT must materialize exactly once, in the push URL (found $count)"
+  # Pushing by URL is only credential-free if `origin` itself never acquires
+  # the token: a remote rewrite would persist it exactly as the clone did.
+  case "$update_exec" in
+    *"remote set-url"*|*"remote add"*) fail "the marketplace remote must not be rewritten with a credential — that re-persists the PAT into .git/config (issue #252)" ;;
+  esac
+}
+
+test_pin_refuses_to_push_a_detached_head() {
+  # Pushing by explicit URL (issue #252) means naming the destination ref
+  # ourselves — so it has to be named correctly. A detached HEAD resolves to
+  # the literal "HEAD" and would create refs/heads/HEAD on the repo shared with
+  # every other workbench plugin. Fail closed. Key the block on the condition,
+  # polarity included: inverted, it aborts every healthy run and pushes the
+  # junk ref on the broken one.
+  # Needles are literal workflow text — $PUSH_BRANCH expands on the runner.
+  # shellcheck disable=SC2016
+  guard=$(guard_block 'if [ -z "$PUSH_BRANCH" ] || [ "$PUSH_BRANCH" = "HEAD" ]' "$PIN")
+  # shellcheck disable=SC2016
+  [ -n "$guard" ] || fail 'the push ref must be guarded on: if [ -z "$PUSH_BRANCH" ] || [ "$PUSH_BRANCH" = "HEAD" ]'
+  assert_contains "$guard" "::error::" "a detached HEAD must be a hard ::error::"
+  assert_contains "$guard" "exit 1" "a detached HEAD must exit 1, never fall through into the push"
+  # The guard is only meaningful ahead of the push it protects.
+  # shellcheck disable=SC2016
+  guard_line=$(first_line 'if [ -z "$PUSH_BRANCH" ]' "$PIN")
+  # shellcheck disable=SC2016
+  push_line=$(first_line 'if git push "$PUSH_URL"' "$PIN")
+  [ "$guard_line" -lt "$push_line" ] || fail "the detached-HEAD guard (line $guard_line) must precede the push (line $push_line)"
 }
 
 test_pin_reads_plugin_name_from_manifest() {

@@ -28,11 +28,15 @@
  * nothing else (no goals, no category name, no hidden state).
  *
  * Design rules (mirror the executor):
- *  - NAMESPACED TOOLS ONLY, never hard-coded here. The mutating tool name is
- *    resolved at runtime from the guardrail's exported `ALLOWED_TOOLS` by suffix,
- *    so no literal `mcp__plugin_workbench-ynab_ynab__*` string lives in this file
- *    (the swap-ready single-source-of-truth invariant, issue #87; enforced by
- *    bin/check-tool-name-sources.sh). The read tool used for the RTA check
+ *  - NAMESPACED TOOLS ONLY, never hard-coded here, AND NEVER AMBIGUOUS. The mutating
+ *    tool name is resolved at runtime from the guardrail's exported `ALLOWED_TOOLS`
+ *    by suffix, so no literal `mcp__plugin_workbench-ynab_ynab__*` string lives in
+ *    this file (the swap-ready single-source-of-truth invariant, issue #87; enforced
+ *    by bin/check-tool-name-sources.sh). Resolution goes through the shared
+ *    fail-closed `resolveUniqueTool` (issue #216), which asserts the suffix matches
+ *    EXACTLY ONE allow-list entry — an unchecked `.find()` would resolve a suffix
+ *    collision by array order and silently write budgets with the wrong tool.
+ *    The read tool used for the RTA check
  *    (`ynab_get_month`) is supplied by the caller as the injected `getMonth` port,
  *    wired from skills/protocol/ynab-tools.md — same reason.
  *  - MILLIUNITS THROUGHOUT. `before.budgeted` / `after.budgeted` and every RTA
@@ -58,6 +62,7 @@
  */
 
 const { ALLOWED_TOOLS } = require('./write-safety-guardrail');
+const { resolveUniqueTool } = require('./resolve-tool');
 const { formatMoney } = require('./format-money');
 
 /** The operation type this handler owns. */
@@ -80,19 +85,22 @@ const READ_TOOL_SUFFIX = '_get_month';
 
 /**
  * Resolve the fully-namespaced `ynab_update_category` tool from the guardrail's
- * allow-list by suffix. Throws if it is somehow absent (a guardrail/handler
- * mismatch is a hard configuration error, never a silent fallback).
+ * allow-list by suffix, asserting UNIQUENESS (issue #216). Throws if it is absent
+ * OR ambiguous — a guardrail/handler mismatch is a hard configuration error, never
+ * a silent fallback. The previous `.find()` spelling caught only the absent case:
+ * a future allow-list entry sharing the `_update_category` suffix would have been
+ * resolved by array order, silently sending budget writes to the wrong tool.
+ * @param {readonly string[]} [allowedTools] the allow-list to resolve against;
+ *   defaults to the guardrail's exported single source of truth. Overridable so the
+ *   fail-closed contract can be tested against hostile allow-lists.
  * @returns {string} the namespaced mutating tool name.
+ * @throws {Error} when the suffix matches zero or more than one tool.
  */
-function applyToolName() {
-  const tool = ALLOWED_TOOLS.find((t) => t.endsWith(APPLY_TOOL_SUFFIX));
-  if (!tool) {
-    throw new Error(
-      `allocate handler: no allow-listed tool ending in "${APPLY_TOOL_SUFFIX}" — ` +
-        'the guardrail ALLOWED_TOOLS and this handler are out of sync.',
-    );
-  }
-  return tool;
+function applyToolName(allowedTools = ALLOWED_TOOLS) {
+  return resolveUniqueTool(allowedTools, APPLY_TOOL_SUFFIX, {
+    context: 'allocate handler',
+    subject: 'the budget-allocation update tool',
+  });
 }
 
 /**
@@ -256,7 +264,7 @@ async function dryRunAllocate(operations, ports = {}) {
 
   // Read each distinct (budget_id, month) month exactly once; cache by key.
   const monthCache = new Map();
-  const monthKey = (op) => `${op.budget_id} ${op.month}`;
+  const monthKey = (op) => `${op.budget_id}\u0000${op.month}`;
   for (const op of allocateOps) {
     const key = monthKey(op);
     if (!monthCache.has(key)) {

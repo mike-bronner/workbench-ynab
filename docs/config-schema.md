@@ -38,6 +38,7 @@ loader, the JSON Schema, or any default.
 | Key | Type | Required | Summary |
 |---|---|---|---|
 | `schema_version` | integer | **required** | Config schema version, for forward migration. |
+| `timezone` | string | **required** | IANA timezone — the single source of truth for all date math (window, carryover, month/quarter boundaries, tax year). |
 | `budgets` | array | **required** | The YNAB budgets the plugin operates on (replaces the v1 singular `budget`). |
 | `default_budget` | string | optional | `label` of the entry used when a caller needs a single budget. |
 | `business` | object | optional | Side-business config (accounts, category group, expense categories). |
@@ -61,6 +62,52 @@ upgrade an older file. Current version: **`2`** (the multi-budget shape, issue
 
 ```json
 "schema_version": 2
+```
+
+---
+
+### `timezone` *(string, required)*
+
+An **IANA timezone identifier** — e.g. `America/Phoenix`, `America/New_York`,
+`UTC` — mirroring `workbench-bujo`'s convention. It is the **single source of
+truth for every date-sensitive computation** the review performs: the weekly
+7-day lookback window, the carryover boundary, month start/end, the quarterly
+estimated-tax windows, and the tax-year label (issue #31, design ref GAP-22).
+All of these are computed **against the configured timezone, never the host
+clock**, so a review is deterministic regardless of where or when it runs.
+
+**Explicit default, never "system local".** `/workbench-ynab:setup` resolves
+your machine's current IANA zone at setup time and pre-fills it, then writes the
+**resolved identifier** into `config.json`. The stored value is always a concrete
+zone name — it is *never* the literal string `system local` or an instruction to
+re-read the host clock at run time — which is what keeps a scheduled run and an
+interactive run on the same day in agreement. You may override it to any valid
+IANA zone.
+
+**Required, and validated fail-closed at load time.** The loader
+([`bin/config.sh`](config-loader.md) `_cfg_timezone`) checks the value against the
+tz database (`$TZDIR`, default `/usr/share/zoneinfo`) every time a review starts.
+A **missing or invalid** timezone is a **hard error** — the loader prints a
+descriptive message to stderr and returns non-zero — and the review stops. It
+**never** silently falls back to the host clock: a wrong zone would misplace
+near-midnight transactions in the lookback window and map a date to the wrong tax
+year, so the plugin refuses to guess. The JSON Schema also carries a `pattern`,
+but that is a shape check only; the loader's zoneinfo lookup is the authoritative
+validity gate — and it verifies the name resolves to a compiled `TZif` zone
+file, not merely that some file of that name exists, so zoneinfo housekeeping
+artifacts (`leapseconds`, `+VERSION`, `tzdata.zi`) and the UTC-equivalent
+pseudo-zones (`Factory`, `posixrules`) are rejected rather than silently
+accepted. The pseudo-zone rejection is **case-insensitive** and covers the
+`right/` and `posix/` leap-second mirror subtrees — so `factory`, `FACTORY`, and
+`right/Factory` (all of which resolve to the UTC-equivalent `Factory` zone on a
+case-insensitive filesystem or a mirror-shipping host) fail closed too.
+
+The illustrative value `America/Phoenix` appears **only** as an instance value in
+[`assets/config.example.json`](../assets/config.example.json) — never as a baked-in
+default in the loader or schema (per the generic-not-hardcoded rule above).
+
+```json
+"timezone": "America/Phoenix"
 ```
 
 ---
@@ -240,11 +287,12 @@ Report output configuration.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `output_dir` | string | optional | Directory where generated HTML reports are written. Supports `~` and env-var expansion at use time. When absent or empty, the writer applies the shipped default `~/Documents/Claude/Reports` (see below). |
+| `output_dir` | string | optional | Directory where generated HTML reports are written. Supports `~` and env-var expansion at use time. A **relative** value resolves against the current working directory — identically for the report writer and `bin/ynab-prune.sh`, so prune always sweeps the directory the writer wrote to. Prefer an absolute path: a relative one makes the report location depend on where the review happened to run. When absent or empty, the writer applies the shipped default `~/Documents/Claude/Reports` (see below). |
 | `template_path` | string \| null | optional | Path to the frozen HTML report template. When `null`, the plugin's bundled template under `assets/` is used (frozen in Sprint 3, issue #42). |
+| `retention_days` | integer | optional | Maximum age, in days, a generated report is kept before [`bin/ynab-prune.sh`](../SECURITY.md#generated-artifacts) treats it as a pruning candidate. When absent, the shipped default of **30 days** applies. Reports are unencrypted plaintext financial records, so this bounds how much history accumulates on disk (issue #65). |
 
 ```json
-"report": { "output_dir": "~/Documents/Claude/Reports", "template_path": null }
+"report": { "output_dir": "~/Documents/Claude/Reports", "template_path": null, "retention_days": 30 }
 ```
 
 `output_dir` lives **outside the repo** (this whole `config.json` does — see the
@@ -320,6 +368,7 @@ The full contract — field semantics, the structured finding shape, the
 | `bill_due_lookahead_days` | integer | optional | `3` | Days ahead an upcoming scheduled bill is flagged. |
 | `overdrawn` | boolean | optional | `true` | Whether a negative account balance is alert-worthy. |
 | `channel` | string (enum) | optional | `"macos-notification"` | Delivery channel: `macos-notification` or `log-only`. Every dispatch also appends to the audit log. |
+| `tax` | object | optional | — | Quarterly estimated-tax reminders (M6-5). See [`alerts.tax`](#alertstax-object-optional) below. |
 
 ```json
 "alerts": {
@@ -329,9 +378,31 @@ The full contract — field semantics, the structured finding shape, the
   "budget_overrun_pct": 100,
   "bill_due_lookahead_days": 3,
   "overdrawn": true,
-  "channel": "macos-notification"
+  "channel": "macos-notification",
+  "tax": { "lead_time_days": 7, "reminders_enabled": true }
 }
 ```
+
+#### `alerts.tax` *(object, optional)*
+
+Quarterly estimated-tax **payment reminders** (M6-5, issue #83). Nudge the user
+ahead of each estimated-tax due date so a deadline never slips. The reminder is a
+thin layer over the M6-4 tracker (for the remaining-due figure and
+payment-suppression) and the M6-2 dispatch channel (delivery). Omit the whole
+block to accept the defaults — reminders are on out of the box. Due dates come
+from `tax_profile.quarterly_due_dates` / the tax profile — never hardcoded.
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `lead_time_days` | integer ≥ 0 | optional | `7` | Calendar days before a due date the lead-time reminder starts firing. `0` reminds only on the due date itself. |
+| `reminders_enabled` | boolean | optional | `true` | Master switch for estimated-tax reminders. `false` silences them without touching any other alert. |
+
+Both take effect on the **next orchestrator/review run** — no code change. The
+reminder fires within `lead_time_days` of a quarter's due date (🟡 attention) and
+escalates to 🔴 on the due date when no payment is recorded, then stays silent
+once a payment for that quarter lands in the tracker. It runs inside the unified
+`ynab-review` scheduled task (`schedules.review`), so it adds **no** extra cron
+entry. Full contract: [`alerts-config.md`](alerts-config.md).
 
 ---
 

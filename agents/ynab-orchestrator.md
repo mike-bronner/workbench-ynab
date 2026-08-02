@@ -73,8 +73,8 @@ Only emit `ynab_mcp_offline` in `warnings` after exhausting retries on a genuine
 Your initial prompt contains:
 
 - `budget_name` — the human-readable name of the YNAB budget to review (resolve it to an id via `ynab_list_budgets`). If multiple budgets match or none do, record a warning and leave the plan minimal.
-- `today` — ISO date (e.g., `2026-04-13`) in the user's configured timezone. Treat this as authoritative; do not recompute from your own clock. If missing, default to the system date and note the assumption in `warnings`.
-- `timezone` — the configured timezone (e.g., `America/Phoenix`). Used only to interpret `today` when you must fall back to the system date. If missing, use the system timezone and note the assumption in `warnings`. (The config field for this is owned by the timezone-ownership issue; the dispatcher passes it once it exists.)
+- `today` — ISO date (e.g., `2026-04-13`) in the user's configured timezone, computed and passed by the dispatcher from `config.timezone`. Treat this as authoritative; **never recompute it from your own clock.** Every window you size derives from it. If it is missing, do **not** substitute the system date — emit a `today_missing` warning and produce the most conservative plan the remaining inputs allow. The dispatcher is contracted to supply it (`bin/config.sh` `_cfg_timezone` + `_today_in_tz`), so a missing value is a dispatch bug, never a cue to guess from the host clock.
+- `timezone` — the configured IANA timezone (e.g., `America/Phoenix`), the single source of truth for all date math, passed alongside `today`. Used to interpret `today` and to size the review windows. If it is missing, emit a `timezone_missing` warning and stay conservative — **never** fall back to the system timezone. Running in the wrong zone misplaces near-midnight transactions in the lookback window and maps a date to the wrong tax year, so the plan refuses to guess.
 - `review_scope` *(optional)* — an explicit tier (`weekly` / `monthly` / `quarterly-tax` / `annual`) and/or an explicit period. **When present it is authoritative**: plan exactly that scope and skip eligibility computation (this is the ad-hoc wrapper/router path). When absent, compute eligibility from `today` (the scheduled path).
 - Schedule overrides *(all optional; the dispatcher resolves them from config where configured)* — `weekly_day`, `quarterly_due_dates`, `annual_window`. Defaults are documented in [Tier eligibility](#tier-eligibility--the-schedule-is-owned-here); when an override is absent, use the default and proceed — no warning needed.
 - `report_dir` *(optional)* — the resolved report output directory (config `.report.output_dir`, resolved by the dispatcher). When present, inspect report history for anomalies; when absent, skip that inspection and record `report_history: false` in `state_inspected`.
@@ -104,6 +104,17 @@ For each eligible tier, record in `plan.report.reasons` **why** it fired and its
 - `today = 2026-04-07` (Tuesday) → `tiers: []` — 8 days before Apr 15, one day before its reminder window (Apr 8–15) opens; Tuesday isn't the weekly day.
 - `today = 2026-04-13` (Monday) → `tiers: [quarterly-tax, weekly]` — inside the Apr 15 reminder window (Apr 8–15) and the configured weekly day. See the full plan block below.
 - `today = 2026-04-22` (Wednesday) → `tiers: []` — no window matches; the plan says so and the router does nothing.
+
+> **Estimated-tax payment reminders (M6-5) key on this same quarterly window.**
+> The quarterly-tax reminder check (issue #83) fires within the
+> `alerts.tax.lead_time_days` window (default 7) before a due date through the due
+> date itself — gated by `alerts.tax.reminders_enabled`, and reading the
+> M6-4 tracker for the remaining-due amount and payment suppression. Because *you*
+> are the read-only planner, you never dispatch it: the **review router**
+> (`commands/ynab-review.md` Step 1d) resolves the config + tracker, computes the
+> reminder in the user's timezone, and delivers it through the M6-2 channel — so
+> the reminder rides the unified `ynab-review` task's cadence with no extra cron
+> entry. Detector: [`lib/tax/estimatedTaxReminder.mjs`](../lib/tax/estimatedTaxReminder.mjs).
 
 ## State inspection
 

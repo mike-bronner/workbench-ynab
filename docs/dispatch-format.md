@@ -125,6 +125,32 @@ string never varies by tax profile, Schedule, currency, or persona, and it is em
 omits it — see those worked examples). The tag is **not a finding**: it never counts
 toward the fixed five and never carries a severity emoji.
 
+## Degenerate finding counts — the two exceptions to the fixed five
+
+The five-finding rule above assumes a populated budget with at least five ranked
+candidates. A brand-new, zero-transaction, or otherwise degenerate budget
+(GAP-4 / issue #33) may surface **fewer than five** findings — or none — and the
+dispatch must not pad the list with placeholder rows to reach five. These are the
+**only** two departures from the fixed count; the review skill selects the mode
+with `dispatchFindingsPlan(findingCount)` from the guard module
+([`../assets/review-guards.js`](../assets/review-guards.js)):
+
+- **Zero findings** — the dispatch is **skipped entirely**. In place of the five
+  findings, a single `No findings this period` summary line is emitted (with the
+  report pointer and the persona sign-off still present). This is the brand-new /
+  empty-budget case: no accounts or transactions in the window yet, so there is
+  nothing to rank. It never carries a not-tax-advice tag (there are no tax
+  figures) and never invents a finding.
+- **One-to-four findings** — the dispatch **proceeds with whatever findings
+  exist**, rendered in the same per-finding shape and descending-severity order,
+  with **no padding** and no placeholder rows added to reach five. The count is
+  simply the number of real findings.
+
+Everything else — the severity taxonomy, the per-finding structure, the report
+pointer, the sign-off, and the conditional not-tax-advice tag — is unchanged;
+only the count differs. Five or more findings always renders the fixed top-five
+contract above.
+
 ## Tier-agnostic by construction
 
 This contract is **identical for every tier** — weekly, monthly, quarterly-tax,

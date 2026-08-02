@@ -63,8 +63,32 @@ test('deny-list holds the namespaced money-movement tools', () => {
     'mcp__plugin_workbench-ynab_ynab__ynab_create_receipt_split_transaction',
     'mcp__plugin_workbench-ynab_ynab__ynab_create_account',
     'mcp__plugin_workbench-ynab_ynab__ynab_set_default_budget',
+    // Added by the 0.27.1 re-vendor (#157): a scheduled transaction becomes a
+    // real ledger entry on its due date, so these three are money movement on a
+    // delay.
+    'mcp__plugin_workbench-ynab_ynab__ynab_create_scheduled_transaction',
+    'mcp__plugin_workbench-ynab_ynab__ynab_update_scheduled_transaction',
+    'mcp__plugin_workbench-ynab_ynab__ynab_delete_scheduled_transaction',
   ]) {
     assert.ok(DENIED_TOOLS.includes(tool), `${tool} must be on the deny-list`);
+  }
+});
+
+test('each scheduled-transaction mutation is BLOCKED at the tool gate, not merely listed', () => {
+  // The list assertion above proves membership; this proves the gate actually
+  // refuses the call, with the deny-list rule (not the weaker "unknown tool"
+  // fallback that would also fire if the entry were missing). Every one of the
+  // three is driven individually — a gate that special-cased only `create` would
+  // pass a test that checked `create` alone.
+  for (const suffix of ['create', 'update', 'delete']) {
+    const tool = `mcp__plugin_workbench-ynab_ynab__ynab_${suffix}_scheduled_transaction`;
+    const verdict = evaluateTool(tool);
+    assert.equal(verdict.verdict, 'block', `${tool} must be blocked`);
+    assert.equal(
+      verdict.rule,
+      RULES.TOOL_DENIED,
+      `${tool} must block on the money-movement deny-list rule, not the unknown-tool fallback`,
+    );
   }
 });
 

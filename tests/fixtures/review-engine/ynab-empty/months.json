@@ -1,0 +1,6 @@
+{
+  "$comment": "SYNTHETIC YNAB list_months response for the EMPTY / new-budget golden-snapshot fixture (issue #33, GAP-4). A brand-new budget has no prior-month history to compare against — the months list is empty, so month-over-month percentage comparisons must return the n/a sentinel, never a divide-by-zero. Committed for the deterministic empty-budget snapshot test.",
+  "data": {
+    "months": []
+  }
+}

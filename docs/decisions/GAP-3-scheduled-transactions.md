@@ -3,7 +3,16 @@
 > **Type:** Decision record (investigation + fallback contract — **no production code, template, or skill is modified**).
 > **Issue:** [#32](https://github.com/mike-bronner/workbench-ynab/issues/32) · Sprint 3 — Review Engine.
 > **Design ref:** GAP-3. Depends on M1-7, M2-1.
-> **Status:** Decided — **Path B (tool absent)**. Fallback contract defined; wiring deferred to M2-1.
+> **Status:** **SUPERSEDED** (2026-08-01) by
+> [`docs/ynab-read-path.md`](../ynab-read-path.md) §1a and
+> [#157](https://github.com/mike-bronner/workbench-ynab/issues/157). The §1
+> "tool absent" verdict was correct for `@dizzlkheinz/ynab-mcpb@0.26.10` and is
+> **no longer true**: the re-vendor to `0.27.1` registers
+> `ynab_list_scheduled_transactions`, so the read path caches scheduled
+> transactions as a real resource. The §2 history-derived fallback is retained
+> below as the **degraded** path, not the primary source. Everything in §1 should
+> be read as a record of the 0.26.10 bundle.
+> _Previously:_ Decided — **Path B (tool absent)**. Fallback contract defined; wiring deferred to M2-1.
 > **Related:** [#42](https://github.com/mike-bronner/workbench-ynab/issues/42) (frozen report template), M2-1 (review-engine wiring — consumes this record), M6-3 (v-Next richer forecast — consumes this record).
 
 ## TL;DR — Verdict: **tool absent**
@@ -211,12 +220,14 @@ forecast **without re-running the bundle investigation**:
   registration is absent.
 - **Two v-Next paths to real scheduled data:** (a) upstream/patched bundle that
   registers a `ynab_list_scheduled_transactions` tool (revisit on any
-  `@dizzlkheinz/ynab-mcpb` bump past `0.26.10` — re-run the §1 grep to check),
+  `@dizzlkheinz/ynab-mcpb` bump past `0.26.10` — re-run the §1 grep to check).
+  **This happened:** the 0.27.1 bump registered the tool, and #157 wired it — see
+  `docs/ynab-read-path.md` §1a. Path (a) below is therefore closed,
   or (b) the bundled-own MCP direction tracked in the spike
   `docs/spike-bundled-ynab-mcp.md` (#86), which could register the tool directly.
 - When real scheduled-transactions data lands, the v-Next forecast should
   **supersede** the history-derived estimate defined in §2 and drop the
   `estimated from history …` label — the fallback is the floor, not the ceiling.
 
-_Last verified against `@dizzlkheinz/ynab-mcpb@0.26.10`, bundle SHA-256
-`65cf53b8…ebcaedb5`. Re-verify (§1 grep) on any bundle bump._
+_§1 last verified against `@dizzlkheinz/ynab-mcpb@0.26.10`, bundle SHA-256
+`65cf53b8…ebcaedb5`. Superseded at `0.27.1` — see `docs/ynab-read-path.md` §1a._
