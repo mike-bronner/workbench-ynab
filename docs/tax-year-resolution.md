@@ -59,7 +59,7 @@ inert — set by the user, ignored by the run — with nothing to signal it:
 
 | Hop | Who | What it does |
 |---|---|---|
-| 1 | `bin/config.sh` `_cfg_tax_year` | Reads `.tax_year`, checks it is a four-digit JSON **number**, echoes it (or nothing when absent). Fails closed on anything else. |
+| 1 | `bin/config.sh` `_cfg_tax_year` | Reads `.tax_year`, checks it is a four-digit JSON **number**, echoes it (or nothing when the key is absent or `null`). Fails closed on anything else — including the falsy values `false` and `""`, because "is the key set?" is decided from the JSON **type**, not the rendered text. |
 | 2 | the entry command — `commands/ynab-review.md` Step 1a and each ad-hoc tier command's Phase 1 | `tax_year="$(_cfg_tax_year)" \|\| exit 1`. The dispatcher is the only layer that reads config. |
 | 3 | the same command's orchestrator prompt | Sends `tax_year: <value>`, and **omits the line** when the value is empty. |
 | 4 | [`agents/ynab-orchestrator.md`](../agents/ynab-orchestrator.md) | Copies that prompt field into `plan.tax_year.override` unread, or `null` when the line is absent. It never reads `config.json` itself. |

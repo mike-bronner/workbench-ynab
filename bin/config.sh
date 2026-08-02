@@ -158,7 +158,7 @@ _cfg_timezone() {
 #   date in the configured timezone — this key exists only for setups that do not
 #   follow the calendar year. A budget's display name (e.g. "Personal 2024") is
 #   never a source and is never parsed.
-#     * absent / empty        → echo nothing, return 0 (caller derives the year)
+#     * absent / null         → echo nothing, return 0 (caller derives the year)
 #     * present but malformed → descriptive error to stderr, return 1
 #     * present and valid     → echo the four-digit year, return 0
 #   FAILS CLOSED on a malformed value rather than ignoring it: silently falling
@@ -167,12 +167,25 @@ _cfg_timezone() {
 #   `tax_year="$(_cfg_tax_year)" || exit 1`.
 _cfg_tax_year() {
   local year kind
-  year="$(_cfg '.tax_year')"
-  [ -n "$year" ] || return 0
-  # The JSON TYPE is checked as well as the text: `jq -r` renders the string
-  # "2031" and the number 2031 identically, and a quoted year is a config mistake
-  # worth reporting, not a value to accept on the strength of how it prints.
+  # Decide "is the key set?" from the JSON TYPE, never from the rendered value.
+  # `_cfg` reads through `jq -r '<path> // empty'`, and jq's `//` discards `false`
+  # exactly like `null`/absent, while `-r` renders the empty string `""` as an
+  # empty line — so a value-first `[ -n "$year" ]` guard cannot tell `false` or
+  # `""` (both malformed; must fail closed) from an unset key (derive from the
+  # review date), and would silently ignore them. `type` has no such collapse: it
+  # yields "null" for an absent key and an explicit null alike, a distinct name
+  # for every other value, and empty only when the config file or jq is missing.
   kind="$(_cfg '.tax_year | type')"
+  case "$kind" in
+    '' | null) return 0 ;;
+  esac
+  # The key IS set, so any value that is not a four-digit JSON number is an error.
+  # `tostring` keeps that value visible in the message — a bare `.tax_year` read
+  # would render `false` and `""` as empty text and report a blank offender.
+  # Checking the TYPE as well as the text matters because `jq -r` renders the
+  # string "2031" and the number 2031 identically, and a quoted year is a config
+  # mistake worth reporting, not a value to accept on the strength of how it prints.
+  year="$(_cfg '.tax_year | tostring')"
   case "$kind:$year" in
     number:[0-9][0-9][0-9][0-9]) : ;;
     *)

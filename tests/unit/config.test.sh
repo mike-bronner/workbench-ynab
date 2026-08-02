@@ -135,14 +135,32 @@ test_cfg_tax_year() {
   YNAB_CONFIG_FILE="$cfg" _cfg_tax_year >/dev/null 2>&1 \
     || fail "_cfg_tax_year should succeed when tax_year is absent"
 
+  # An EXPLICIT null reads the same as an absent key — both mean "no override".
+  # Pinned separately from the absent case because the two reach that answer by
+  # different routes, and only this one proves an explicit null is not treated as
+  # a malformed value once the guard stops keying on the rendered text.
+  printf '{ "timezone": "UTC", "tax_year": null }\n' > "$cfg"
+  assert_eq "" "$(YNAB_CONFIG_FILE="$cfg" _cfg_tax_year)" "_cfg_tax_year with an explicit null"
+  YNAB_CONFIG_FILE="$cfg" _cfg_tax_year >/dev/null 2>&1 \
+    || fail "_cfg_tax_year should succeed when tax_year is null"
+
   # Present and well-formed -> echoed verbatim.
   printf '{ "timezone": "UTC", "tax_year": 2031 }\n' > "$cfg"
   assert_eq "2031" "$(YNAB_CONFIG_FILE="$cfg" _cfg_tax_year)" "_cfg_tax_year with a valid year"
 
   # Malformed -> non-zero AND no value on stdout, so a caller using
   # `year="$(_cfg_tax_year)" || exit 1` stops instead of proceeding on a bad year.
+  #
+  # The table covers every falsy value the JSON types permit, because a guard
+  # keyed on the RENDERED value rather than the JSON type swallows some of them:
+  #   * false — jq's `//` discards it exactly like null, so it read as "unset"
+  #   * ""    — `jq -r` renders it as an empty line, so it read as "unset"
+  #   * 0     — survives both, and was already rejected by the four-digit check
+  # The first two each independently return 0 with no override and no error under
+  # a value-first guard (verified by reverting the guard); `0` is a boundary pin,
+  # not a past defect.
   local bad
-  for bad in '"2031"' '203' '20311' '2031.5' 'true' '"twenty"'; do
+  for bad in '"2031"' '203' '20311' '2031.5' 'true' 'false' '0' '""' '"twenty"' '[]' '{}'; do
     printf '{ "timezone": "UTC", "tax_year": %s }\n' "$bad" > "$cfg"
     if YNAB_CONFIG_FILE="$cfg" _cfg_tax_year >/dev/null 2>&1; then
       fail "_cfg_tax_year should fail closed on tax_year=$bad"
