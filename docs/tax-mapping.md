@@ -507,7 +507,7 @@ The M2 review skill
 ([`skills/review/ynab-review.md`](../skills/review/ynab-review.md)) is the
 engine's primary consumer, through the **tax-engine facade**
 ([`lib/tax/index.mjs`](../lib/tax/index.mjs), issue #27) — a thin, stable
-surface of exactly four exports: `loadEffectiveProfile`,
+surface of six exports: `loadEffectiveProfile`,
 `classifyTransaction`, `classifyBatch`, `computeTaxSummary`.
 
 The flow:

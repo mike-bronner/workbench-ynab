@@ -39,6 +39,7 @@ loader, the JSON Schema, or any default.
 |---|---|---|---|
 | `schema_version` | integer | **required** | Config schema version, for forward migration. |
 | `timezone` | string | **required** | IANA timezone — the single source of truth for all date math (window, carryover, month/quarter boundaries, tax year). |
+| `tax_year` | integer | optional | Pins the active tax year, overriding calendar-year derivation from the review date. Four digits. |
 | `budgets` | array | **required** | The YNAB budgets the plugin operates on (replaces the v1 singular `budget`). |
 | `default_budget` | string | optional | `label` of the entry used when a caller needs a single budget. |
 | `business` | object | optional | Side-business config (accounts, category group, expense categories). |

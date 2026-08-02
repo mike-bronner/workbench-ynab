@@ -3,14 +3,15 @@
 //
 // Runs under the built-in node:test runner with NO node_modules present (only
 // node: built-ins and repo-local files), per docs/testing.md. This is the
-// composition-level contract test the issue asks for: it exercises ALL FOUR
-// exported functions end-to-end against an anonymized fixture profile (the
+// composition-level contract test the issue asks for: it exercises the four
+// profile-taking exports end-to-end against an anonymized fixture profile (the
 // bundled US defaults — no PII) plus fixture transactions, and confirms the
 // return shapes match the documented @typedefs. The underlying tax math is
 // already unit-tested in load-profile / classify-transaction / estimated-tax;
 // here we assert the FACADE's contract, not re-test the primitives.
 //
-// Covers the issue AC: exactly four named exports and no more (AC #1); each
+// Covers the issue AC: exactly six named exports and no more (AC #1 here, plus the
+// two the active-tax-year rule added in #17 — see tests/unit/tax-year.test.mjs); each
 // export delegates and returns the documented shape (AC #2–#6, #10); batch
 // preserves order and shape (AC #4); computeTaxSummary composes the five
 // Section-12 fragments with profile-supplied rates (AC #5); and the facade
@@ -48,12 +49,20 @@ function loadFixtureProfile() {
 const GITHUB_TXN = { payee_name: 'GitHub', amount: -9000, date: '2025-04-02' };
 const RENT_INCOME_TXN = { payee_name: 'Freelance Client', category_group_name: 'Business Income', amount: 500000, date: '2025-04-10' };
 
-// --- AC #1: exactly four named exports, no additional surface ----------------
+// --- AC #1: exactly six named exports, no additional surface -----------------
 
-test('AC#1 exports exactly the four named functions and nothing else', () => {
+test('AC#1 exports exactly the six named functions and nothing else', () => {
   assert.deepEqual(
     Object.keys(engine).sort(),
-    ['classifyBatch', 'classifyTransaction', 'computeTaxSummary', 'loadEffectiveProfile'],
+    [
+      'classifyBatch',
+      'classifyTransaction',
+      'computeTaxSummary',
+      'loadEffectiveProfile',
+      // The active-tax-year rule joined the facade in issue #17.
+      'resolveTaxYear',
+      'resolveYearBoundary',
+    ],
   );
   for (const fn of Object.values(engine)) assert.equal(typeof fn, 'function');
 });
@@ -196,7 +205,14 @@ test('AC#5 computeTaxSummary composes P&L, Schedule A, medical, SE tax, and next
   assert.equal(summary.nextQuarterlyPayment.estimatedAmount, expectedQuarterly);
 
   // Meta echoes the resolved year/status/anchor.
-  assert.deepEqual(summary.meta, { taxYear: 2025, filingStatus: 'single', asOfDate: '2025-05-01' });
+  assert.deepEqual(summary.meta, {
+    taxYear: 2025,
+    filingStatus: 'single',
+    asOfDate: '2025-05-01',
+    // The report-header label rides in meta since issue #17, so the template never
+    // has to re-derive a year from anything.
+    taxYearLabel: 'Tax Year 2025',
+  });
 });
 
 test('AC#5 computeTaxSummary tolerates empty ytdData without throwing', () => {
@@ -299,6 +315,9 @@ test('(#240) computeTaxSummary accepts an explicit asOfDate and anchors on it, n
     taxYear: 2025,
     filingStatus: 'single',
     asOfDate: '2025-01-01',
+    // Jan 1 sits inside the year-changeover window (#17) — tax year 2024's Q4 is not
+    // due until 2025-01-15 — so the prior year's close-out figures are required.
+    priorYearClose: { asOfDate: '2024-12-31' },
   });
   assert.equal(summary.meta.asOfDate, '2025-01-01');
   assert.equal(summary.nextQuarterlyPayment.quarter, 1); // Q1 is still upcoming on Jan 1

@@ -417,6 +417,13 @@ fragment (or an empty string when out of scope; the `<section>` stays):
 `{{report_date}}`, `{{output_path}}` (the save path is decided by the report
 writer, M2-9 — pass it through, don't hardcode it).
 
+The `{{tax_year}}` scalar slot carries the **active tax year**. Whenever the tier
+renders Section 12, pass the engine's `summary.meta.taxYearLabel` verbatim to
+`--tax-year` — it comes from `resolveTaxYear` and names both years during the
+January changeover. Never write the year by hand and never read it off the budget
+name: `Personal 2024` is a renameable label, not a tax fact. A tier with no tax
+section passes nothing. See [docs/tax-year-resolution.md](../../docs/tax-year-resolution.md).
+
 ### Trust boundary — escape every YNAB string
 
 Payee names, memos, category names, and account names are **untrusted external

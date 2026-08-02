@@ -35,6 +35,7 @@
 #   report-writer.sh \
 #     --tier   <Weekly|Monthly|Quarterly-Tax|Annual> \
 #     --date   <YYYY-MM-DD> \
+#     [--tax-year <label>]     # "Tax Year YYYY"; required for a tier with a tax section
 #     [--template   <path>]    # default: .report.template_path, else bundled asset
 #     [--output-dir <dir>]     # default: .report.output_dir, else ~/Documents/Claude/Reports
 #     --slot   <name>=<html>   # repeatable: ONE per block slot in the template
@@ -128,6 +129,7 @@ trim() {
 # --- parse args -------------------------------------------------------------
 tier=""
 date=""
+tax_year=""
 cli_template=""
 cli_output_dir=""
 slot_names=()
@@ -137,6 +139,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --tier)       [ "$#" -ge 2 ] || usage_err "--tier needs a value";       tier="$2";           shift 2 ;;
     --date)       [ "$#" -ge 2 ] || usage_err "--date needs a value";       date="$2";           shift 2 ;;
+    --tax-year)   [ "$#" -ge 2 ] || usage_err "--tax-year needs a value";   tax_year="$2";       shift 2 ;;
     --template)   [ "$#" -ge 2 ] || usage_err "--template needs a value";   cli_template="$2";   shift 2 ;;
     --output-dir) [ "$#" -ge 2 ] || usage_err "--output-dir needs a value"; cli_output_dir="$2"; shift 2 ;;
     --slot)
@@ -193,6 +196,19 @@ if [ -z "$date" ]; then
   usage_err "--date is required (YYYY-MM-DD)"
 elif [[ ! "$date" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$ ]]; then
   usage_err "invalid --date '$date' (expected YYYY-MM-DD, month 01-12, day 01-31)"
+fi
+
+# --- validate the tax-year label (issue #17) --------------------------------
+# OPTIONAL: a tier with no tax section passes nothing and the {{tax_year}} slot
+# renders empty, mirroring the tier-dependent Section-12 block slot. When supplied
+# it must be one of the two shapes the tax engine's resolveTaxYear path produces —
+# the plain label, or the January changeover label naming both years. Pinning the
+# shape here is what makes "sourced exclusively from resolveTaxYear" enforceable
+# rather than a convention: a hand-written or budget-name-derived year (e.g.
+# "Personal 2024") cannot pass, and a config-sourced string never reaches the
+# rendered header unchecked.
+if [ -n "$tax_year" ] && [[ ! "$tax_year" =~ ^Tax\ Year\ [0-9]{4}(\ \([0-9]{4}\ close-out\ through\ [0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])\))?$ ]]; then
+  usage_err "invalid --tax-year '$tax_year' (expected 'Tax Year YYYY', optionally followed by ' (YYYY close-out through YYYY-MM-DD)') — pass the engine's meta.taxYearLabel verbatim"
 fi
 
 # --- resolve template -------------------------------------------------------
@@ -351,10 +367,10 @@ fi
 
 # Scalar slots FIRST, before the block fragments are spliced in — for two reasons:
 #   1. A fragment's own text may legitimately contain the literal `{{output_path}}`
-#      / `{{tier}}` / `{{report_date}}` (e.g. a YNAB payee or memo). Substituting
-#      the scalars first leaves that fragment text intact instead of a later
-#      scalar pass silently overwriting it (and leaking the local save path).
-#   2. Each scalar value is enum/regex-validated (tier/date) or HTML-escaped
+#      / `{{tier}}` / `{{report_date}}` / `{{tax_year}}` (e.g. a YNAB payee or memo).
+#      Substituting the scalars first leaves that fragment text intact instead of a
+#      later scalar pass silently overwriting it (and leaking the local save path).
+#   2. Each scalar value is enum/regex-validated (tier/date/tax_year) or HTML-escaped
 #      (out_path), so no scalar substitution can introduce a `<!-- SLOT:name -->`
 #      needle for the block pass below to mis-splice.
 # Every scalar the writer injects is HTML-escaped — the writer OWNS escaping the
@@ -366,6 +382,7 @@ tier_display="$tier"
 html="${html//\{\{tier\}\}/$(html_escape "$tier_display")}"
 html="${html//\{\{report_date\}\}/$(html_escape "$date")}"
 html="${html//\{\{output_path\}\}/$(html_escape "$out_path")}"
+html="${html//\{\{tax_year\}\}/$(html_escape "$tax_year")}"
 
 # Block slots — filled in a SINGLE left-to-right pass over the template so a
 # fragment's value is NEVER re-scanned. A per-slot global `${html//needle/value}`

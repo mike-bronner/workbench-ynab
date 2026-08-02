@@ -120,4 +120,45 @@ test_example_config() {
   assert_eq "$val" "$(YNAB_CONFIG_FILE="$EXAMPLE" _cfg_timezone)" "example timezone reads through _cfg_timezone"
 }
 
+# _cfg_tax_year — the OPTIONAL active-tax-year override (issue #17).
+#
+# Three distinct outcomes, each pinned separately: absent (echo nothing, succeed —
+# the caller derives the year from the review date), valid (echo it), malformed
+# (fail closed). The malformed cases matter most: silently ignoring a bad value
+# would report a different year than the user asked for, with no signal at all.
+test_cfg_tax_year() {
+  local cfg="$SANDBOX/tax-year.json"
+
+  # Absent -> empty output, exit 0. The absence is NOT an error; it is the default.
+  printf '{ "timezone": "UTC" }\n' > "$cfg"
+  assert_eq "" "$(YNAB_CONFIG_FILE="$cfg" _cfg_tax_year)" "_cfg_tax_year with the key absent"
+  YNAB_CONFIG_FILE="$cfg" _cfg_tax_year >/dev/null 2>&1 \
+    || fail "_cfg_tax_year should succeed when tax_year is absent"
+
+  # Present and well-formed -> echoed verbatim.
+  printf '{ "timezone": "UTC", "tax_year": 2031 }\n' > "$cfg"
+  assert_eq "2031" "$(YNAB_CONFIG_FILE="$cfg" _cfg_tax_year)" "_cfg_tax_year with a valid year"
+
+  # Malformed -> non-zero AND no value on stdout, so a caller using
+  # `year="$(_cfg_tax_year)" || exit 1` stops instead of proceeding on a bad year.
+  local bad
+  for bad in '"2031"' '203' '20311' '2031.5' 'true' '"twenty"'; do
+    printf '{ "timezone": "UTC", "tax_year": %s }\n' "$bad" > "$cfg"
+    if YNAB_CONFIG_FILE="$cfg" _cfg_tax_year >/dev/null 2>&1; then
+      fail "_cfg_tax_year should fail closed on tax_year=$bad"
+    fi
+    assert_eq "" "$(YNAB_CONFIG_FILE="$cfg" _cfg_tax_year 2>/dev/null || true)" \
+      "_cfg_tax_year emits nothing on stdout for tax_year=$bad"
+  done
+
+  # The error is descriptive and names the offending key, not a bare non-zero.
+  printf '{ "timezone": "UTC", "tax_year": "2031" }\n' > "$cfg"
+  local err
+  err="$(YNAB_CONFIG_FILE="$cfg" _cfg_tax_year 2>&1 >/dev/null || true)"
+  case "$err" in
+    *tax_year*) : ;;
+    *) fail "_cfg_tax_year error should name config.tax_year, got: $err" ;;
+  esac
+}
+
 run_tests
