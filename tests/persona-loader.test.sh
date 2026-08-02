@@ -11,6 +11,10 @@
 # Drives bin/persona.sh against temp configs via the YNAB_CONFIG_FILE and
 # WORKBENCH_CORE_CONFIG_FILE overrides so the real plugin data dirs are never
 # touched — the tests are hermetic and do not depend on host config state.
+#
+# bash-3.2-lane: bin/persona.sh's footer escaping must be correct on macOS's
+# default bash 3.2 as well as bash >= 5 (issue #126 AC-3), and render_tmpl_timed
+# / run_voice_timed drive the watchdog's job-control timeout path (issue #251).
 
 set -u
 

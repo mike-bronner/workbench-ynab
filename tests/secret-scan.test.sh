@@ -16,6 +16,10 @@
 # Every synthetic secret is ASSEMBLED AT RUNTIME from harmless fragments, so this
 # test file contains no literal 64-char-hex token, no cleartext YNAB_ACCESS_TOKEN
 # assignment, and no full PEM header — it stays clean when the guard scans tests/.
+#
+# bash-3.2-lane: bin/secret-scan.sh's rules are grep patterns whose behaviour is
+# asserted to hold "on GNU and BSD grep alike"; secret-scan.yml runs on ubuntu
+# only, so this lane is where that BSD half is actually executed (issue #231).
 
 set -u
 

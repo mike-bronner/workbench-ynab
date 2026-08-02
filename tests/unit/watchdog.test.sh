@@ -8,6 +8,10 @@
 # ends with `run_tests`. scripts/test.sh auto-discovers it via the `*.test.sh`
 # glob.
 #
+# bash-3.2-lane: the watchdog's process-group kill is job-control behaviour, and
+# job control differs across bash majors — the TIMEOUT path must be proven on
+# macOS's bash 3.2, not only on the ubuntu runner's bash 5.x (issue #188).
+#
 # The headline test is test_timeout_reaps_command_substitution_grandchild: it
 # pins the ACTUAL bug — a killed watchdog used to strand the grandchild doing the
 # expensive work. Because all four call sites (persona-loader's render_tmpl_timed

@@ -10,6 +10,10 @@
 # with `scripts/test.sh tests/unit/report-writer.test.sh`, or directly with
 # `bash tests/unit/report-writer.test.sh`.
 #
+# bash-3.2-lane: bin/report-writer.sh declares itself bash 3.2 compatible and
+# resolves output paths through bin/path-expand.sh's 3.2-only constructs; its
+# overlong-render guard also drives the watchdog timeout path (issue #251).
+#
 # Seams used:
 #   * YNAB_CONFIG_FILE — the loader's documented test seam (a sandbox config), so
 #     the .report.output_dir read is deterministic.

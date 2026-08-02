@@ -11,6 +11,10 @@
 # `scripts/test.sh tests/unit/html-escape.test.sh`, or directly with
 # `bash tests/unit/html-escape.test.sh`.
 #
+# bash-3.2-lane: bin/html-escape.sh declares itself bash 3.2 compatible and is
+# the escaper behind the dual-bash guarantee (issue #126 AC-3); escape_timed also
+# drives the watchdog's job-control timeout path (issue #251).
+#
 # The module is BOTH sourced (for html_escape / escape_ynab_string) and executed
 # as a CLI (the review skill's per-value filter), so both surfaces are exercised.
 set -euo pipefail
