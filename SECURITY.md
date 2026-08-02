@@ -82,7 +82,31 @@ Two layers keep credentials out of version control:
    `vendor/` to avoid false positives. The **cleartext-token and PEM rules still
    scan `vendor/`** — those shapes never legitimately appear in the bundle, so
    the ~1.46 MB vendored artifact (the repo's highest-risk supply-chain surface)
-   is scanned for the unambiguous secret shapes. Bundle *integrity* verification
+   is scanned for the unambiguous secret shapes.
+
+   **Every file is scanned as text, in the C locale.** The scan deliberately does
+   *not* skip "binary" files: a single NUL byte anywhere in a file is enough for
+   `grep` to classify the whole file as binary and skip it, which would hide a
+   credential in that file from all three rules above — and this scan is the
+   repo's only content-scanning CI gate, so one stray byte would silently shrink
+   it to nothing (issue #255). The scanning `grep`s are pinned to `LC_ALL=C` for
+   the same reason: under a UTF-8 locale `grep` decodes input as UTF-8, and a
+   byte that is not valid UTF-8 makes it silently fail to match — no error, no
+   warning, the credential simply reports as absent. CI runs under `LANG=C.UTF-8`,
+   so that pin is what keeps the gate honest there. Scanning as text means grep would otherwise print raw
+   file bytes, so reported hits are **sanitized and reported as `grep -o`
+   matches**: a hit shows the matched shape rather than the whole physical line,
+   bytes outside printable ASCII become `?`, and the text after the `path:line:`
+   locator is capped at 200 characters with a `...` marker. The cap keeps the
+   **head *and* the tail** of that text: because `grep -o` makes the match the
+   record's suffix, keeping the tail guarantees the matched shape reaches the
+   report even when the locator split mis-anchors — which it does on any path
+   containing `:<digits>:`, since the split takes the leftmost one. (No such path
+   is tracked here, but git accepts them, so the report does not rely on their
+   absence.) That keeps a finding actionable (`path:line:match`) on a minified
+   bundle, where the whole file can be one 500,000-character line and reporting
+   the *line* would show unrelated code while silently truncating away the secret
+   that tripped the rule. Bundle *integrity* verification
    is a **complementary** control, not a substitute for this scan:
    `verify-bundle.sh` detects drift, not secret content (see
    [Bundle integrity](#bundle-integrity)). The scanner is itself covered by a
