@@ -171,4 +171,69 @@ test_missing_config() {
   assert_eq "" "$(YNAB_CONFIG_FILE="$missing" _cfg_default_budget)"             "_cfg_default_budget empty when config missing"
 }
 
+# unparseable (issue #283) — the budget helpers read the file through
+# _migrate_config, a SECOND read path that does not go through _cfg, so it
+# carries its own parse guard. Without it a corrupt config reads back as "no
+# budgets": _cfg_default_budget would emit nothing and its caller would fall
+# through to a default budget, which is the same silent fail-open as reading a
+# missing file.
+#
+# The two fixtures cover both jq failure routes — a parse error and "no JSON
+# value was ever produced" (a zero-byte file). Each helper must return non-zero
+# AND emit nothing on stdout.
+#
+# Every helper call runs with `set +o pipefail`, and that is the whole point of
+# the test rather than an aside. This FILE sets `pipefail`, and under it a
+# `_migrate_config | jq …` pipeline would report _migrate_config's failure for
+# free — so the assertions below would pass whether or not the helpers capture
+# _migrate_config's output, and would prove nothing about the helpers themselves
+# (verified: reverting the capture to a pipe leaves this file 7/7 green while
+# pipefail is on). A sourced loader cannot assume the caller's shell options —
+# only bin/report-writer.sh and bin/ynab-prune.sh set pipefail; a skill or
+# slash-command running these helpers inline need not — so pipefail-off is the
+# condition that actually discriminates the fix.
+test_malformed_config_fails_closed() {
+  local bad_parse="$SANDBOX/bad-parse.json" bad_empty="$SANDBOX/bad-empty.json"
+  printf '{ "schema_version": 2, "budgets": [ }\n' > "$bad_parse"
+  : > "$bad_empty"
+
+  local bad out rc err
+  for bad in "$bad_parse" "$bad_empty"; do
+    rc=0; out="$(set +o pipefail; YNAB_CONFIG_FILE="$bad" _migrate_config 2>/dev/null)" || rc=$?
+    [ "$rc" -ne 0 ] || fail "_migrate_config should fail closed on $(basename "$bad")"
+    assert_eq "" "$out" "_migrate_config emits nothing for $(basename "$bad")"
+
+    rc=0; out="$(set +o pipefail; YNAB_CONFIG_FILE="$bad" _cfg_budgets 2>/dev/null)" || rc=$?
+    [ "$rc" -ne 0 ] || fail "_cfg_budgets should fail closed on $(basename "$bad") without pipefail, not report 'no budgets'"
+    assert_eq "" "$out" "_cfg_budgets emits nothing for $(basename "$bad")"
+
+    rc=0; out="$(set +o pipefail; YNAB_CONFIG_FILE="$bad" _cfg_budget_field 'Sandbox Business' 'role' 2>/dev/null)" || rc=$?
+    [ "$rc" -ne 0 ] || fail "_cfg_budget_field should fail closed on $(basename "$bad") without pipefail"
+    assert_eq "" "$out" "_cfg_budget_field emits nothing for $(basename "$bad")"
+
+    rc=0; out="$(set +o pipefail; YNAB_CONFIG_FILE="$bad" _cfg_default_budget 2>/dev/null)" || rc=$?
+    [ "$rc" -ne 0 ] || fail "_cfg_default_budget should fail closed on $(basename "$bad") without pipefail, not fall through to a default"
+    assert_eq "" "$out" "_cfg_default_budget emits nothing for $(basename "$bad")"
+
+    # The error names the file and says why — not a bare non-zero.
+    err="$(set +o pipefail; YNAB_CONFIG_FILE="$bad" _cfg_budgets 2>&1 >/dev/null || true)"
+    assert_contains "$err" "$bad"           "_cfg_budgets error names the config path for $(basename "$bad")"
+    assert_contains "$err" "not valid JSON" "_cfg_budgets error says the file is not valid JSON for $(basename "$bad")"
+  done
+}
+
+# A parseable config must still read normally with pipefail OFF — the capture
+# rewrite must not have changed the success path. Without this, a "fix" that
+# simply returned non-zero unconditionally would satisfy the fail-closed test
+# above.
+test_helpers_unchanged_without_pipefail() {
+  local budgets
+  budgets="$(set +o pipefail; YNAB_CONFIG_FILE="$MULTI" _cfg_budgets)"
+  assert_eq "2" "$(jq 'length' <<<"$budgets")" "_cfg_budgets still reads both entries without pipefail"
+  assert_eq "Sandbox Business" "$(set +o pipefail; YNAB_CONFIG_FILE="$MULTI" _cfg_default_budget | jq -r '.label')" \
+    "_cfg_default_budget still resolves the default without pipefail"
+  assert_eq "false" "$(set +o pipefail; YNAB_CONFIG_FILE="$MULTI" _cfg_budget_field 'Sandbox Business' 'write_back_enabled')" \
+    "_cfg_budget_field still reads a boolean false without pipefail"
+}
+
 run_tests
