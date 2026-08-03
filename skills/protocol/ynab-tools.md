@@ -1,8 +1,10 @@
 # YNAB tool names — single source of truth
 
 > **This file is the single source of truth for concrete YNAB tool names.**
-> Concrete names may appear in only three allowlisted files: this one, the
-> human-readable contract
+> Concrete names may appear only in the files on the guard's allowlist — the
+> full table is in the capability map's *Single source of truth* section. Three
+> of them carry the general tool-name lists: this one, the human-readable
+> contract
 > [`docs/mcp-capability-map.md`](../../docs/mcp-capability-map.md), and the
 > orchestrator agent's `tools:` frontmatter
 > ([`agents/ynab-orchestrator.md`](../../agents/ynab-orchestrator.md)) — which
@@ -42,6 +44,8 @@ mcp__plugin_workbench-ynab_ynab__ynab_get_month
 mcp__plugin_workbench-ynab_ynab__ynab_export_transactions
 mcp__plugin_workbench-ynab_ynab__ynab_get_transaction
 mcp__plugin_workbench-ynab_ynab__ynab_compare_transactions
+mcp__plugin_workbench-ynab_ynab__ynab_get_account
+mcp__plugin_workbench-ynab_ynab__ynab_get_category
 ```
 
 `ynab_list_scheduled_transactions` is the read the fetch-once cache uses for the
@@ -59,6 +63,22 @@ delete, and the dry-run preview may corroborate the duplicate pairing with
 tool ids in the vendored bundle. They are **not** wired into the read-only
 orchestrator's `tools:` list (the agent carries only the planner's five reads);
 they are invoked from the approval-gated apply path, not the orchestrator.
+
+`ynab_get_account` and `ynab_get_category` are the two single-record reads the
+apply executor's `readLiveState` seam resolves for drift detection: `get_account`
+for the `reconcile` op type's `reconcile_account` sub-action (account
+`reconciled_balance` / `cleared_balance` — see
+[`skills/reconcile-write-path.md`](../reconcile-write-path.md)) and
+`get_category` for `allocate` (that category's `budgeted` for the given month).
+Both were verified as registered tool ids in the vendored bundle. They were
+missing from this file and from the capability map until **#247**, while the
+write path called them anyway — so an author naming an account or category read
+found only the bulk `list_accounts` / the month-level `get_month` in the SSoT and
+wrote a wrong-but-SSoT-conformant verb into a design doc, twice. Like
+`get_transaction` / `compare_transactions`, both are read-only, both are **not**
+wired into the read-only orchestrator's `tools:` list (it stays the planner's
+five reads — no planner feature needs a single-account or single-category read),
+and both run from the approval-gated apply path.
 
 ## Write tools (ledger-only — gated, approved in Sprint 4)
 
@@ -147,10 +167,17 @@ phase-split set above, so the delete verb is never blanket-approved.
 The read-only orchestrator agent's `tools:` allow-list is a **subset** of the
 **read tools** above: the planner currently wires the five reads it needs
 (`list_budgets`, `list_accounts`, `list_categories`, `list_transactions`,
-`get_month`). The remaining two read tools — `list_payees` and
-`export_transactions` — are in the canonical read set above but are not
-wired into the agent; they widen into the orchestrator only if a future planner
-feature needs them. The orchestrator never holds write tools — write paths run from the
+`get_month`). The other seven read tools — `list_payees`,
+`export_transactions`, `list_scheduled_transactions`, `get_transaction`,
+`compare_transactions`, `get_account` and `get_category` — are in the canonical
+read set above but are not wired into the agent. `list_payees` and
+`export_transactions` widen into the orchestrator only if a future planner
+feature needs them. The other five have no place in a read-only planner at all:
+`list_scheduled_transactions` feeds the read path's fetch-once forecast cache
+(the review skills consume it, not the planner), and `get_transaction`,
+`compare_transactions`, `get_account` and `get_category` are drift reads on the
+approval-gated apply path.
+The orchestrator never holds write tools — write paths run from the
 approval-gated `/ynab-apply` command (Sprint 4), not the orchestrator.
 
 ## Port wrappers must throw on failure — check `result.isError`
@@ -174,7 +201,13 @@ classify it into `error_class` / `applied_state`.
   above, not `list_payees` / `export_transactions` until Sprint 3), then run
   `bin/check-tool-name-sources.sh`.
 - Add a logical operation: add it to the capability map table first, then add
-  its concrete name here.
+  its concrete name here. The two lists must stay identical as sets —
+  `tests/unit/tool-name-ssot-coverage.test.sh` fails when they diverge.
+- Re-vendor the MCP: every tool the new bundle registers must end up either in
+  the capability map table (and therefore here) or in that map's *Registered but
+  not adopted* inventory. The same test asserts that partition, so a newly
+  registered tool cannot sit silently absent from both files — the gap #247
+  documents.
 - Never paste a `mcp__plugin_workbench-ynab_ynab__ynab_*` name into another
   skill or config file — reference this file instead. The guard script will
   fail the build otherwise.

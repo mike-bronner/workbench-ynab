@@ -59,12 +59,14 @@ path and the one the swap procedure below assumes by default.
 
 ## Capability map
 
-The 17 logical operations the rituals need, each mapped to its current concrete
+The 19 logical operations the rituals need, each mapped to its current concrete
 namespaced tool. `R` = read (safe, pre-approved in the read-only phase);
 `W` = write (ledger-only mutation, gated behind the write-safety guardrail and
 approved in Sprint 4). Operations 15–16 were added for the Sprint 4 delete-duplicate
 write path (M4-8); operation 17 arrived with the 0.27.1 re-vendor (#157), which is
-what first gave the plugin a read path to scheduled transactions.
+what first gave the plugin a read path to scheduled transactions. Operations 18–19
+are the two single-record reads the write-back drift check already calls but this
+table omitted until #247.
 
 | # | Logical operation | Concrete tool | Kind | What it does |
 |---|---|---|---|---|
@@ -85,6 +87,8 @@ what first gave the plugin a read path to scheduled transactions.
 | 15 | `get_transaction` | `mcp__plugin_workbench-ynab_ynab__ynab_get_transaction` | R | Get one transaction — the M4-8 delete path re-reads the victim for drift detection |
 | 16 | `compare_transactions` | `mcp__plugin_workbench-ynab_ynab__ynab_compare_transactions` | R | Compare two transactions — corroborates the duplicate pairing in the M4-8 dry-run preview |
 | 17 | `list_scheduled_transactions` | `mcp__plugin_workbench-ynab_ynab__ynab_list_scheduled_transactions` | R | List scheduled (upcoming) transactions — the forecast / bills-due source, cached by the read path (#157) |
+| 18 | `get_account` | `mcp__plugin_workbench-ynab_ynab__ynab_get_account` | R | Get one account — the single-account read the reconcile-account live-state resolution calls (`skills/reconcile-write-path.md`, executor `readLiveState`) for `reconciled_balance` / `cleared_balance` drift |
+| 19 | `get_category` | `mcp__plugin_workbench-ynab_ynab__ynab_get_category` | R | Get one category for a month — the single-category read the allocate live-state resolution calls (executor `readLiveState`) for `budgeted` drift |
 
 > **None of these move real money.** Write-back is strictly ledger-only
 > (categorize / allocate / dedup / reconcile). The plugin never initiates
@@ -92,8 +96,11 @@ what first gave the plugin a read path to scheduled transactions.
 
 > **Suffixes confirmed against the vendored bundle.** The vendored MCP
 > (`@dizzlkheinz/ynab-mcpb` v0.27.1, in `vendor/ynab-mcp/`) registers 35 tools;
-> the rituals need the 17 above. All 17 concrete suffixes were verified to be
-> registered tool ids in that bundle. The 0.27.1 bump was purely additive over
+> the rituals need the 19 above. All 19 concrete suffixes were verified to be
+> registered tool ids in that bundle — and
+> [`tests/unit/tool-name-ssot-coverage.test.sh`](../tests/unit/tool-name-ssot-coverage.test.sh)
+> re-checks that mechanically on every run, so the verification is not a
+> point-in-time claim. The 0.27.1 bump was purely additive over
 > 0.26.10's 28 tools — nothing was removed, so no existing call site changed. Of
 > the 7 additions the rituals take one (`list_scheduled_transactions`, row 17);
 > three more reads (`get_scheduled_transaction`, `analyze_spending`,
@@ -103,10 +110,50 @@ what first gave the plugin a read path to scheduled transactions.
 > re-confirm each suffix against the new bundle and correct any drift **here, in
 > [`ynab-tools.md`](../skills/protocol/ynab-tools.md), and (for a changed suffix
 > the orchestrator actually wires) in the orchestrator's `tools:` list** —
-> three of the six allowlisted files — and review the write-safety guardrail
-> trio (the other three allowlist entries below), whose security denylist
-> deliberately enumerates the concrete write verbs and MUST be re-checked on
-> any swap. The guard script (below) proves nothing else has copied a name.
+> three of the seven allowlisted files — and review the write-safety guardrail
+> trio plus the user-facing safety reference (the other four allowlist entries
+> below), whose security denylist deliberately enumerates the concrete write
+> verbs and MUST be re-checked on any swap. The guard script (below) proves
+> nothing else has copied a name.
+
+## Registered but not adopted
+
+The bundle registers 35 tools; the table above adopts 19. The other 16 are listed
+here **by design, not by omission** — an unadopted tool is a decision, and a
+reader who cannot find a verb in either list must not assume it is safe to
+substitute a neighbouring one. That substitution is exactly how the wrong live-read
+verb landed in `docs/write-back-idempotency.md` twice (#247).
+
+Names here are bare suffixes, never the namespaced form, so this table is an
+inventory rather than a second place a concrete name lives.
+
+| Registered tool | Why the rituals do not use it |
+|---|---|
+| `ynab_get_budget` | Budget metadata; the rituals resolve a budget id from `list_budgets` and read state per-resource |
+| `ynab_get_default_budget` | Default-budget state lives in `config.json`, not in the MCP |
+| `ynab_set_default_budget` | Write. Would mutate MCP-side state from a review; deny-listed in the write-safety guardrail |
+| `ynab_get_user` | Account identity; no ritual needs it |
+| `ynab_get_payee` | Single-payee read; payee handling is bulk (`list_payees`) |
+| `ynab_list_months` | Month enumeration; the rituals compute the months they need and read each with `get_month` |
+| `ynab_analyze_spending` | MCP-side analysis. The review methodology owns analysis, so the plugin reads raw data instead |
+| `ynab_compare_spending_periods` | Same reason as `analyze_spending` |
+| `ynab_clear_cache` | Cache control for the MCP's own cache; the read path owns its fetch-once cache |
+| `ynab_diagnostic_info` | Bundle diagnostics; the offline-boot test covers bundle health |
+| `ynab_create_account` | Write. No ritual creates accounts; deny-listed in the write-safety guardrail |
+| `ynab_create_receipt_split_transaction` | Write. No ritual creates transactions; deny-listed in the write-safety guardrail |
+| `ynab_get_scheduled_transaction` | Single-scheduled-transaction read; the forecast reads them in bulk (`list_scheduled_transactions`) |
+| `ynab_create_scheduled_transaction` | Write, money-adjacent (a scheduled transaction becomes a real one on its due date); deny-listed |
+| `ynab_update_scheduled_transaction` | Write, money-adjacent; deny-listed |
+| `ynab_delete_scheduled_transaction` | Write, money-adjacent; deny-listed |
+
+**This table is load-bearing on a re-vendor.** Adopted plus unadopted must equal
+the registered set exactly.
+[`tests/unit/tool-name-ssot-coverage.test.sh`](../tests/unit/tool-name-ssot-coverage.test.sh)
+asserts that partition, so a bundle that registers a new tool fails the suite
+until the tool is either adopted into the capability table (and mirrored into
+[`ynab-tools.md`](../skills/protocol/ynab-tools.md)) or classified here with a
+reason. That is the mechanical guard against #247 reopening: a missing verb can
+no longer sit silently absent from both files.
 
 ## Single source of truth
 
@@ -132,6 +179,7 @@ allowlist. The allowlist is exactly these files:
 | [`assets/write-safety-guardrail.js`](../assets/write-safety-guardrail.js) | the money-gate denylist — by its security nature the guardrail must enumerate the exact write verbs it gates; a security denylist cannot indirect through markdown parsing, and a namespace swap MUST force a review of this gate regardless, so it is a deliberate, documented swap consumer |
 | [`assets/test/write-safety-guardrail.test.js`](../assets/test/write-safety-guardrail.test.js) | pins the denylist classification — the test proving the gate blocks money movement names the same concrete verbs the `.js` enumerates |
 | [`skills/write-safety-guardrail.md`](../skills/write-safety-guardrail.md) | the human-readable gate contract — documents the exact denylist the `.js` enforces |
+| [`docs/write-back-safety.md`](./write-back-safety.md) | the user-facing write-back safety reference (#71) — its AC requires the exact namespaced write tools be listed so a reader can audit precisely what may run |
 
 Everywhere else, a hard-coded name fails the guard. The bare prefix
 (`mcp__plugin_workbench-ynab_ynab__`) and the family glob
@@ -143,6 +191,16 @@ which proves it catches a planted name on every scanned surface, honours the
 allowlist, passes on a clean tree — and that the real tree itself is clean, so
 `scripts/test.sh` (and therefore CI's `test` workflow) fails on any new
 hard-coded name. CI also runs the guard directly as an explicit workflow step.
+
+The guard answers "has a name leaked *out* of the allowlist?" It cannot answer
+"is a name *missing* from the two source-of-truth files?" — the failure mode #247
+was opened for. That second question is
+[`tests/unit/tool-name-ssot-coverage.test.sh`](../tests/unit/tool-name-ssot-coverage.test.sh)'s
+job: it reads the registered tool ids straight out of the vendored bundle and
+asserts the two SSoT files agree with each other, name only real registered
+tools, and between them account for every registered tool. It also pins the
+allowlist table above against the guard's own `ALLOWLIST` array, so the two
+cannot drift.
 
 ## Consumers — everything points back here
 
