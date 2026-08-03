@@ -256,12 +256,13 @@ test('(AC4) reconcile_account with no before baseline fails closed — skipped-s
 });
 
 // Every remaining `before` shape that carries no comparable baseline (`{}` is
-// covered above). Only two of these rows discriminate the new baseline guard —
-// reverting it to the bare `isStale(op.before, live)` reddens the `{}` case above
-// and `a populated non-plain object` here, and nothing else. The other five rows
-// pin the branch's end-to-end contract, which `isStale`'s own non-object rejection
-// already satisfies; they are AC coverage and regression cover, not proof of the
-// guard. Do not read them as mutation-discriminating.
+// covered above). Exactly ONE of this table's 7 rows discriminates the new
+// baseline guard: `a populated non-plain object`. Reverting the guard to the bare
+// `isStale(op.before, live)` reddens that row plus the `{}` case above the table,
+// and nothing else. The other 6 rows here pin the branch's end-to-end contract,
+// which `isStale`'s own non-object rejection already satisfies; they are AC
+// coverage and regression cover, not proof of the guard. Do not read them as
+// mutation-discriminating.
 for (const [label, before] of [
   ['absent', undefined],
   ['null', null],

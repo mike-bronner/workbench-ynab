@@ -329,8 +329,10 @@ fi
 #                   call it not-yet-wired
 # Quoting the line (not merely "the body is no longer the bare delegation") is
 # what ties the marker's removal to the real code: any edit to the guard — a
-# rename, a reformat, a deletion — breaks the doc's quote and fails here, where a
-# "body differs from the old string" check would stay green on all three.
+# rename, a reformat, a deletion — fails here. A weaker "body differs from the old
+# bare-delegation string" check would stay green on the first two (the body still
+# differs, so the rot goes unseen); only the third trips it, because deleting the
+# guard restores that exact string. Quoting the line is what covers the other two.
 RA_GUARD='if (!hasComparableBaseline(op.before)) return true;'
 recon_fn="$(awk '/^function isReconcileStale\(/{f=1} f{print} f&&/^}/{exit}' \
   "$REPO_ROOT/$RECONCILE")"
