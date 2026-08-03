@@ -34,12 +34,15 @@ BEGIN_FRAG='-----BEGIN'                         # PEM fragments — neither alon
 KEY_FRAG='PRIVATE KEY-----'                     #   matches the full header
 
 SANDBOX="$(mktemp -d)"
-# Holds the guard's captured report for the output-sanitization case below. It
-# must live OUTSIDE the sandbox — the guard scans its own working tree, so a
+# Holds the guard's captured report for the cases that assert on its output.
+# It must live OUTSIDE the sandbox — the guard scans its own working tree, so a
 # report file containing a synthetic secret would otherwise be scanned as tree
 # content and confuse the very run it is recording.
-REPORT=""
-trap 'rm -rf "$SANDBOX" ${REPORT:+"$REPORT"}' EXIT
+REPORT="$(mktemp)"
+# Failing tool stubs for the fail-closed cases (issue #265), prepended to PATH
+# for one guard run at a time. Outside the sandbox for the same reason.
+STUBS="$(mktemp -d)"
+trap 'rm -rf "$SANDBOX" "$STUBS" "$REPORT"' EXIT
 
 pass=0
 fail=0
@@ -265,7 +268,6 @@ run_utf8_case "PEM header beside an invalid UTF-8 byte is caught"      1 "src/id
 # receive, with no shell layer in between to quietly reshape it.
 echo "Self-test: a NUL inside the matched text is rendered, never emitted raw"
 reset_sandbox
-REPORT="$(mktemp)"
 mkdir -p "$SANDBOX/src"
 printf 'x\000%s\n' "$SYNTH_HEX" > "$SANDBOX/src/nul-report.txt"
 report_rc=0
@@ -476,6 +478,174 @@ else
        "'ird.txt:<n>:src/we' line — got exit $nl_rc, bare=$nl_bare, stale=$nl_stale"
   fail=$((fail + 1))
 fi
+
+# Every scan pipeline used to end in a blanket `|| true`, which cannot tell
+# grep's routine "no match" (exit 1) apart from ANY stage of the pipeline failing
+# to RUN. Stub tr, sed, awk or sort to exit non-zero and the guard printed
+# "✓ No committed secrets found" and exited 0 — with a real committed secret
+# sitting in the tree, and with the grep invocation's own 2>/dev/null discarding
+# the failing tool's diagnostic, so there was zero visible signal (issue #265).
+# The guard now checks every stage's own exit status and aborts with exit 2.
+#
+# THE FIXTURE PLANTS A REAL SECRET in the fail-open cases, and that is what makes
+# them discriminate: on a clean tree the old code and the new code both decline
+# to name a secret and only the exit status differs, whereas with a secret
+# present the old code actively reported CLEAN. A clean-tree case is kept too
+# (below), to pin that the abort does not depend on a hit being in hand.
+SCAN_ABORT=2
+
+# stub_tool <name> <exit-code>
+#
+# Installs a stub for <name> in $STUBS, which the caller prepends to PATH. Only
+# EXTERNAL tools can be stubbed this way — printf and echo are bash builtins and
+# never resolve through PATH, so the guard's printf stage is covered by its
+# status check alone and has no case here.
+#
+# The stub DRAINS stdin before exiting, and that is load-bearing. Without it a
+# stub standing in for a downstream stage exits while the upstream stage is still
+# writing, the upstream takes SIGPIPE (141), and the guard aborts naming the
+# UPSTREAM tool — so the case would still pass while pinning the wrong stage.
+stub_tool() {
+  rm -rf "$STUBS"
+  mkdir -p "$STUBS"
+  {
+    echo '#!/bin/sh'
+    echo 'while IFS= read -r _drain; do :; done 2>/dev/null'
+    printf 'echo "test stub: %s exiting %s" >&2\n' "$1" "$2"
+    printf 'exit %s\n' "$2"
+  } >"$STUBS/$1"
+  chmod +x "$STUBS/$1"
+}
+
+# run_stub_case "<desc>" <tool> <stub-exit> <expected-guard-exit> "<detail>" <file> "<content>"
+#
+# Plants <content> at <file> (pass "" for a clean tree), puts a failing stub for
+# <tool> ahead of the real one on PATH, and runs the guard. Asserts the exit
+# status — and when the expectation is the abort code, also that the report
+# carries the abort marker, carries <detail> verbatim, and does NOT carry the
+# clean message. The clean-message check is the one that would have caught the
+# original defect: the old guard's answer was a literal "✓ No committed secrets
+# found" on exactly these inputs.
+#
+# <detail> NAMES THE CALL SITE, not just the tool, and that is what makes the
+# per-stage cases discriminate. Several tools appear at more than one site — sed
+# runs in both the output sanitizer and the hit assembly — so a stub for one of
+# them trips BOTH sites' checks, and a case asserting only "'sed' exited 3" stays
+# green even when the sanitizer's own check is deleted, passing on the strength
+# of the hit-assembly check it is not testing. Measured: with the sanitizer's
+# check_stages call replaced by `:`, the tr and awk cases redden and a
+# tool-name-only sed case does not. Pinning the site closes that.
+run_stub_case() {
+  local desc="$1" tool="$2" stub_exit="$3" expected="$4" detail="$5" file="$6" content="$7"
+  reset_sandbox
+  if [ -n "$file" ]; then
+    mkdir -p "$SANDBOX/$(dirname "$file")"
+    printf '%s\n' "$content" >"$SANDBOX/$file"
+  fi
+  stub_tool "$tool" "$stub_exit"
+  local actual=0
+  # stdin from /dev/null: a stub for the FIRST pipeline stage inherits the
+  # harness's stdin, and draining a terminal would hang the suite.
+  ( cd "$SANDBOX" && PATH="$STUBS:$PATH" bash bin/secret-scan.sh ) \
+    >"$REPORT" 2>&1 </dev/null || actual=$?
+
+  local ok=1 why=""
+  [ "$actual" -eq "$expected" ] || { ok=0; why="expected exit $expected, got $actual"; }
+  if [ "$expected" -eq "$SCAN_ABORT" ]; then
+    grep -q 'secret-scan ABORTED' "$REPORT" \
+      || { ok=0; why="$why; no abort marker in the report"; }
+    grep -qF "$detail" "$REPORT" \
+      || { ok=0; why="$why; report does not name the failing stage as '$detail'"; }
+    if grep -q 'No committed secrets found' "$REPORT"; then
+      ok=0; why="$why; the CLEAN message was printed on a broken scan"
+    fi
+  fi
+  if [ "$ok" -eq 1 ]; then
+    echo "  ✓ $desc (exit $actual)"
+    pass=$((pass + 1))
+  else
+    echo "  ✖ $desc —${why}"
+    fail=$((fail + 1))
+  fi
+}
+
+# One case per stage of every pipeline the guard runs, because the stages sit on
+# three different call sites and a fix applied to one says nothing about the
+# others: tr/sed/awk are the output sanitizer, grep is the scan itself, and sort
+# is the hit-assembly step that runs after all three rules. (The issue also names
+# `cut`; PR #262 replaced that stage with awk, so awk is the stage present here.)
+SANI="output sanitizer — stage"
+ASSY="hit assembly — stage"
+echo "Self-test: a failing pipeline stage aborts the scan, never reports clean"
+run_stub_case "sanitizer 'tr' failing aborts"      tr   3 "$SCAN_ABORT" "$SANI 'tr' exited 3"   "src/leak.txt" "token: $SYNTH_HEX"
+run_stub_case "sanitizer 'sed' failing aborts"     sed  3 "$SCAN_ABORT" "$SANI 'sed' exited 3"  "src/leak.txt" "token: $SYNTH_HEX"
+run_stub_case "sanitizer 'awk' failing aborts"     awk  3 "$SCAN_ABORT" "$SANI 'awk' exited 3"  "src/leak.txt" "token: $SYNTH_HEX"
+run_stub_case "hit-assembly 'sort' failing aborts" sort 3 "$SCAN_ABORT" "$ASSY 'sort' exited 3" "src/leak.txt" "token: $SYNTH_HEX"
+
+# grep is the pair that proves the guard DISCRIMINATES rather than just refusing
+# every non-zero status. Exit 1 is grep's routine "matched nothing" and must stay
+# the clean path; every other non-zero means grep failed to run and must abort.
+# A guard that got this wrong in either direction fails one of these two.
+echo "Self-test: grep's benign no-match is tolerated, its errors are not"
+run_stub_case "grep exiting 1 (no match) still reports clean" grep 1 0 "" "" ""
+run_stub_case "grep exiting 2 (a real failure) aborts"        grep 2 "$SCAN_ABORT" \
+  "rule 1 (64-hex PAT shape): 'grep' exited 2" "src/leak.txt" "token: $SYNTH_HEX"
+
+# The abort must not depend on a hit being in hand. A broken stage on a clean
+# tree is exactly as uninformative as a broken stage on a dirty one — the tree
+# was not fully scanned either way, so "clean" is not a conclusion available.
+echo "Self-test: a broken stage aborts even when the tree holds no secret"
+run_stub_case "clean tree + failing 'sed' aborts"  sed  3 "$SCAN_ABORT" "$SANI 'sed' exited 3"  "" ""
+run_stub_case "clean tree + failing 'sort' aborts" sort 3 "$SCAN_ABORT" "$ASSY 'sort' exited 3" "" ""
+
+# The abort code must be its own value. Exit 1 already means "a secret was
+# found", and reusing it would make a broken toolchain indistinguishable from a
+# real finding for anything that reads the status rather than the text.
+echo "Self-test: the abort status is distinct from both clean (0) and found (1)"
+reset_sandbox
+mkdir -p "$SANDBOX/src"
+printf 'token: %s\n' "$SYNTH_HEX" >"$SANDBOX/src/leak.txt"
+found_rc=0
+( cd "$SANDBOX" && bash bin/secret-scan.sh ) >"$REPORT" 2>&1 </dev/null || found_rc=$?
+if [ "$found_rc" -eq 1 ] && [ "$found_rc" -ne "$SCAN_ABORT" ]; then
+  echo "  ✓ an unstubbed run on the same fixture still exits 1, not $SCAN_ABORT"
+  pass=$((pass + 1))
+else
+  echo "  ✖ expected exit 1 from an unstubbed run on the planted secret —" \
+       "got $found_rc"
+  fail=$((fail + 1))
+fi
+
+# The failing tool's OWN diagnostic used to go to /dev/null along with the noise
+# that redirect exists to suppress, which is why a broken scan had zero visible
+# signal. The guard now captures the scanning grep's stderr and replays it on the
+# abort path only — so an ordinary run stays as quiet as before, and a failure is
+# diagnosable. This case also pins the CHANNEL: the abort goes to stderr, and
+# stdout stays empty, so nothing on the success channel can be read as a verdict.
+echo "Self-test: the abort reaches stderr and carries the failing tool's own diagnostic"
+reset_sandbox
+mkdir -p "$SANDBOX/src"
+printf 'token: %s\n' "$SYNTH_HEX" >"$SANDBOX/src/leak.txt"
+stub_tool grep 2
+DIAG_OUT="$(mktemp)"
+diag_rc=0
+( cd "$SANDBOX" && PATH="$STUBS:$PATH" bash bin/secret-scan.sh ) \
+  >"$DIAG_OUT" 2>"$REPORT" </dev/null || diag_rc=$?
+# The stub writes this line to ITS stderr. Reaching the report proves the
+# capture-and-replay replaced the old 2>/dev/null, not merely sat beside it.
+diag_ok=0; chan_ok=0
+grep -qF 'test stub: grep exiting 2' "$REPORT" && diag_ok=1
+[ ! -s "$DIAG_OUT" ] && chan_ok=1
+if [ "$diag_rc" -eq "$SCAN_ABORT" ] && [ "$diag_ok" -eq 1 ] && [ "$chan_ok" -eq 1 ] \
+   && grep -q 'secret-scan ABORTED' "$REPORT"; then
+  echo "  ✓ abort on stderr, stdout empty, failing tool's diagnostic replayed"
+  pass=$((pass + 1))
+else
+  echo "  ✖ expected exit $SCAN_ABORT with the abort and the stub's own stderr on" \
+       "stderr and nothing on stdout — got exit $diag_rc, diag=$diag_ok, stdout-empty=$chan_ok"
+  fail=$((fail + 1))
+fi
+rm -f "$DIAG_OUT"
 
 echo
 echo "Passed: $pass   Failed: $fail"

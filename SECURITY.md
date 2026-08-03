@@ -114,6 +114,24 @@ Two layers keep credentials out of version control:
    proves a synthetic, token-shaped string makes the scan exit non-zero — without
    ever committing such a string.
 
+   **The scan fails closed, and says so with its own exit code** (issue #265).
+   Each rule runs as a pipeline, and every stage's exit status is checked
+   individually rather than collapsed into one number. `grep`'s routine "matched
+   nothing" (exit 1) is the only non-zero the guard tolerates; any other non-zero
+   from any stage means a tool failed to *run*, so the tree was never fully
+   scanned and "clean" is not a conclusion the guard is entitled to draw. It
+   therefore reports three distinct outcomes:
+
+   | Exit | Meaning |
+   |------|---------|
+   | `0`  | The tree was fully scanned and no credential shape was found. |
+   | `1`  | At least one likely credential was found. |
+   | `2`  | The scan did not complete — a stage failed to run. **Not a clean result.** |
+
+   An abort prints a `⚠ secret-scan ABORTED` block to stderr that names the
+   failing stage and replays that tool's own diagnostic, which the scanning
+   `grep`'s stderr redirect used to discard.
+
 Beyond the YNAB token, the repo holds exactly one CI secret:
 `DEVELOPER_SETTINGS_TOKEN`, a fine-grained PAT scoped to **Contents: Read and
 write on `mike-bronner/claude-workbench` only**, used by release automation to
