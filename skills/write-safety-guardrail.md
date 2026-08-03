@@ -72,6 +72,13 @@ Exactly these four operation types may pass; anything else is blocked
 | `delete_duplicate` | `ynab_delete_transaction` |
 | `reconcile` | `ynab_reconcile_account` + `ynab_update_transaction(s)` |
 
+> **The two lists below are pinned, not copied.** `assets/write-safety-guardrail.js`
+> is authoritative for which verbs mutate;
+> `tests/unit/write-safety-guardrail-doc.test.sh` reads these bullets and that
+> file at runtime and fails on any divergence, in either direction. Editing one
+> without the other breaks the build — deliberately, so this page can never go
+> stale about what may run against a reader's money.
+
 ### 2. Namespaced tool allow-list (`ALLOWED_TOOLS`)
 
 Exactly these **fully namespaced** tools may be invoked at apply time:

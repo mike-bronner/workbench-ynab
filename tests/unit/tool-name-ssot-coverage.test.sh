@@ -12,8 +12,9 @@
 # choice given what the SSoT said, which is why the map's completeness is
 # load-bearing rather than cosmetic.
 #
-# Four assertions, each reading the vendored bundle or the SSoT files as ground
-# truth — never a document's claim about itself:
+# Six assertions, each reading the vendored bundle, the SSoT files, or the
+# mutating-tool inventory as ground truth — never a document's claim about
+# itself:
 #
 #   1. The two SSoT files agree, as SETS. docs/mcp-capability-map.md's capability
 #      table and skills/protocol/ynab-tools.md's read + write lists must name
@@ -30,6 +31,12 @@
 #   4. The map's allowlist table matches the guard's own ALLOWLIST array. The
 #      table drifted once already (it listed six of the guard's seven files), and
 #      it is the table a reader consults to learn where a name may live.
+#   5. The two verbs #247 was opened for are actually adopted, by name — 1–3 are
+#      structural and would stay green on a tree where neither had been added.
+#   6. Every verb in the mutating-tool inventory is a tool the bundle really
+#      registers (#257). Combined with 3, that makes the inventory's verbs
+#      transitively complete in the capability map too: inventory ⊆ registered,
+#      and registered = adopted ∪ not-adopted.
 #
 # NOTE ON SCOPE. Sets are extracted from the specific blocks that hold them — the
 # capability table's numbered rows, the SSoT's fenced name lists, the inventory
@@ -55,10 +62,13 @@ MAP="$REPO_ROOT/docs/mcp-capability-map.md"
 SSOT="$REPO_ROOT/skills/protocol/ynab-tools.md"
 GUARD="$REPO_ROOT/bin/check-tool-name-sources.sh"
 BUNDLE="$REPO_ROOT/vendor/ynab-mcp/index.cjs"
+INVENTORY="$REPO_ROOT/assets/write-safety-guardrail.js"   # the authoritative mutating-tool inventory
+# shellcheck source=/dev/null
+source "$REPO_ROOT/tests/lib/mutating-inventory.sh"
 
-# The correct plugin-namespaced prefix, kept as its own literal so no composed
-# full name below ever appears as a single token in this file.
-PREFIX="mcp__plugin_workbench-ynab_ynab__"
+# The correct plugin-namespaced prefix, from the shared lib and kept on its own
+# so no composed full name below ever appears as a single token in this file.
+PREFIX="$YNAB_TOOL_PREFIX"
 
 # --- ground truth: what the vendored bundle registers ------------------------
 # The bundle is minified, so tool ids are read from the registration property
@@ -217,6 +227,35 @@ test_get_account_and_get_category_are_adopted() {
     assert_exact_line "$map_set" "$suffix" "$suffix missing from the capability table"
     assert_exact_line "$ssot_set" "$suffix" "$suffix missing from the SSoT read/write lists"
   done
+}
+
+# --- 6. every mutating-inventory verb is a tool the bundle really registers ---
+# The vendor pin (issue #257). assets/write-safety-guardrail.js is authoritative
+# for WHICH verbs mutate, but vendor/ynab-mcp/index.cjs is the actual write
+# surface, and nothing tied the two together: a re-vendor that renamed or
+# dropped a mutating tool would leave the inventory naming a verb that no longer
+# exists, and every mirror pinned to it would agree with each other about a
+# fiction.
+#
+# This pins the direction a test CAN decide. The other direction — "a re-vendor
+# added a mutating tool the inventory does not know about" — is not mechanically
+# derivable, because the bundle does not mark a tool as mutating; that judgement
+# is a human one. Assertion 3 above is what forces it: a newly registered tool
+# fails this suite until someone classifies it in the capability map, and the
+# classification is where "this one writes" gets noticed. So the inventory stays
+# authoritative BY DECLARATION for mutating-ness, with assertion 3 as the gate
+# that guarantees a human looks, and this assertion as the gate that guarantees
+# the names it declares are real.
+test_mutating_inventory_verbs_are_registered() {
+  local inventory_set registered missing
+  inventory_set="$(mutating_inventory_verbs "$INVENTORY")" \
+    || fail "the mutating-tool inventory could not be read or parsed empty — refusing to certify the vendor pin"
+  registered="$(registered_tools)"
+
+  [ -n "$registered" ] || fail "no tool ids parsed from the vendored bundle — extraction is broken"
+
+  missing="$(diff_sets "$inventory_set" "$registered")"
+  [ -z "$missing" ] || fail "named by the mutating-tool inventory but not registered by the vendored bundle: $(echo "$missing" | tr '\n' ' ')"
 }
 
 echo "tool-name-ssot-coverage.test.sh — the SSoT names every tool the bundle registers"
