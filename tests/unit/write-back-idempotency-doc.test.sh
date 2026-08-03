@@ -508,7 +508,9 @@ fi
 # multi-write loop or a non-append open would break the doc's claim and fail here.
 # This is a doc↔code consistency guard, so it inspects source by design; the
 # BEHAVIOURAL proof that records never split lives in tests/unit/audit-log.test.sh
-# (8 concurrent 100 KB appends, none torn).
+# ("the shim issues EXACTLY ONE write(2) per record" — os.write intercepted and
+# call-counted, so a split append reddens deterministically rather than only when
+# a race happens to expose it).
 if grep -q 'os\.O_APPEND' "$REPO_ROOT/$AUDIT" 2>/dev/null \
    && grep -q '^    n = os\.write(fd, data)$' "$REPO_ROOT/$AUDIT" 2>/dev/null; then
   ok "audit writer still emits each record in one append (doc's atomicity claim)"

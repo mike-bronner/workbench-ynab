@@ -382,7 +382,7 @@ export YNAB_AUDIT_TIMESTAMP="2026-06-20T10:03:00Z"
 # dd's 512-byte default block. What this pins is that the shim consumes its STDIN
 # to EOF and writes ALL of it: a shim that handled only one buffer's worth (a bare
 # `os.read(0, N)`, or `dd` with its default `bs`) would truncate the record here.
-# It does NOT by itself rule out a correct multi-write loop — the concurrency test
+# It does NOT by itself rule out a correct multi-write loop — the write-count test
 # below is what pins the SINGLE-write property.
 #
 # Sized under 128 KB deliberately. Linux caps a SINGLE argv entry at
@@ -400,18 +400,89 @@ assert_empty "the 100 KB record ends in a newline"       "$(tail -c1 "$BIG_FILE"
 assert_eq    "the record round-trips byte-exact (no truncation)" "100000" \
   "$(jq -r '.after.category_name | length' < "$BIG_FILE")"
 
-echo "AC (#275): concurrent appends never interleave — one write(2) per record:"
+echo "AC (#275): the shim issues EXACTLY ONE write(2) per record:"
+export YNAB_AUDIT_DIR="$SANDBOX/onewrite"
+export YNAB_AUDIT_MONTH="2026-06"
+export YNAB_AUDIT_TIMESTAMP="2026-06-20T10:07:00Z"
+# THIS is the deterministic proof of the single-atomic-write property. The
+# concurrency test below observes only the CONSEQUENCE of a split write — a torn
+# line — and only when the kernel happens to interleave another writer's chunks
+# between the two halves. On a fast local disk two sequential writes from one
+# process usually still land contiguously, so that test lets a genuine split-write
+# regression through most runs. This block pins the property itself, with the same
+# sitecustomize/PYTHONPATH interception the fsync probe uses: wrap os.write, log
+# every call with its fd and byte count, then assert the shim made exactly ONE
+# call carrying the WHOLE record. Splitting _audit_fsync_append_program's append
+# into two os.write calls reddens this on every run, on any disk, at any speed.
+#
+# fds 1 and 2 are filtered out: the assertions are about writes to the LOG FILE,
+# and a stray diagnostic on stdout/stderr must not be counted as a record write.
+OW_PROBE_DIR="$SANDBOX/onewrite-probe"
+OW_LOG="$SANDBOX/onewrite-calls.log"
+mkdir -p "$OW_PROBE_DIR"
+rm -f "$OW_LOG"
+cat > "$OW_PROBE_DIR/sitecustomize.py" <<'PY'
+import os
+_real_write = os.write
+def _probe(fd, data):
+    n = _real_write(fd, data)
+    with open(os.environ["AUDIT_WRITE_PROBE_LOG"], "a") as fh:
+        fh.write("%d %d\n" % (fd, n))
+    return n
+os.write = _probe
+PY
+# ow_calls: the probe's record-file writes, one "fd bytes" line each.
+ow_calls() { [ -f "$OW_LOG" ] && awk '$1 != 1 && $1 != 2' "$OW_LOG" || true; }
+PYTHONPATH="$OW_PROBE_DIR" AUDIT_WRITE_PROBE_LOG="$OW_LOG" \
+  _audit_append "$CATEGORIZE_OP" "$CATEGORIZE_RES" false; rc=$?
+OW_FILE="$YNAB_AUDIT_DIR/audit-2026-06.jsonl"
+assert_eq "append succeeds with the os.write probe attached" "0" "$rc"
+assert_eq "the shim issued EXACTLY ONE write(2) for the one record" "1" \
+  "$(ow_calls | wc -l | tr -d ' ')"
+# The one call must carry the whole record: bytes written = the record's size on
+# disk. A two-call split reddens the count above AND this (two byte counts, each
+# short), so neither half of the property can regress unnoticed.
+assert_eq "that single write carried the WHOLE record (bytes written = file size)" \
+  "$(wc -c < "$OW_FILE" | tr -d ' ')" \
+  "$(ow_calls | awk '{print $2}' | tr -d ' ')"
+# One write PER RECORD, not one per run — mirrors the per-record fsync assertion.
+export YNAB_AUDIT_TIMESTAMP="2026-06-20T10:08:00Z"
+PYTHONPATH="$OW_PROBE_DIR" AUDIT_WRITE_PROBE_LOG="$OW_LOG" \
+  _audit_append "$ALLOCATE_OP" "$ALLOCATE_RES" false
+assert_eq "a second record is a second single write (per-record, not per-run)" "2" \
+  "$(ow_calls | wc -l | tr -d ' ')"
+# A 100 KB record in ONE write. This is the deterministic form of the regression
+# the big-record test above can only hint at: a block-wise copier (dd's 512-byte
+# default, or any `while chunk` loop) would log many calls here, never one.
+export YNAB_AUDIT_DIR="$SANDBOX/onewrite-big"
+export YNAB_AUDIT_TIMESTAMP="2026-06-20T10:09:00Z"
+rm -f "$OW_LOG"
+OW_BIG_VALUE="$(head -c 100000 /dev/zero | tr '\0' 'C')"
+OW_BIG_OP="$(jq -cn --arg s "$OW_BIG_VALUE" '{id:"op-onewrite-big",type:"categorize",transaction_id:"txn-ow",before:{},after:{category_name:$s}}')"
+PYTHONPATH="$OW_PROBE_DIR" AUDIT_WRITE_PROBE_LOG="$OW_LOG" \
+  _audit_append "$OW_BIG_OP" "$CATEGORIZE_RES" false; rc=$?
+OW_BIG_FILE="$YNAB_AUDIT_DIR/audit-2026-06.jsonl"
+assert_eq "append of a 100 KB record succeeds under the probe" "0" "$rc"
+assert_eq "a 100 KB record is still EXACTLY ONE write(2) — never chunked" "1" \
+  "$(ow_calls | wc -l | tr -d ' ')"
+assert_eq "that single write carried all 100 KB (bytes written = file size)" \
+  "$(wc -c < "$OW_BIG_FILE" | tr -d ' ')" \
+  "$(ow_calls | awk '{print $2}' | tr -d ' ')"
+
+echo "AC (#275): concurrent appends never interleave (secondary sanity check):"
 export YNAB_AUDIT_DIR="$SANDBOX/concurrent"
 export YNAB_AUDIT_MONTH="2026-06"
 export YNAB_AUDIT_TIMESTAMP="2026-06-20T10:04:00Z"
 mkdir -p "$YNAB_AUDIT_DIR"
 CONC_FILE="$YNAB_AUDIT_DIR/audit-2026-06.jsonl"
-# THIS is the test that pins "one atomic write per record". O_APPEND makes each
-# write(2) land at EOF atomically, so 8 simultaneous writers each issuing exactly
-# ONE write produce 8 intact lines. A shim that split a record across several
-# writes would have its chunks interleaved with the other writers' chunks, tearing
-# lines and destroying records — the failure mode `dd`'s block-wise copy would
-# introduce. 100 KB records make the interleaving window wide and deterministic.
+# A SECONDARY check, not the proof of "one atomic write per record" — the
+# write-count block above is that. O_APPEND makes each write(2) land at EOF
+# atomically, so 8 simultaneous writers each issuing exactly ONE write produce 8
+# intact lines. What this adds is the end-to-end property under real contention:
+# the whole writer (jq build, no-fuse guard, shim) run 8 ways at once still yields
+# 8 whole records. It is deliberately NOT relied on to catch a split write: doing
+# so needs the kernel to actually interleave the halves, which a fast local disk
+# usually does not, so it reddens on a real split only some of the time.
 CONC_VALUE="$(head -c 100000 /dev/zero | tr '\0' 'B')"
 for i in 1 2 3 4 5 6 7 8; do
   (
