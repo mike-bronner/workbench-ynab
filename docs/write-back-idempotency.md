@@ -657,7 +657,7 @@ never the weaker path.
 Deterministic resume relies on the audit log's write guarantees, restated here
 from [`docs/audit-log.md`](./audit-log.md):
 
-- **Append-only.** The writer only ever `>>`-appends; it never rewrites,
+- **Append-only.** The writer only ever appends; it never rewrites,
   truncates, or seeks. History is immutable, so a resume reads the same records
   a prior run wrote.
 - **Atomic per record.** Each record is one compact `jq -c` line emitted with its
@@ -665,42 +665,39 @@ from [`docs/audit-log.md`](./audit-log.md):
   crash leaves **either the whole newline-terminated record or nothing — never a
   torn line**. Resume therefore never has to reason about a half-written record;
   every record it reads is complete.
-- **fsync'd per record. ⚠️ Requirement, not yet implemented.** Each record should
-  be flushed to stable storage before the writer reports success, so a **power
-  cut** — not just a process crash — leaves the trail intact. This does not hold
-  today: [`bin/audit-log.sh`](../bin/audit-log.sh) does the atomic append above
-  and returns; `grep -rn fsync bin/ docs/audit-log.md` returns **zero hits**.
-  Atomic-append survives a process death (the kernel already has the bytes); it
-  does **not** survive the machine losing power before the page cache is flushed.
-  Tracked as **#275** against `bin/audit-log.sh`. Named here as a gap rather than
-  dissolved by a wording change, the same way this document marks the GAP-10
-  freshness gate "⚠️ Designed, not yet wired" and the `backfilled` field additive.
+- **fsync'd per record.** Each record is flushed to stable storage before the
+  writer reports success, so a **power cut** — not just a process death — leaves
+  the trail intact. Atomic-append alone survives a process death (the kernel
+  already has the bytes); it does **not** survive the machine losing power before
+  the page cache is flushed, so [`bin/audit-log.sh`](../bin/audit-log.sh)
+  `fsync(2)`s the file before `_audit_append` returns `0` — and fails the append
+  outright if it cannot (see [`docs/audit-log.md`](./audit-log.md) §"The
+  durability guarantee"). Shipped in **#275**; this was a named gap in earlier
+  revisions of this document and is now a met guarantee.
 - **Ordered.** One file per UTC month, appended in processing order, so replaying
   a run's records (`audit-log.sh run <run_id>`) yields them in the order the ops
   were acted on.
 
-**These requirements are sufficient for deterministic resume — and the three that
-ship today are already sufficient for resume *correctness*.** Append-only +
-atomic-per-record means the trail resume reads is a prefix of complete, ordered
-records — exactly the "recoverable, ordered trail" a crash must leave. Combined
-with live-state verification as the tie-breaker, resume needs nothing more from
-the log: the log tells it *where a run got to*, and live YNAB state resolves
-*anything the log cannot confirm*.
+**All four requirements ship today, and they are sufficient for deterministic
+resume.** Append-only + atomic-per-record means the trail resume reads is a
+prefix of complete, ordered records — exactly the "recoverable, ordered trail" a
+crash must leave. Combined with live-state verification as the tie-breaker,
+resume needs nothing more from the log: the log tells it *where a run got to*,
+and live YNAB state resolves *anything the log cannot confirm*.
 
-**Why the missing fsync does not block this design.** A tail lost to a power cut
-produces exactly the shape §"Interleaving B" already handles: ops applied to
-YNAB with no audit record. Resume live-verifies those, treats them as applied,
-and backfills. So resume stays correct without fsync — which is precisely why
-#275 is a tracked gap and not a blocker on this document.
-
-**Why it still matters.** The audit log is not only a resume aid; it is the
-**forensic** record of every money mutation this plugin makes
+**Resume never depended on fsync — the forensic trail did.** Even without it,
+a tail lost to a power cut produces exactly the shape §"Interleaving B" already
+handles: ops applied to YNAB with no audit record. Resume live-verifies those,
+treats them as applied, and backfills, so resume *correctness* was never at
+stake. What was at stake is the other job: the audit log is the **forensic**
+record of every money mutation this plugin makes
 ([`docs/audit-log.md`](./audit-log.md)). "The last N records were lost to a power
 cut" is a materially worse failure for a compliance trail than "resume
 recomputed it", and resume's ability to reconstruct *ledger state* does not
-reconstruct the *evidence* of who changed what and when. That is the gap #275
-closes, and it is why this document keeps fsync as a stated requirement instead
-of narrowing the durability contract to what the code happens to do today.
+reconstruct the *evidence* of who changed what and when. That is why fsync stayed
+a stated requirement here while it was still a gap, rather than being dissolved
+by narrowing the contract to what the code did at the time — and it is what #275
+closed.
 
 ## Worked walkthrough
 

@@ -44,10 +44,12 @@
 #      claim is pinned to that shipped branch in both directions, like the fsync
 #      marker in class 3: guard gone → the doc must go back to flagging the gap;
 #      guard present → the doc must not still call it not-yet-wired.
-#   3. The fsync gap. The document marks fsync-per-record a requirement that is
-#      not implemented (issue #275). That marker must come down when the code
-#      lands, so the test asserts the gap is REAL — if `bin/audit-log.sh` gains an
-#      fsync and the doc still calls it missing, this fails.
+#   3. The fsync gap — CLOSED by #275, and pinned in both directions. The document
+#      used to mark fsync-per-record a requirement that was not implemented; the
+#      marker had to come down when the code landed, so the test asserts the state
+#      matches the code: if `bin/audit-log.sh` gains an fsync and the doc still
+#      calls it missing, this fails — and if the fsync is ever REMOVED while the
+#      doc still states the guarantee, this fails too.
 #
 # Style mirrors tests/unit/docs-set.test.sh: raw bash, `set -u`, PASS/FAIL
 # counters, non-zero exit on any failure.
@@ -471,13 +473,19 @@ for label in A B; do
   fi
 done
 
-# --- 4. the fsync gap is real, and marked as a gap ---------------------------
-# The doc keeps fsync-per-record as a REQUIREMENT and marks it not-yet-shipped
-# (issue #275). Two ways that can rot: the marker outlives the fix, or the
-# requirement quietly disappears. Assert against the writer itself.
-echo "  -- fsync gap marker vs. $AUDIT"
+# --- 4. the fsync guarantee is real, and stated as one ------------------------
+# The doc keeps fsync-per-record as a REQUIREMENT; #275 shipped it and removed the
+# not-yet-implemented marker. Two ways that can rot: the marker outlives the fix,
+# or the code loses the fsync while the doc still promises it. Assert against the
+# writer itself.
+#
+# The needle is the CALL, not the word. A whole-file `grep -q fsync` would now be
+# satisfied by this writer's own prose — it explains fsync at length in comments —
+# so deleting the actual syscall would leave the check green. Pin the executable
+# line instead.
+echo "  -- fsync guarantee vs. $AUDIT"
 audit_has_fsync=1
-grep -q "fsync" "$REPO_ROOT/$AUDIT" 2>/dev/null || audit_has_fsync=0
+grep -q '^    os\.fsync(fd)$' "$REPO_ROOT/$AUDIT" 2>/dev/null || audit_has_fsync=0
 
 if [ "$audit_has_fsync" -eq 0 ]; then
   if has "$DOC" "not yet implemented" && has "$DOC" "#275"; then
@@ -494,10 +502,15 @@ else
 fi
 
 # The atomic-append guarantee the doc leans on for resume correctness must still
-# be a single append in the writer.
-# shellcheck disable=SC2016  # a literal needle: `$file` is the variable name as it
-                            # appears in audit-log.sh's source, not one to expand.
-if grep -q 'printf .*>> "\$file"' "$REPO_ROOT/$AUDIT" 2>/dev/null; then
+# be a single append in the writer. #275 moved the mechanism from a shell `>>`
+# redirect to the python3 fsync shim, so the needle now pins the shim's two
+# defining calls: an O_APPEND open, and ONE os.write of the whole record. A
+# multi-write loop or a non-append open would break the doc's claim and fail here.
+# This is a doc↔code consistency guard, so it inspects source by design; the
+# BEHAVIOURAL proof that records never split lives in tests/unit/audit-log.test.sh
+# (8 concurrent 100 KB appends, none torn).
+if grep -q 'os\.O_APPEND' "$REPO_ROOT/$AUDIT" 2>/dev/null \
+   && grep -q '^    n = os\.write(fd, data)$' "$REPO_ROOT/$AUDIT" 2>/dev/null; then
   ok "audit writer still emits each record in one append (doc's atomicity claim)"
 else
   no "audit writer still emits each record in one append (doc's atomicity claim)"
