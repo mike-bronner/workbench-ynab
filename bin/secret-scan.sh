@@ -36,11 +36,82 @@
 # scanned tree (or inside vendor/, where only the hex rule is relaxed) so this
 # guard stays signal, not noise.
 #
-# Exit 0 = clean. Exit 1 = at least one likely credential found.
+# Exit 0 = clean. Exit 1 = at least one likely credential found. Exit 2 = the
+# scan did not complete (a stage failed to run) — see abort_scan below. 2 is
+# deliberately its own code: "the guard broke" is not "the tree is clean", and
+# collapsing the two is the fail-open this script must never have (issue #265).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+
+# Exit status for "the scan could not be completed". Distinct from 0 (clean) and
+# 1 (secret found) so neither verdict can be inferred from a broken toolchain.
+SCAN_ABORT_EXIT=2
+
+# The scanning greps send stderr HERE rather than to /dev/null. Discarding it is
+# what made a failing stage invisible: the tool's own diagnostic — the one thing
+# that explains WHY the scan broke — went to the bit bucket alongside the noise
+# the redirect exists to suppress. Capturing it keeps an ordinary run just as
+# quiet (the file is only ever read on the abort path) while making a failure
+# diagnosable. It lives under $TMPDIR, never inside the scanned tree.
+SCAN_ERR="$(mktemp)"
+trap 'rm -f "$SCAN_ERR"' EXIT
+
+# Abort: a stage of the scan failed to run, so the tree was NOT fully scanned.
+#
+# A pipeline whose stages are not all healthy has proved nothing about the tree,
+# so the only honest report is "the scan did not complete" — never the clean
+# message at the bottom of this file. The wording and the ⚠ marker are picked to
+# be unmistakable against both the ✓ clean line and the ✖ secret-found block.
+#
+# Built from shell BUILTINS only (echo, while read, printf-free). The entire
+# premise of this path is that an external tool just failed to execute, so
+# formatting the diagnostic with sed/cat could fail for the same reason and
+# swallow the very message that explains the abort.
+abort_scan() {
+  local line
+  echo "⚠ secret-scan ABORTED — the scan did not complete: $1" >&2
+  if [ -s "$SCAN_ERR" ]; then
+    echo "  Captured stderr from the most recent scanning grep:" >&2
+    # `|| [ -n "$line" ]` keeps a final unterminated line: a tool that dies
+    # mid-write can leave one, and that fragment is exactly the diagnostic this
+    # path exists to surface.
+    while IFS= read -r line || [ -n "$line" ]; do
+      echo "    $line" >&2
+    done <"$SCAN_ERR"
+  fi
+  echo "  This is NOT a clean result. The tree was not fully scanned, so a" >&2
+  echo "  committed secret may be present and unreported. Fix the broken tool" >&2
+  echo "  or environment and re-run — do not merge on this outcome." >&2
+  exit "$SCAN_ABORT_EXIT"
+}
+
+# check_stages <label> "<stage names>" <status>...
+#
+# Statuses arrive in pipeline order, one per named stage, and every one must be
+# 0. Reports the FIRST failing stage by name on stderr and returns 1; returns 0
+# when the whole pipeline is healthy. It never exits, so it is safe to call from
+# inside a pipeline element (where `exit` would only kill that element's
+# subshell) — the caller turns the non-zero return into abort_scan.
+#
+# grep's benign "no match" (exit 1) is the ONE non-zero this guard tolerates, and
+# it is handled at grep's own call site before it ever reaches here.
+check_stages() {
+  local label="$1" names="$2"
+  shift 2
+  local -a stage_names
+  # shellcheck disable=SC2206  # Deliberate word split: names is a literal list.
+  stage_names=($names)
+  local i=0 st
+  for st in "$@"; do
+    if [ "$st" -ne 0 ]; then
+      echo "secret-scan: $label — stage '${stage_names[i]:-#$((i + 1))}' exited $st" >&2
+      return 1
+    fi
+    i=$((i + 1))
+  done
+}
 
 # Common grep flags: recurse, show line numbers, extended regex, scan every file
 # as text, report ONLY the matched text, and prune the directories that are never
@@ -110,8 +181,16 @@ MAX_HIT_LEN=200
 # ASCII "..." rather than a "…" glyph for the same reason: re-introducing a
 # multi-byte sequence would contradict the C-locale guarantee the tr stage exists
 # to provide.
+#
+# The three stages are status-checked, not trusted. `if` is what makes that safe
+# under `set -e`: it suppresses errexit for the pipeline, so a non-zero stage
+# reaches the check below instead of killing the shell, and it leaves PIPESTATUS
+# untouched for the branch body. Both branches capture the SAME thing on purpose
+# — which branch runs is decided by the collapsed pipefail scalar, and that
+# scalar is precisely what this function refuses to draw a conclusion from.
 sanitize_hits() {
-  LC_ALL=C tr -c '\11\12\40-\176' '?' \
+  local -a st
+  if LC_ALL=C tr -c '\11\12\40-\176' '?' \
     | LC_ALL=C sed 's#^\./##' \
     | LC_ALL=C awk -v max="$MAX_HIT_LEN" '
         {
@@ -135,7 +214,54 @@ sanitize_hits() {
             txt = substr(txt, 1, half) "..." substr(txt, length(txt) - half + 1)
           }
           print loc txt
-        }'
+        }'; then
+    st=("${PIPESTATUS[@]}")
+  else
+    st=("${PIPESTATUS[@]}")
+  fi
+  # Returns non-zero rather than aborting: this function runs as a pipeline
+  # element, where `exit` would kill only its own subshell. The scanning call
+  # site turns this status into the abort.
+  check_stages 'output sanitizer' 'tr sed awk' "${st[@]}"
+}
+
+# Run ONE scanning rule end to end and write its sanitized hits to stdout.
+# "$1" labels the rule in any diagnostic; the remaining arguments are appended to
+# GREP_BASE (the rule's pattern, plus any per-rule exclusion).
+#
+# Same `if`-wrapped PIPESTATUS capture as sanitize_hits, for the same reason: the
+# collapsed pipefail scalar cannot tell grep's routine "no match" apart from a
+# stage that failed to execute, and treating those two alike is the whole defect.
+scan_rule() {
+  local label="$1"
+  shift
+  local -a st
+  : >"$SCAN_ERR"
+  if LC_ALL=C grep "${GREP_BASE[@]}" "$@" . 2>"$SCAN_ERR" | sanitize_hits; then
+    st=("${PIPESTATUS[@]}")
+  else
+    st=("${PIPESTATUS[@]}")
+  fi
+  # grep: 0 = matched, 1 = matched nothing, anything else = it failed to run.
+  # Exit 1 is the normal, overwhelmingly common case — an empty rule result on a
+  # clean tree — and is the only non-zero this guard accepts anywhere.
+  [ "${st[0]}" -le 1 ] || abort_scan "$label: 'grep' exited ${st[0]}"
+  # sanitize_hits has already named its own failing stage on stderr.
+  [ "${st[1]}" -eq 0 ] || abort_scan "$label: the output sanitizer failed"
+}
+
+# Assemble the collected hits: drop blank lines, then dedupe. Held to the same
+# standard as the scans — a broken stage here would silently shrink or empty the
+# report, turning a real finding into a clean run just as effectively.
+assemble_hits() {
+  local -a st
+  if printf '%s' "$1" | sed '/^[[:space:]]*$/d' | sort -u; then
+    st=("${PIPESTATUS[@]}")
+  else
+    st=("${PIPESTATUS[@]}")
+  fi
+  check_stages 'hit assembly' 'printf sed sort' "${st[@]}" \
+    || abort_scan 'hit assembly failed'
 }
 
 # 1. Standalone 64-char lowercase-hex run (the YNAB PAT shape). The surrounding
@@ -170,7 +296,17 @@ hits=""
 # Rule 1 (hex) excludes vendor/: vendored.json carries legitimate 64-char-hex
 # SHA-256 digests indistinguishable from a YNAB PAT. The exclusion is scoped to
 # THIS rule alone.
-found="$(LC_ALL=C grep "${GREP_BASE[@]}" --exclude-dir=vendor -e "$PAT_HEX" . 2>/dev/null | sanitize_hits || true)"
+#
+# `|| exit $?` re-raises an abort out of the command substitution: abort_scan's
+# `exit` fires inside that subshell, not this one. Under the `set -e` at the top
+# of this file errexit already propagates it, so this is redundant TODAY — it is
+# kept because it is what keeps the guard failing closed if errexit is ever
+# relaxed, and it is load-bearing in exactly that case. Measured: with `set -e`
+# dropped and all three re-raises removed, all 8 broken-stage cases in
+# tests/secret-scan.test.sh go red — the abort block still reaches stderr from
+# inside the subshell, and the guard then prints the clean message and exits 0
+# anyway. Removing the re-raises alone, with `set -e` in place, reddens nothing.
+found="$(scan_rule 'rule 1 (64-hex PAT shape)' --exclude-dir=vendor -e "$PAT_HEX")" || exit $?
 [ -n "$found" ] && hits="${hits}${found}"$'\n'
 
 # Rules 2 (cleartext token) and 3 (PEM) scan the WHOLE tree, vendor/ included —
@@ -178,11 +314,16 @@ found="$(LC_ALL=C grep "${GREP_BASE[@]}" --exclude-dir=vendor -e "$PAT_HEX" . 2>
 # smuggled under vendor/ is caught. -e "$pat" is required: the PEM pattern starts
 # with '-', which grep would otherwise parse as an option flag.
 for pat in "$PAT_ENV" "$PAT_PEM"; do
-  found="$(LC_ALL=C grep "${GREP_BASE[@]}" -e "$pat" . 2>/dev/null | sanitize_hits || true)"
+  found="$(scan_rule 'rules 2-3 (cleartext token / PEM header)' -e "$pat")" || exit $?
   [ -n "$found" ] && hits="${hits}${found}"$'\n'
 done
-hits="$(printf '%s' "$hits" | sed '/^[[:space:]]*$/d' | sort -u || true)"
+hits="$(assemble_hits "$hits")" || exit $?
 
+# The indent pipeline below is deliberately NOT given the stage-status treatment
+# above. It is a REPORTING stage, not a scanning one: it runs only after a hit is
+# already in hand, on the `exit 1` path. If its sed fails, `set -e` and pipefail
+# stop the script right there with sed's own non-zero status, so the build still
+# fails — the outcome is a degraded report, never a false "clean".
 if [ -n "$hits" ]; then
   {
     echo "✖ Possible committed secret(s) found:"
