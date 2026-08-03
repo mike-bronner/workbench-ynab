@@ -88,9 +88,10 @@ extract_guard_verbs() {
 #   0 — the two lists agree exactly
 #   1 — they diverge (a verb in one and not the other, either direction)
 #   2 — an input was unreadable or parsed empty: FAIL CLOSED. The emptiness test
-#       below is what guarantees that; the extractors' [ -f ] early-out is only a
-#       quieter route to the same answer (it spares the run a stray awk stderr
-#       line). Without the emptiness test, a renamed or reformatted inventory
+#       below is what guarantees that for BOTH sides; the extractors' own
+#       early-outs are a quieter route to the same answer (they spare the run a
+#       stray awk stderr line). Without the emptiness test, a renamed or
+#       reformatted inventory
 #       would parse to "" on BOTH sides, compare equal, and report a green
 #       cross-check that had verified nothing.
 cross_check() {
@@ -266,8 +267,8 @@ rc=0; cross_check "$SCRATCH/guard-extra.sh" "$INVENTORY" || rc=$?
 assert_rc "an extra verb in WRITE_VERBS is caught as divergence" 1 "$rc"
 
 echo "Self-test: EVERY write verb in the inventory is individually caught"
-# The original gap: only WRITE_CALL (one hardcoded verb) was ever probed, so the
-# other nine could vanish from WRITE_VERBS undetected. Drive each verb through the
+# The original gap: only WRITE_CALL (one hardcoded verb) was ever probed, so
+# every other verb could vanish from WRITE_VERBS undetected. Drive each verb through the
 # guard in both forms — callable (must fail) and bare deny-prose (must pass).
 INVENTORY_VERBS="$(mutating_inventory_verbs "$INVENTORY")"
 verb_count=0

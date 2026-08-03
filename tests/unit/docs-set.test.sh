@@ -200,6 +200,9 @@ assert_inventory_rows() {
     return
   fi
   ok "inventory ${block}_TOOLS is readable and non-empty"
+  # Heredoc, NOT a pipe: a piped `while read` runs in a subshell, so every
+  # ok/no this loop records would be lost and the file would report a green
+  # count that had counted nothing.
   while IFS= read -r suffix; do
     assert_tool_row "safety doc marks ${suffix} ${label}" "$suffix" "$verdict"
   done <<EOF
@@ -217,6 +220,11 @@ assert_inventory_rows DENIED "⛔ denied" denied
 # the doc with one inventory verb's row removed, and against a copy with a
 # verdict flipped. Both must be rejected. Without the fix these cases would be
 # unwritable — there was no per-doc predicate to point at a mutated copy.
+#
+# One representative verb, per the same convention tests/check-readonly.test.sh
+# uses for its own drift cases (`drop_verb="$(… | head -1)"`): the predicate is
+# verb-agnostic, one code path, and the loop above already runs it over every
+# verb in the inventory against the real doc.
 DRIFT_DIR="$(mktemp -d)"
 trap 'rm -rf "$DRIFT_DIR"' EXIT
 drift_verb="$(mutating_inventory_verbs "$INVENTORY" ALLOWED | head -1)"
