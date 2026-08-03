@@ -248,8 +248,9 @@ assert_in_section "$CONTRIB" "## Code of Conduct" \
 
 # --- every relative link in the set resolves ---------------------------------
 # CI's lychee gate (.github/workflows/ci.yml, `docs-links`) scans only
-# 'assets/**/*.md', 'docs/**/*.md', and 'README.md' — it does NOT cover
-# .github/, so nothing else catches a broken relative link in these five files.
+# 'assets/**/*.md', 'docs/**/*.md', 'skills/**/*.md', 'commands/**/*.md', and
+# 'README.md' — it does NOT cover .github/, so nothing else catches a broken
+# relative link in these five files.
 # The failure mode is real and depth-sensitive: files under
 # .github/ISSUE_TEMPLATE/ need '../../' to reach the repo root while their
 # siblings one level up need '../', so a link copied between the two breaks

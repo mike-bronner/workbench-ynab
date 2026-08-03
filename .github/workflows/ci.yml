@@ -17,8 +17,9 @@ name: ci
 #                       BSD half of the cross-platform tool claims (#231)
 #   * assets-tests    — the assets/ Node integration suites (needs npm ci)
 #   * docs-links      — offline relative-link + fragment check over
-#                       assets/**/*.md, docs/**/*.md (recursive), and the
-#                       root README.md
+#                       assets/**/*.md, docs/**/*.md, skills/**/*.md,
+#                       commands/**/*.md (all recursive), and the root
+#                       README.md
 #
 # secret-scan.yml stays a separate workflow: secret hygiene is a distinct
 # concern with its own cadence and blast radius.
@@ -169,12 +170,15 @@ jobs:
           npm --prefix assets test
 
   # Relative links and internal cross-references across the docs set: a broken
-  # local link or dangling #fragment in any assets/**/*.md or docs/**/*.md
-  # (recursive — nested docs like assets/tax/README.md and docs/decisions/*.md
-  # included; `**` also matches zero components, so top-level files stay
-  # covered) fails the PR. --offline keeps the check hermetic — remote URLs are
-  # out of scope (no network flakiness in the gate), local file + anchor
-  # resolution is the point.
+  # local link or dangling #fragment in any assets/**/*.md, docs/**/*.md,
+  # skills/**/*.md or commands/**/*.md (recursive — nested docs like
+  # assets/tax/README.md, docs/decisions/*.md and skills/review/*.md included;
+  # `**` also matches zero components, so top-level files stay covered) fails
+  # the PR. skills/ and commands/ are in scope because they are agent-facing
+  # (issue #260): a dangling path there is not a reading annoyance but a live
+  # defect — an agent is instructed to open that file and finds nothing.
+  # --offline keeps the check hermetic — remote URLs are out of scope (no
+  # network flakiness in the gate), local file + anchor resolution is the point.
   docs-links:
     runs-on: ubuntu-latest
     steps:
@@ -188,5 +192,5 @@ jobs:
       - name: Check docs links (offline, fragments included)
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
-          args: --offline --include-fragments --no-progress 'assets/**/*.md' 'docs/**/*.md' 'README.md'
+          args: --offline --include-fragments --no-progress 'assets/**/*.md' 'docs/**/*.md' 'README.md' 'skills/**/*.md' 'commands/**/*.md'
           fail: true
