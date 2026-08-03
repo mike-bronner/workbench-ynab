@@ -152,6 +152,30 @@ run_case "64-hex under a shallower a/vendor/ IS caught" 1 "a/vendor/leak.txt"   
 # vendor/ (e.g. dropping the prune entirely) reddens here.
 run_case "64-hex digest under the repo-root vendor/ stays ignored" 0 \
   "vendor/ynab-mcp/vendored.json" "\"bundle_sha256\": \"$SYNTH_HEX_ALT\""
+
+# ...and the carve-out stops at the DIRECTORY. --exclude-dir, the mechanism this
+# replaced, has no effect on a file, so a top-level FILE named vendor was always
+# scanned by the hex rule. A prune matching the name alone would newly exempt it,
+# and a 64-hex secret in it would make the guard print its CLEAN message and exit
+# 0 — the fail-open this file exists to prevent. Dropping the `-d` test from the
+# guard's root-list loop reddens this case and nothing else.
+#
+# run_case cannot carry this fixture: reset_sandbox creates vendor/ as a
+# directory, so the redirect into a path of that name would fail outright.
+echo "Self-test: the hex carve-out prunes the vendor/ DIRECTORY, not a file named vendor"
+reset_sandbox
+rmdir "$SANDBOX/vendor"
+printf 'token: %s\n' "$SYNTH_HEX_ALT" > "$SANDBOX/vendor"
+vendor_file_rc=0
+( cd "$SANDBOX" && bash bin/secret-scan.sh ) >/dev/null 2>&1 || vendor_file_rc=$?
+if [ "$vendor_file_rc" -eq 1 ]; then
+  echo "  ✓ 64-hex in a top-level FILE named vendor is caught (exit 1)"
+  pass=$((pass + 1))
+else
+  echo "  ✖ expected exit 1 (a FILE named vendor is scanned), got $vendor_file_rc"
+  fail=$((fail + 1))
+fi
+
 # Rules 2 and 3 never had a vendor exclusion and must not acquire one: a nested
 # vendor/ is scanned by every rule, exactly like any other directory.
 run_case "cleartext token under a NESTED vendor/ IS caught" 1 "src/vendor/run.sh" "${ENV_NAME}=${ENV_VALUE}"

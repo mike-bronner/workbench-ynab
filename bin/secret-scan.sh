@@ -321,9 +321,18 @@ hits=""
 # vendored.json's legitimate digests straight back into the report.
 #
 # So the prune is anchored by CONSTRUCTION instead: rule 1 is handed an explicit
-# list of the repo's top-level entries with ./vendor removed. "vendor" is matched
-# once, as a root path, by shell string comparison — no glob semantics to differ
-# between greps — and every deeper directory of that name is scanned normally.
+# list of the repo's top-level entries with the ./vendor DIRECTORY removed.
+# "vendor" is matched once, as a root path, by shell string comparison — no glob
+# semantics to differ between greps — and every deeper directory of that name is
+# scanned normally.
+#
+# The -d test in that comparison is load-bearing, not belt-and-braces. The
+# mechanism this replaced pruned DIRECTORIES by construction — --exclude-dir has
+# no effect on a file — so a plain top-level FILE named vendor was always scanned
+# by the hex rule. A bare name comparison would newly exempt it, and a 64-hex
+# secret in it would make the guard print its CLEAN message and exit 0. The
+# carve-out exists for one directory's SHA-256 digests; nothing about it applies
+# to a file of that name.
 #
 # .git/ and node_modules/ stay on GREP_BASE's --exclude-dir: those ARE meant to
 # be pruned at every depth, by every rule. Measured on both greps above:
@@ -341,7 +350,7 @@ hits=""
 hex_scan_roots=()
 shopt -s dotglob nullglob
 for entry in ./*; do
-  if [ "$entry" != ./vendor ] && [ ! -L "$entry" ]; then
+  if { [ "$entry" != ./vendor ] || [ ! -d "$entry" ]; } && [ ! -L "$entry" ]; then
     hex_scan_roots+=("$entry")
   fi
 done
