@@ -200,7 +200,7 @@ Pinning both versions in git means a given `workbench-ynab` commit always runs a
 
 Two version numbers live in this repo. They track different things, are deliberately **independent**, and are **never co-bumped**.
 
-- **The plugin's own version** lives in [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json) (currently `0.1.0`). This is the **only** version release automation bumps — the release workflow's sole bump target is `.claude-plugin/plugin.json`, and no other manifest, JSON, or config file in the repo carries a release version. It starts at `0.1.0` and is cut to `1.0.0` at first release.
+- **The plugin's own version** lives in [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json) (currently `0.1.1`). This is the **only** version release automation bumps — the release workflow's sole bump target is `.claude-plugin/plugin.json`, and no other manifest, JSON, or config file in the repo carries a release version. It starts at `0.1.0` and is cut to `1.0.0` at first release.
 - **The vendored YNAB MCP version** is recorded in [`vendor/ynab-mcp/vendored.json`](vendor/ynab-mcp/vendored.json) (`@dizzlkheinz/ynab-mcpb@0.27.1`). It is **frozen, provenance-only** — a record of exactly which upstream bundle is checked into git, not a number this plugin releases against. Release automation **never** touches it; it changes only when the bundle is deliberately re-vendored.
 
 The two schemes do not move together: bumping the plugin version leaves the vendored bundle version untouched, and re-vendoring the bundle leaves the plugin version untouched.
