@@ -92,11 +92,35 @@ test_setup_hardens_data_dir_and_config_at_creation() {
     "setup restricts config.json to 0600 before publishing it"
 }
 
+# The fenced JSON example inside docs/config-schema.md's "### `report`" section:
+# from that heading to the next heading of any level, then the fence body only.
+# Scoping matters — `retention_days` also appears in that section's prose, so a
+# whole-file (or even whole-section) grep would stay green if the worked example
+# itself dropped the field, which is the exact regression the doc side pins.
+config_doc_report_example() {
+  # shellcheck disable=SC2016  # the backticks are markdown code spans in the
+                              # heading being matched, not command substitution.
+  awk '/^### `report`/{f=1;next} /^#/{f=0} f' "$REPO_ROOT/docs/config-schema.md" \
+    | awk '/^```/{c=!c;next} c'
+}
+
 # The retention constant is documented in the config schema (AC #3).
+#
+# "The config schema" is assets/config.schema.json — the machine-readable schema
+# whose `description` entries are the source of truth for field-level detail, and
+# which editors/validators read directly. docs/config-schema.md is its
+# human-readable companion (design rules, key index, worked examples) and no
+# longer restates field prose. So the DEFAULT is pinned where it is actually
+# stated, and the companion doc is pinned only for what it still owns — the
+# worked example that surfaces the field. Both surfaces are checked, so dropping
+# the constant from the schema OR the field from the doc's example goes red.
 test_config_schema_documents_retention_days() {
-  local cs; cs="$(cat "$REPO_ROOT/docs/config-schema.md")"
-  assert_contains "$cs" "retention_days" "config schema documents .report.retention_days"
-  assert_contains "$cs" "30 days" "config schema states the 30-day default"
+  local schema; schema="$(cat "$REPO_ROOT/assets/config.schema.json")"
+  assert_contains "$schema" "retention_days" "config schema documents .report.retention_days"
+  assert_contains "$schema" "30 days" "config schema states the 30-day default"
+  local example; example="$(config_doc_report_example)"
+  [ -n "$example" ] || fail "docs/config-schema.md has no fenced example under '### \`report\`'"
+  assert_contains "$example" "retention_days" "the config doc's report example carries retention_days"
 }
 
 # The prune command surface exists and documents the dry-run-by-default contract

@@ -10,7 +10,7 @@
     "schema_version": {
       "type": "integer",
       "const": 2,
-      "description": "Config schema version, for forward migration. This schema describes version 2 (the multi-budget shape, issue #84). Version-1 files (singular `budget`) keep working: bin/config.sh synthesizes a single-entry `budgets` array at read time and leaves the file untouched — re-run /workbench-ynab:setup to upgrade the file itself."
+      "description": "Config schema version, for forward migration. A monotonically increasing integer — increment it when a breaking change to this shape ships, so /workbench-ynab:setup and downstream migration can detect and upgrade an older file. This schema describes version 2 (the multi-budget shape, issue #84). Version-1 files (singular `budget`) keep working: bin/config.sh synthesizes a single-entry `budgets` array at read time and leaves the file untouched — re-run /workbench-ynab:setup to upgrade the file itself."
     },
     "budgets": {
       "type": "array",
@@ -64,12 +64,12 @@
     },
     "default_budget": {
       "type": "string",
-      "description": "Optional. The `label` of the budgets entry to use when a caller needs a single budget and does not specify one — the fallback for single-budget users. When absent, the first budgets entry is the default (bin/config.sh `_cfg_default_budget`)."
+      "description": "Optional. The `label` of the budgets entry to use when a caller needs a single budget and does not specify one — the fallback for single-budget users. When absent, the first budgets entry is the default (bin/config.sh `_cfg_default_budget`). A value matching NO entry's label resolves to nothing — the loader emits empty rather than falling back, so a typo surfaces loudly instead of silently selecting a different budget."
     },
     "timezone": {
       "type": "string",
       "pattern": "^[A-Za-z0-9+_-]+(/[A-Za-z0-9+_-]+)*$",
-      "description": "REQUIRED. The single source of truth for ALL date math (issue #31): the review's 7-day lookback window, carryover boundary, month start/end, quarterly windows, and tax-year resolution all compute against this timezone, never the host clock. An IANA tz identifier — e.g. `America/Phoenix` — mirroring bujo's convention. `/workbench-ynab:setup` resolves your system's zone at setup time and writes it here as an explicit identifier; it is NEVER stored as \"system local\", so scheduled and interactive runs are deterministic. The loader (`bin/config.sh` `_cfg_timezone`) validates it against the tz database at load time and FAILS CLOSED — a descriptive error, never a silent fall-through to the host clock — on a missing or invalid value. This `pattern` is a shape check only; the loader's zoneinfo lookup is the authoritative validity gate — it requires the name to resolve to a compiled TZif zone file (not merely any file of that name), so zoneinfo housekeeping artifacts (leapseconds, +VERSION, tzdata.zi) and the UTC-equivalent pseudo-zones (Factory, posixrules) are rejected."
+      "description": "REQUIRED. The single source of truth for ALL date math (issue #31, design ref GAP-22): the review's 7-day lookback window, carryover boundary, month start/end, quarterly windows, and tax-year resolution all compute against this timezone, never the host clock. An IANA tz identifier — e.g. `America/Phoenix` — mirroring bujo's convention. `/workbench-ynab:setup` resolves your system's zone at setup time and writes it here as an explicit identifier; it is NEVER stored as \"system local\", so scheduled and interactive runs are deterministic. The loader (`bin/config.sh` `_cfg_timezone`) validates it against the tz database at load time and FAILS CLOSED — a descriptive error, never a silent fall-through to the host clock — on a missing or invalid value. This `pattern` is a shape check only; the loader's zoneinfo lookup is the authoritative validity gate — it requires the name to resolve to a compiled TZif zone file (not merely any file of that name), so zoneinfo housekeeping artifacts (leapseconds, +VERSION, tzdata.zi) and the UTC-equivalent pseudo-zones (Factory, posixrules) are rejected. The pseudo-zone rejection is CASE-INSENSITIVE and covers the `right/` and `posix/` leap-second mirror subtrees, so `factory`, `FACTORY`, and `right/Factory` — all of which resolve to the UTC-equivalent Factory zone on a case-insensitive filesystem or a mirror-shipping host — fail closed too."
     },
     "tax_year": {
       "type": "integer",
@@ -213,7 +213,7 @@
       "properties": {
         "output_dir": {
           "type": "string",
-          "description": "Directory where generated HTML reports are written. Supports ~ and environment-variable expansion at use time. OPTIONAL — when absent or empty the writer (bin/report-writer.sh) applies the shipped default ~/Documents/Claude/Reports, so the loader and tests deliberately exercise the field-absent path. Not marked required here to match that default behaviour."
+          "description": "Directory where generated HTML reports are written. Supports ~ and environment-variable expansion at use time. OPTIONAL — when absent or empty the writer (bin/report-writer.sh) applies the shipped default ~/Documents/Claude/Reports, so the loader and tests deliberately exercise the field-absent path. Not marked required here to match that default behaviour. There is deliberately NO must-be-absolute constraint: a RELATIVE value resolves against the current working directory, identically for the report writer and bin/ynab-prune.sh, so prune always sweeps the directory the writer wrote to. Prefer an absolute path anyway — a relative one makes the report location depend on where the review happened to run. This value lives outside the repo (as the whole config.json does) and therefore survives plugin updates: it is the single, update-stable source of truth for where reports are saved."
         },
         "template_path": {
           "type": ["string", "null"],
