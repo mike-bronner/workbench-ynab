@@ -188,12 +188,30 @@ guess a value — render the tax sections as
 dispatch summary. A wrong tax constant corrupts every downstream number; failing
 loud is correct.
 
-**Report only `error.kind` + `error.message`** — never the `error.errors[]`
-detail. That per-violation array is intentionally raw for programmatic callers,
-and every entry's `path` / `params` embeds the offending JSON property name
-verbatim, which can itself be secret-shaped; a report is human-facing output, so
-quoting, paraphrasing, or summarizing an entry discloses it (#235). Same rule,
-same reasoning as [`../estimated-tax/SKILL.md`](../estimated-tax/SKILL.md) step 1.
+**Two surfaces, two different rules — never merge them.** A loader failure is
+reported in two places, and what may be quoted differs by place:
+
+- **The HTML fragment (`SLOT:section-12-tax-summary`) carries `error.kind` and
+  nothing else.** The rendered text is exactly
+  `tax profile unavailable (<error.kind>)` — `error.kind` is one of the fixed enum
+  values `schema` / `io` / `parse` / `depth`, and no other field of `error` goes
+  into that fragment. **Never render `error.message` there.** It embeds the
+  caller-supplied `profilePath` — the per-budget `tax_profile_path` config
+  override, or `$YNAB_TAX_PROFILE_FILE` — through `redact()`
+  ([`../../lib/containment.mjs`](../../lib/containment.mjs)), which masks
+  home-directory spellings **only**: it does not HTML-escape, so `<` and `&`
+  survive it intact (#235). The enum text still goes through the escaper before it
+  fills the slot — see [§8](#trust-boundary--escape-every-ynab-string).
+- **The dispatch summary and the session output — plain text, not markup — may
+  report `error.kind` + `error.message`.** Those surfaces are not HTML and are not
+  written into the report file, so the message's redacted path is acceptable there.
+
+On **both** surfaces, never the `error.errors[]` detail. That per-violation array
+is intentionally raw for programmatic callers, and every entry's `path` / `params`
+embeds the offending JSON property name verbatim, which can itself be
+secret-shaped; a report is human-facing output, so quoting, paraphrasing, or
+summarizing an entry discloses it (#235). Same rule, same reasoning as
+[`../estimated-tax/SKILL.md`](../estimated-tax/SKILL.md) step 1.
 
 ---
 
@@ -381,7 +399,11 @@ or `computeTaxSummary` throws on the tax-year inputs, treat it exactly like a
 failed profile load (§4): render §12 as `tax year unresolvable (<error kind>)`,
 pass **no** `--tax-year`, and add a `tax_year_error` note to the dispatch summary.
 Never fall back to the host zone, the budget name, or `profile.taxYear` — a
-plausible wrong year is worse than a visible gap.
+plausible wrong year is worse than a visible gap. Like §4's failure text, this
+string fills `SLOT:section-12-tax-summary`, so it carries the error **kind** only
+— never a thrown error's `message`, which can quote a caller-supplied path — and
+it goes through `bin/html-escape.sh` before it fills the slot
+([§8](#trust-boundary--escape-every-ynab-string)).
 
 ### Empty-state & degenerate-budget handling
 
@@ -513,20 +535,45 @@ See [docs/tax-year-resolution.md](../../docs/tax-year-resolution.md).
 
 ### Trust boundary — escape every YNAB string
 
-Payee names, memos, category names, and account names are **untrusted external
-data** crossing into HTML output. Route **every** YNAB-sourced string through the
-one shared, audited escaper — [`../../bin/html-escape.sh`](../../bin/html-escape.sh)
-— before injecting it into any fragment:
+Every string that crosses into HTML output is **untrusted external data**. **Four
+sources, one rule, no carve-outs:**
+
+- **Payee names and memos** — untrusted data straight off the wire.
+- **Category and account names** — same wire, same rule.
+- **Formatted amounts** — `formatMoney` embeds the off-the-wire `currency_symbol`
+  and separators verbatim and does **not** pre-escape (§5), so a rendered amount
+  is not a bare number.
+- **The tax-loader failure text** — §4's `tax profile unavailable (<error.kind>)`,
+  and its sibling `tax year unresolvable (<error kind>)` from the
+  [§12 call](#12-call--the-tax-summary-and-the-active-tax-year). Both fill
+  `SLOT:section-12-tax-summary` on a failure path, and both are **config-reachable
+  by construction**: the value that failed to load is named by the per-budget
+  `tax_profile_path` override or `$YNAB_TAX_PROFILE_FILE`, and this repo has
+  already ruled config strings a **trust boundary, not trusted input** (issue #28 /
+  GAP-13, the same ruling that pre-escapes `persona.name`). §4 confines the
+  rendered text to the `error.kind` enum precisely so no caller-supplied path can
+  reach the markup — `redact()` masks home directories, never `<` or `&` — and
+  this escaper is the second, independent layer that holds even if that
+  confinement is ever widened.
+
+Route **every** one of them through the one shared, audited escaper —
+[`../../bin/html-escape.sh`](../../bin/html-escape.sh) — before injecting it into
+any fragment:
 
 ```bash
 # the SAME module bin/persona.sh and bin/report-writer.sh use — no hand-escaping.
 # `--` ends option parsing so a payee literally named `-h`/`--raw` is escaped as
 # DATA, never dispatched as a flag — ALWAYS pass it before the untrusted value.
 safe_payee="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" -- "$raw_payee")"
+safe_tax_error="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" -- "$tax_error")"
 ```
 
-It **HTML-escapes** the five dangerous characters (`&` → `&amp;` first, then
-`<` `>` `"` `'`), strips layout-wrecking control characters, and truncates an
+**No string interpolated into a fragment is outside this rule.** The only value
+that skips the escaper is `bash bin/persona.sh html-name`, which is pre-escaped at
+the source.
+
+The escaper **HTML-escapes** the five dangerous characters (`&` → `&amp;` first,
+then `<` `>` `"` `'`), strips layout-wrecking control characters, and truncates an
 over-long value (200 chars + `…`) — so a payee like `Smith & <b>Sons</b>` renders
 as text, never markup, and a multi-kilobyte memo can never blow out the layout. A
 bare number you compute is safe — but a **formatted amount is not a bare number**:
@@ -534,9 +581,10 @@ bare number you compute is safe — but a **formatted amount is not a bare numbe
 (it does not pre-escape, see §5), so pass every rendered amount through the same
 helper too. A hostile `currency_symbol` like `<script>` must render as text, never
 as markup. (The persona loader escapes the name it renders via the same module;
-you own routing the transaction/category/account strings **and the formatted
-amounts** through `bin/html-escape.sh` before they go into slots.) The report
-writer (M2-9) then treats each finished fragment as an **opaque, already-escaped
+you own routing the transaction/category/account strings, **the formatted
+amounts**, and **the tax-loader failure text** through `bin/html-escape.sh` before
+they go into slots.) The report writer (M2-9) then treats each finished fragment
+as an **opaque, already-escaped
 string** — it never re-processes or re-escapes it — so escaping happens exactly
 once, here, at the assembly boundary. Long transaction lists go inside
 `<details><summary>…</summary><div class="details__body">…</div></details>` so
