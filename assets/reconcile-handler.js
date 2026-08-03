@@ -250,16 +250,48 @@ function markClearedBalanceImpact(op, byId) {
 }
 
 /**
+ * Does a snapshot carry a baseline that can be compared against live state?
+ *
+ * Only a plain object with at least one own field does. `{}`, `undefined`, `null`,
+ * an array, a non-plain object (a Date, a Map, a class instance), and any scalar
+ * all carry nothing to drift against. The executor's `isStale` rejects the
+ * non-object shapes already, but `{}` passes it and then compares zero keys —
+ * `Object.keys({}).some(...)` is vacuously `false`, so an empty snapshot reads as
+ * not-stale against ANY live state. This predicate is what closes that gap.
+ *
+ * @param {unknown} snapshot an op's read-only `before` snapshot.
+ * @returns {boolean} true when the snapshot has a comparable baseline.
+ */
+function hasComparableBaseline(snapshot) {
+  if (snapshot === null || typeof snapshot !== 'object' || Array.isArray(snapshot)) return false;
+  const proto = Object.getPrototypeOf(snapshot);
+  if (proto !== Object.prototype && proto !== null) return false;
+  return Object.keys(snapshot).length > 0;
+}
+
+/**
  * Drift detection for a reconcile op (both sub-actions). Stale = live state no
  * longer matches the op's `before` snapshot the human approved against.
  *  - reconcile_account: account-level `before` ({cleared_balance, …}) vs live —
- *    reuse the executor's subset `isStale`.
+ *    reuse the executor's subset `isStale`, behind a fail-closed baseline guard.
  *  - mark_cleared: stale if any target transaction's live `cleared` differs from
  *    the `before.cleared` baseline. Fail-closed on a missing baseline (no
  *    `before.cleared`) or a missing/malformed live txn.
+ *
+ * Both sub-actions fail CLOSED on a baseline-free `before`. `isStale` itself is
+ * unchanged — the guard lives in this branch, so every other op type keeps the
+ * executor's existing subset semantics.
  */
 function isReconcileStale(op, live, subAction) {
   if (subAction === SUB_ACTIONS.RECONCILE_ACCOUNT) {
+    // No comparable baseline → we cannot prove the live account still matches what
+    // the human approved against, so we must not real-apply. The schema makes every
+    // `reconcileOp.before` field optional (changeset-schema.json reconcileOp.before
+    // has no `required`), so a schema-valid op can reach here with `before: {}`,
+    // which `isStale` reads as not-stale for any live state; fail CLOSED, mirroring
+    // the `mark_cleared` baseline guard below — never reconcile an account with no
+    // baseline to drift against.
+    if (!hasComparableBaseline(op.before)) return true;
     return isStale(op.before, live);
   }
   const baseline = op.before && typeof op.before === 'object' ? op.before.cleared : undefined;

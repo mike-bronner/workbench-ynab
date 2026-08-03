@@ -38,11 +38,12 @@
 #      `reconcileOp.before`/`.after` having no `required` array in the schema, and
 #      on `isReconcileStale` existing to delegate to. Both are read from source.
 #      Delegation is checked PER SUB-ACTION, not per op type: `isReconcileStale`
-#      guards `mark_cleared` and does NOT guard `reconcile_account`, so a doc
-#      claiming "production solved this" for `reconcile` as a whole would send an
-#      implementer to a guard half the op type never had. The doc's #282 gap
-#      marker is pinned to that branch in both directions, like the fsync marker
-#      in class 3.
+#      must guard `mark_cleared` AND `reconcile_account`, so a doc claiming
+#      "production solved this" for `reconcile` as a whole is only true while both
+#      branches really carry a guard. #282 shipped the second one, and the doc's
+#      claim is pinned to that shipped branch in both directions, like the fsync
+#      marker in class 3: guard gone → the doc must go back to flagging the gap;
+#      guard present → the doc must not still call it not-yet-wired.
 #   3. The fsync gap. The document marks fsync-per-record a requirement that is
 #      not implemented (issue #275). That marker must come down when the code
 #      lands, so the test asserts the gap is REAL — if `bin/audit-log.sh` gains an
@@ -317,30 +318,40 @@ else
   no "isReconcileStale still fails closed on a missing \`before.cleared\` baseline"
 fi
 
-# That guard is `mark_cleared`'s ALONE. The doc used to claim "production already
-# solved this" for the `reconcile` op type as a whole; it is only true of one of
-# the two sub-actions, and a design instructing resume to delegate a guard that
-# half the op type never had would silently skip a real money op. The doc's claim
-# is now sub-action-scoped and flags `reconcile_account` as an open gap (#282).
-# Pin BOTH directions against the real branch, so the doc must follow the code
-# whichever way it moves — the same marker-rot check section 4 runs for fsync:
-#   guard still absent → the doc must still flag the gap and cite #282
-#   guard landed       → the doc's "not yet wired" marker is stale, so fail
+# The sibling guard, `reconcile_account`'s. The doc once claimed "production
+# already solved this" for the `reconcile` op type as a whole while only
+# `mark_cleared` was guarded, which would have sent an implementer to a guard half
+# the op type never had. #282 shipped the second guard, and the doc's claim moved
+# from "not yet wired" to "guarded". Pin the CLAIM to the SHIPPED LINE in both
+# directions — the same marker-rot check section 4 runs for fsync:
+#   guard absent  → the doc must go back to flagging the gap and citing #282
+#   guard present → the doc must quote this exact guard line, and must NOT still
+#                   call it not-yet-wired
+# Quoting the line (not merely "the body is no longer the bare delegation") is
+# what ties the marker's removal to the real code: any edit to the guard — a
+# rename, a reformat, a deletion — fails here. A weaker "body differs from the old
+# bare-delegation string" check would stay green on the first two (the body still
+# differs, so the rot goes unseen); only the third trips it, because deleting the
+# guard restores that exact string. Quoting the line is what covers the other two.
+RA_GUARD='if (!hasComparableBaseline(op.before)) return true;'
 recon_fn="$(awk '/^function isReconcileStale\(/{f=1} f{print} f&&/^}/{exit}' \
   "$REPO_ROOT/$RECONCILE")"
 ra_branch="$(printf '%s\n' "$recon_fn" \
   | awk '/RECONCILE_ACCOUNT/{f=1} f{print} f&&/^  }/{exit}')"
-# The branch's executable body: drop the `if (…) {` line, the closing brace, and
-# surrounding whitespace. Bare delegation === no baseline guard.
+# The branch's executable body: drop the `if (…) {` line, the closing brace,
+# comment lines, and surrounding whitespace. Bare delegation === no baseline guard.
 ra_body="$(printf '%s\n' "$ra_branch" \
-  | sed -e '1d' -e '$d' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$')"
+  | sed -e '1d' -e '$d' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+  | grep -v '^$' | grep -v '^//')"
 
 # Scoped to the doc's own `reconcile_account` bullet, never the whole file: the
 # phrase "Designed, not yet wired" is also used for the GAP-10 freshness gate, so
-# a whole-document grep would stay green with this bullet's marker deleted.
+# a whole-document grep would stay green with this bullet's marker deleted. The
+# cut stops at a blank line as well as at the next bullet/heading, so the prose
+# paragraph under the list cannot lend the bullet vocabulary it does not have.
 ra_doc="$(awk '
   substr($0, 1, 2) == "- " && index($0, "reconcile_account") { f = 1; print; next }
-  f && (substr($0, 1, 2) == "- " || substr($0, 1, 1) == "#") { exit }
+  f && (substr($0, 1, 2) == "- " || substr($0, 1, 1) == "#" || $0 == "") { exit }
   f { print }
 ' "$REPO_ROOT/$DOC" | tr '\n' ' ' | tr -s ' ')"
 
@@ -354,10 +365,30 @@ elif [ "$ra_body" = "return isStale(op.before, live);" ]; then
   else
     no "\`reconcile_account\` still delegates bare to isStale — doc must flag it and cite #282"
   fi
+elif ! in_text "$ra_branch" "$RA_GUARD"; then
+  no "\`reconcile_account\`'s branch carries neither the bare delegation nor the #282 guard — the doc's claim describes code that no longer exists"
+elif ! grep -q 'function hasComparableBaseline(' "$REPO_ROOT/$RECONCILE" 2>/dev/null; then
+  no "the \`reconcile_account\` guard calls hasComparableBaseline, and that function really exists in $RECONCILE"
 elif in_text "$ra_doc" "not yet wired"; then
-  no "\`reconcile_account\`'s branch changed — the doc's not-yet-wired marker is stale (see #282)"
+  no "\`reconcile_account\` is guarded now — the doc's not-yet-wired marker is stale (see #282)"
+elif in_text "$ra_doc" "$RA_GUARD" && in_text "$ra_doc" "#282"; then
+  ok "\`reconcile_account\` fails closed on a baseline-free \`before\`, and the doc quotes that exact guard and cites #282"
 else
-  ok "\`reconcile_account\` no longer delegates bare, and the doc no longer calls it a gap"
+  no "\`reconcile_account\` fails closed on a baseline-free \`before\` — the doc's bullet must quote that guard line and cite #282"
+fi
+
+# Both sub-actions are guarded, so the doc's delegation rule is now unconditional
+# for the `live == before` half. The old "everywhere except reconcile_account"
+# carve-out must be gone; if it comes back while the guard is shipped, the two
+# have drifted. Scoped to the paragraph that states the rule.
+rule_para="$(awk '/^So "delegate to the op type/{f=1} f{print} f&&/^$/{exit}' \
+  "$REPO_ROOT/$DOC" | tr '\n' ' ' | tr -s ' ')"
+if [ -z "$rule_para" ]; then
+  no "the doc states the \"delegate to the op type's own check\" rule"
+elif in_text "$rule_para" "everywhere except"; then
+  no "the delegation rule still carves out a sub-action while both are guarded (see #282)"
+else
+  ok "the delegation rule no longer carves out \`reconcile_account\`"
 fi
 
 # The doc says delegation answers "is it stale?", NOT "is it already applied",
