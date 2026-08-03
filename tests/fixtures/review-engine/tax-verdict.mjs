@@ -82,6 +82,9 @@ let summary;
 try {
   summary = computeTaxSummary(loaded, {
     asOfDate,
+    // The active tax year is derived from asOfDate in this zone (#17); the engine
+    // refuses to fall back to the host zone, so the harness supplies one explicitly.
+    timezone: arg('timezone', 'America/Phoenix'),
     scheduleCLines,
     itemizedDeductionsTotal: itemizedTotal,
     agi: 90000,

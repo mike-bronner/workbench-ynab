@@ -95,12 +95,14 @@ command computes a date from the host clock.
 |---|---|
 | `_is_valid_timezone TZ` | Pure predicate — returns 0 iff `TZ` is a syntactically-safe, real IANA zone. Prints nothing. **Fails closed**: rejects empty, an absolute path, a `..` traversal, a trailing slash, any character outside `[A-Za-z0-9_+/-]`, the non-selectable TZif pseudo-zones `Factory`/`posixrules` (they resolve to a UTC-equivalent date) — matched **case-insensitively** and including the `right/`/`posix/` leap-second mirror subtrees, so `factory`, `FACTORY`, and `right/Factory` fail closed too — and any name under `$TZ_DB_DIR` (default `/usr/share/zoneinfo`, honouring `$TZDIR`) that is missing or is a housekeeping file rather than a compiled zone — the final gate requires the `TZif` magic (RFC 8536), so text artifacts like `leapseconds`, `+VERSION`, and `tzdata.zi` are rejected, not a bare `-f` existence check. Nested zones like `America/Argentina/Buenos_Aires` are accepted. |
 | `_cfg_timezone` | The **load-time timezone gate**. Reads `.timezone`; echoes it on stdout when valid. On a **missing or invalid** value it prints a descriptive error to **stderr** and returns **non-zero** — it **never** falls back to the host clock. Resolve it as a hard stop: `tz="$(_cfg_timezone)" \|\| exit 1`. |
+| `_cfg_tax_year` | The **optional** active-tax-year override (`.tax_year`). Echoes nothing and returns **zero** when the key is **absent or `null`** — that is the default, and the caller derives the year from the review date. On any other value that is not a JSON **number** of exactly four digits it prints a descriptive error to **stderr** and returns **non-zero**; it never ignores a malformed value. "Is the key set?" is decided from the JSON **type**, never the rendered text, so the falsy values `false` and `""` fail closed as malformed instead of reading as unset. Resolve it as a hard stop: `tax_year="$(_cfg_tax_year)" \|\| exit 1`. |
 | `_today_in_tz TZ [EPOCH]` | Echoes today's ISO-8601 date (`YYYY-MM-DD`) in zone `TZ` — the single source of "today" for the review router and the four ad-hoc tier commands, so a scheduled run and an interactive run at the same instant agree on the window and tax-year label. `EPOCH` (Unix seconds; or the `$YNAB_NOW_EPOCH` env var) overrides "now" — the deterministic test seam, mirroring `lib/monitor/alerts.mjs`'s `options.now`. Portable across GNU (`date -d @…`) and BSD (`date -r …`). Assumes `TZ` is already validated. |
 
 ```bash
 source "${CLAUDE_PLUGIN_ROOT}/bin/config.sh"
 _require_config || exit 1
 timezone="$(_cfg_timezone)" || exit 1        # required IANA tz — fail closed, never host clock
+tax_year="$(_cfg_tax_year)" || exit 1        # optional override; empty means derive from the review date
 today="$(_today_in_tz "$timezone")"          # authoritative today in the configured tz
 ```
 

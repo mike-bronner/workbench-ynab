@@ -12,7 +12,9 @@ Resolve config and pre-warm the YNAB MCP exactly as the `/ynab-review` router's
 Step 1 does: source `${CLAUDE_PLUGIN_ROOT}/bin/config.sh`, resolve the default
 budget / `report_dir`, resolve the **required** `timezone` fail-closed via
 `_cfg_timezone` (`timezone="$(_cfg_timezone)" || exit 1` — never the host clock),
-and compute the authoritative `today` in that timezone via `_today_in_tz`, then best-effort pre-warm —
+and compute the authoritative `today` in that timezone via `_today_in_tz`, and resolve the
+**optional** `tax_year` override the same fail-closed way (`tax_year="$(_cfg_tax_year)" || exit 1`
+— empty means derive the year from the review date), then best-effort pre-warm —
 load the budgets-list read tool's deferred schema via `ToolSearch` (concrete
 name from `${CLAUDE_PLUGIN_ROOT}/skills/protocol/ynab-tools.md`, the
 `mcp__plugin_workbench-ynab_ynab__*` namespace) and make one discardable call.
@@ -25,6 +27,7 @@ budget_name: <from the default budgets entry>
 today: <YYYY-MM-DD>
 timezone: <tz>
 report_dir: <resolved .report.output_dir>
+tax_year: <resolved $tax_year — omit this line entirely when it is empty>
 review_scope: quarterly-tax
 ```
 

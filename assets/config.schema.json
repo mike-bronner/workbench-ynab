@@ -71,6 +71,12 @@
       "pattern": "^[A-Za-z0-9+_-]+(/[A-Za-z0-9+_-]+)*$",
       "description": "REQUIRED. The single source of truth for ALL date math (issue #31): the review's 7-day lookback window, carryover boundary, month start/end, quarterly windows, and tax-year resolution all compute against this timezone, never the host clock. An IANA tz identifier — e.g. `America/Phoenix` — mirroring bujo's convention. `/workbench-ynab:setup` resolves your system's zone at setup time and writes it here as an explicit identifier; it is NEVER stored as \"system local\", so scheduled and interactive runs are deterministic. The loader (`bin/config.sh` `_cfg_timezone`) validates it against the tz database at load time and FAILS CLOSED — a descriptive error, never a silent fall-through to the host clock — on a missing or invalid value. This `pattern` is a shape check only; the loader's zoneinfo lookup is the authoritative validity gate — it requires the name to resolve to a compiled TZif zone file (not merely any file of that name), so zoneinfo housekeeping artifacts (leapseconds, +VERSION, tzdata.zi) and the UTC-equivalent pseudo-zones (Factory, posixrules) are rejected."
     },
+    "tax_year": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 9999,
+      "description": "Optional. Pins the ACTIVE tax year the review reports on, overriding the default calendar-year derivation (issue #17). When ABSENT — the normal case — the tax year is the calendar year of the review date in `timezone`, resolved by `resolveTaxYear` in lib/tax/taxYear.mjs. Set it only when your setup does not follow the calendar year. The budget's display name is NEVER a source: a budget called `Personal 2024` says nothing about the active tax year, and parsing one out of it would keep answering 2024 after a rename. Four digits, because tax years are rendered into `YYYY-MM-DD` due dates that the engine compares lexicographically; a malformed value FAILS CLOSED (a descriptive error, never a silent fall-back to the review date)."
+    },
     "business": {
       "type": "object",
       "description": "Optional side-business configuration. Replaces the prototype's hardcoded business name, business checking account, and expense categories. Omit entirely if the user has no business.",
