@@ -313,6 +313,67 @@ assert_eq       "append exits non-zero on a short write" "1" "$rc"
 assert_contains "the shim names the short write"  "$SW_ERR" "short write"
 assert_contains "the writer reports the failed append" "$SW_ERR" "append failed"
 
+echo "AC (#275): a RAISED error in the shim fails the append (never a durable-looking success):"
+# The short-write test above covers os.write returning a bad COUNT. This block
+# covers the other half of the shim's failure surface: the STDIN read and the
+# syscalls themselves RAISING. _audit_fsync_append_program wraps them in a bare
+# try/finally with no `except`, so an exception must propagate to a non-zero exit
+# — but nothing pinned that. A future `except OSError` that swallowed a real write
+# error would fall straight through the `n != len(data)` check and report exit 0
+# for a record that never reached the disk: the exact fail-open #275 exists to
+# close, and invisible to every other test here (`sys.exit` raises SystemExit, a
+# BaseException, so the short-write test's mechanism cannot catch it either).
+# Faults are injected with the same sitecustomize/PYTHONPATH interception as the
+# fsync probe, so the writer still runs its own unmodified program.
+#
+# Every failure branch of the shim is now covered: os.open raising (the failing-
+# shim test above), a short os.write return (the short-write test above), and the
+# STDIN read / os.write / os.fsync raising (below). The `finally`'s os.close is
+# deliberately NOT pinned: it runs only after the record is already fsync'd and
+# durable, so a failure there is a conservative false negative — it cannot break
+# the durability contract ("exit 0 ⇒ the record is on stable storage"), which is
+# what these tests exist to guard.
+RAISE_ROOT="$SANDBOX/raise"
+export YNAB_AUDIT_MONTH="2026-06"
+export YNAB_AUDIT_TIMESTAMP="2026-06-20T10:06:00Z"
+
+# run_with_fault <name> <sitecustomize-program>: inject the fault into the shim's
+# own interpreter and run one append into its own audit dir. Sets RF_RC and RF_ERR
+# for the assertions that follow.
+run_with_fault() {
+  local name="$1" program="$2" probe="$RAISE_ROOT/$1/probe"
+  mkdir -p "$probe"
+  printf '%s\n' "$program" > "$probe/sitecustomize.py"
+  export YNAB_AUDIT_DIR="$RAISE_ROOT/$name/audit"
+  RF_ERR="$(PYTHONPATH="$probe" _audit_append "$CATEGORIZE_OP" "$CATEGORIZE_RES" false 2>&1)"
+  RF_RC=$?
+}
+
+run_with_fault write 'import os
+def _raise(fd, data):
+    raise OSError(5, "Input/output error")
+os.write = _raise'
+assert_eq       "append exits non-zero when os.write RAISES"      "1" "$RF_RC"
+assert_contains "the writer reports the failed append (os.write)" "$RF_ERR" "append failed"
+
+run_with_fault fsync 'import os
+def _raise(fd):
+    raise OSError(5, "Input/output error")
+os.fsync = _raise'
+assert_eq       "append exits non-zero when os.fsync RAISES — an unflushed record is NOT a success" \
+  "1" "$RF_RC"
+assert_contains "the writer reports the failed append (os.fsync)" "$RF_ERR" "append failed"
+
+run_with_fault stdin 'import sys
+class _Buffer:
+    def read(self):
+        raise OSError(5, "Input/output error")
+class _Stdin:
+    buffer = _Buffer()
+sys.stdin = _Stdin()'
+assert_eq       "append exits non-zero when the STDIN read RAISES" "1" "$RF_RC"
+assert_contains "the writer reports the failed append (stdin)"     "$RF_ERR" "append failed"
+
 echo "AC (#275): a record larger than a pipe buffer survives whole:"
 export YNAB_AUDIT_DIR="$SANDBOX/bigrec"
 export YNAB_AUDIT_MONTH="2026-06"
