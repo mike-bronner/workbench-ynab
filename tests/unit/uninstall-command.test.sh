@@ -80,6 +80,13 @@ fenced_block() {
 }
 
 constants_block() { fenced_block "$CMD" '## Constants' bash; }
+doc_constants_block() { fenced_block "$DOC" '## Constants' bash; }
+
+# Portable octal-perms read: GNU `stat -c '%a'` probed FIRST (on GNU, `stat -f`
+# is "filesystem status" and misreads `%Lp`), BSD/macOS `stat -f '%Lp'` as the
+# fallback. Same helper the report-writer / audit-log / setup-config-write
+# suites use for mode-bit assertions.
+mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 
 # ---------------------------------------------------------------------------
 # Execution harness — run one extracted block in a sandbox
@@ -270,16 +277,47 @@ write_settings() {
 EOF
 }
 
-# run_step4 <setup-fn> — build a sandbox HOME, let <setup-fn> shape it (it
-# receives the settings path), then execute the Step 4 block. Real jq unless
-# the setup function put a stub earlier on PATH. Sets S4_SETTINGS to the file
-# path so assertions can read it back after the sandbox call.
+# run_step4 <setup-fn> [prelude] [block] — build a sandbox HOME, let <setup-fn>
+# shape it (it receives the settings path), then execute the Step 4 block. Real
+# jq unless the setup function put a stub earlier on PATH. Sets S4_SETTINGS to
+# the file path so assertions can read it back after the sandbox call.
+#
+# [prelude] is shell prepended to the block, used to pin an ambient `umask` for
+# the mode-preservation cases below. [block] replaces the extracted block, used
+# by the creation-time mutation test.
 run_step4() {
-  local setup="$1" sb; sb="$(mktemp -d)"
+  local setup="$1" prelude="${2:-}" sb
+  local block="${3:-$(fenced_block "$CMD" '## Step 4 ' bash)}"
+  sb="$(mktemp -d)"
   mkdir -p "$sb/home/.claude" "$sb/bin"
   S4_SETTINGS="$sb/home/.claude/settings.json"
   "$setup" "$S4_SETTINGS" "$sb/bin"
-  run_block "$sb/home" "$(fenced_block "$CMD" '## Step 4 ' bash)" PATH="$sb/bin:$PATH"
+  run_block "$sb/home" "$prelude
+$block" PATH="$sb/bin:$PATH"
+  S4_AFTER="$(cat "$S4_SETTINGS" 2>/dev/null || true)"
+  S4_TMP_LEFT=0
+  [ -e "$S4_SETTINGS.tmp" ] && S4_TMP_LEFT=1
+  S4_SANDBOX="$sb"
+}
+
+# run_doc_step4 <setup-fn> [prelude] — the same harness for the BY-HAND mirror
+# in docs/uninstall.md: the doc's own Constants block plus its step-4 fenced
+# block, so the checklist a user actually copies is executed, not just grepped.
+# Sets the same S4_* variables.
+run_doc_step4() {
+  local setup="$1" prelude="${2:-}" sb
+  local block="${3:-$(fenced_block "$DOC" '## 4. ' bash)}"
+  sb="$(mktemp -d)"
+  mkdir -p "$sb/home/.claude" "$sb/bin"
+  S4_SETTINGS="$sb/home/.claude/settings.json"
+  "$setup" "$S4_SETTINGS" "$sb/bin"
+  local errf; errf="$(mktemp)"
+  set +e
+  B_OUT="$(env HOME="$sb/home" PATH="$sb/bin:$PATH" "${BASH:-/bin/bash}" -c "$(doc_constants_block)
+$prelude
+$block" 2>"$errf")"
+  set -e
+  B_ERR="$(cat "$errf")"; rm -f "$errf"
   S4_AFTER="$(cat "$S4_SETTINGS" 2>/dev/null || true)"
   S4_TMP_LEFT=0
   [ -e "$S4_SETTINGS.tmp" ] && S4_TMP_LEFT=1
@@ -398,6 +436,186 @@ test_settings_invalid_staged_json_is_rejected() {
   assert_eq "$(cat "$expected")" "$S4_AFTER" \
     "an invalid staged rewrite must leave settings.json byte-for-byte untouched"
   assert_eq "0" "$S4_TMP_LEFT" "the invalid staged .tmp is cleaned up, not left beside the real file"
+  rm -f "$expected"; rm -rf "$S4_SANDBOX"
+}
+
+# ---------------------------------------------------------------------------
+# AC #4 (issue #280) — the rewrite must not reset settings.json's mode
+# ---------------------------------------------------------------------------
+# `mv` on one filesystem is a rename(2): the destination inode is replaced
+# outright, so the published file carries the STAGED file's mode. Staging under
+# the ambient umask therefore reset a settings.json the user had hardened to
+# 0600 back to the umask default. Every case below pins `umask 022` as the
+# ambient mask — that is what makes the assertions discriminating, since an
+# unhardened `jq > tmp; mv` publishes 0644 there regardless of the original.
+
+# A settings.json with a loose mode keeps it: the plugin preserves the user's
+# choice on a file it does not own (settings.json is Claude Code's own shared
+# config, outside SECURITY.md's plugin-owned artifact inventory) rather than
+# imposing one. This is the assertion the mode-restoring `chmod` owns — drop it
+# and the `umask 077` staging subshell publishes 0600 instead.
+_s4_matches_644() { write_settings "$1"; chmod 644 "$1"; }
+_s4_matches_600() { write_settings "$1"; chmod 600 "$1"; }
+
+test_settings_loose_mode_is_preserved() {
+  run_step4 _s4_matches_644 'umask 022'
+  assert_contains "$B_OUT" "Removed 3 workbench-ynab pre-approval entries" \
+    "the removal still runs over a 0644 settings.json"
+  assert_eq "644" "$(mode_of "$S4_SETTINGS")" \
+    "the user's chosen 0644 survives the rewrite"
+  rm -rf "$S4_SANDBOX"
+}
+
+# Issue #280 core: a settings.json the user hardened to 0600 is STILL 0600
+# afterwards. Under the pinned `umask 022` the pre-fix code published 0644 here
+# — the exact permission regression this test exists to catch.
+test_settings_hardened_mode_is_preserved() {
+  run_step4 _s4_matches_600 'umask 022'
+  assert_contains "$B_OUT" "Removed 3 workbench-ynab pre-approval entries" \
+    "the removal still runs over a 0600 settings.json"
+  assert_eq "600" "$(mode_of "$S4_SETTINGS")" \
+    "a settings.json hardened to 0600 is not widened by the rewrite"
+  rm -rf "$S4_SANDBOX"
+}
+
+# The staged .tmp is owner-only AT CREATION, not by a later chmod — so the
+# pending rewrite never sits world-readable beside the real file. The end-state
+# tests above cannot tell WHICH layer set the mode, so neutralize the
+# mode-restoring chmod (rewrite it to a `:` no-op, keeping the surrounding
+# fail-closed `elif` intact) over a 0644 original under `umask 022`: if the jq
+# `>` were staging at the ambient umask the published file would be 0644, so
+# only the `( umask 077; … )` subshell can make it 0600.
+#
+# This is the standing mutation test for the creation-time guarantee: deleting
+# `umask 077` from the staging subshell reddens THIS test while the two above
+# stay green (the chmod still covers them).
+test_settings_staged_tmp_is_owner_only_at_creation() {
+  local block
+  # The sed script and the case pattern are LITERAL command source text to match
+  # — the `$SETTINGS_MODE` in each is the command's own shell, never an
+  # expansion here — so SC2016 is a false positive on both.
+  # shellcheck disable=SC2016
+  block="$(fenced_block "$CMD" '## Step 4 ' bash | sed 's/chmod "$SETTINGS_MODE" /: /')"
+  # The sed must actually have found its target — otherwise this test silently
+  # degrades into a duplicate of the one above and proves nothing.
+  # shellcheck disable=SC2016
+  case "$block" in
+    *'chmod "$SETTINGS_MODE" '*) fail "the chmod-neutralizing sed did not fire — test would be vacuous" ;;
+  esac
+  run_step4 _s4_matches_644 'umask 022' "$block"
+  assert_contains "$B_OUT" "Removed 3 workbench-ynab pre-approval entries" \
+    "the removal still runs with the chmod neutralized"
+  assert_eq "600" "$(mode_of "$S4_SETTINGS")" \
+    "the staged .tmp was born 0600 — the umask 077 subshell, not the chmod"
+  rm -rf "$S4_SANDBOX"
+}
+
+# Fail closed when the mode cannot be READ: publishing the rewrite would reset
+# the mode to the ambient umask, so the step refuses, reports, and hands the
+# removal back to the user. `stat` is stubbed to fail both ways — the only way
+# to reach that branch.
+_s4_no_stat() {
+  write_settings "$1"; chmod 600 "$1"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$2/stat"
+  chmod +x "$2/stat"
+}
+
+test_settings_unreadable_mode_fails_closed() {
+  local expected; expected="$(mktemp)"; write_settings "$expected"
+  run_step4 _s4_no_stat 'umask 022'
+  assert_contains "$B_ERR" "Could not read the permission mode" \
+    "the unreadable mode is reported"
+  assert_contains "$B_ERR" "by hand" "the removal is handed back to the user"
+  assert_eq "$(cat "$expected")" "$S4_AFTER" \
+    "an unreadable mode must leave settings.json byte-for-byte untouched"
+  assert_eq "600" "$(mode_of "$S4_SETTINGS")" "the original mode is left alone"
+  assert_eq "0" "$S4_TMP_LEFT" "no stale .tmp is left beside the real file"
+  rm -f "$expected"; rm -rf "$S4_SANDBOX"
+}
+
+# Fail closed when the mode cannot be RE-APPLIED to the staged file: the .tmp is
+# dropped and the real file is untouched, rather than published at the umask's
+# mode. `chmod` is stubbed to fail; nothing else in the block calls it.
+_s4_no_chmod() {
+  write_settings "$1"; chmod 600 "$1"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$2/chmod"
+  command chmod +x "$2/chmod"
+}
+
+test_settings_failed_mode_restore_fails_closed() {
+  local expected; expected="$(mktemp)"; write_settings "$expected"
+  run_step4 _s4_no_chmod 'umask 022'
+  assert_contains "$B_ERR" "Could not restore mode" "the failed mode restore is reported"
+  assert_contains "$B_ERR" "left untouched" "the report says the original was not modified"
+  assert_eq "$(cat "$expected")" "$S4_AFTER" \
+    "a failed mode restore must leave settings.json byte-for-byte untouched"
+  assert_eq "0" "$S4_TMP_LEFT" "the staged .tmp is cleaned up, not left beside the real file"
+  rm -f "$expected"; rm -rf "$S4_SANDBOX"
+}
+
+# ---------------------------------------------------------------------------
+# AC #4 (issue #280) — the BY-HAND mirror in docs/uninstall.md, executed
+# ---------------------------------------------------------------------------
+# The checklist is what a user copy-pastes once the plugin is gone, so it needs
+# the same guarantee — and proving it by grep would be hollow. These execute the
+# doc's own step-4 block against the doc's own Constants.
+
+test_manual_step4_removal_works_and_preserves_a_loose_mode() {
+  run_doc_step4 _s4_matches_644 'umask 022'
+  assert_json_valid "$S4_SETTINGS"
+  assert_eq "0" "$(jq --arg p "$PREFIX" \
+    '[.permissions.allow[] | select(type == "string" and startswith($p))] | length' "$S4_SETTINGS")" \
+    "the by-hand block removes every prefixed entry"
+  assert_eq "4" "$(jq '.permissions.allow | length' "$S4_SETTINGS")" \
+    "the by-hand block leaves every other element alone"
+  assert_eq "644" "$(mode_of "$S4_SETTINGS")" \
+    "the by-hand block preserves the user's chosen 0644"
+  assert_eq "0" "$S4_TMP_LEFT" "the by-hand block leaves no stale .tmp"
+  rm -rf "$S4_SANDBOX"
+}
+
+test_manual_step4_preserves_a_hardened_mode() {
+  run_doc_step4 _s4_matches_600 'umask 022'
+  assert_eq "600" "$(mode_of "$S4_SETTINGS")" \
+    "the by-hand block does not widen a settings.json hardened to 0600"
+  rm -rf "$S4_SANDBOX"
+}
+
+# The by-hand chain's staged .tmp is owner-only AT CREATION too — the same
+# mutation as the command's, so the doc's `umask 077` link is pinned by its own
+# assertion rather than riding on the command's. Neutralize the mode-restoring
+# `chmod` link (to a `:` no-op, which keeps the `&&` chain intact) over a 0644
+# original under `umask 022`: only the `( umask 077; … )` subshell can make the
+# published file 0600 from there.
+test_manual_step4_staged_tmp_is_owner_only_at_creation() {
+  local block
+  # Literal doc source text on both lines — SC2016 is a false positive.
+  # shellcheck disable=SC2016
+  block="$(fenced_block "$DOC" '## 4. ' bash | sed 's/chmod "$SETTINGS_MODE" /: /')"
+  # shellcheck disable=SC2016
+  case "$block" in
+    *'chmod "$SETTINGS_MODE" '*) fail "the chmod-neutralizing sed did not fire — test would be vacuous" ;;
+  esac
+  run_doc_step4 _s4_matches_644 'umask 022' "$block"
+  assert_json_valid "$S4_SETTINGS"
+  assert_eq "0" "$(jq --arg p "$PREFIX" \
+    '[.permissions.allow[] | select(type == "string" and startswith($p))] | length' "$S4_SETTINGS")" \
+    "the removal still runs with the chmod link neutralized"
+  assert_eq "600" "$(mode_of "$S4_SETTINGS")" \
+    "the by-hand block's staged .tmp was born 0600 — the umask 077 subshell, not the chmod"
+  rm -rf "$S4_SANDBOX"
+}
+
+# The by-hand chain fails closed when the mode cannot be read: no rewrite is
+# attempted, the file is untouched, and the failure is reported.
+test_manual_step4_unreadable_mode_fails_closed() {
+  local expected; expected="$(mktemp)"; write_settings "$expected"
+  run_doc_step4 _s4_no_stat 'umask 022'
+  assert_contains "$B_OUT" "left untouched" "the by-hand chain reports the refusal"
+  assert_eq "$(cat "$expected")" "$S4_AFTER" \
+    "the by-hand chain leaves settings.json byte-for-byte untouched"
+  assert_eq "600" "$(mode_of "$S4_SETTINGS")" "the original mode is left alone"
+  assert_eq "0" "$S4_TMP_LEFT" "no stale .tmp is left beside the real file"
   rm -f "$expected"; rm -rf "$S4_SANDBOX"
 }
 
