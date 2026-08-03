@@ -75,9 +75,12 @@ missing=()
 for cmd in node jq security; do
   command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
 done
-# workbench-core is a Claude Code plugin, not a CLI: assert its install footprint
-# under the plugins cache (marketplace or local checkout both land here).
+# workbench-core is a Claude Code plugin, not a CLI: assert its install footprint.
+# The two install paths land in different places — a marketplace install under the
+# plugins cache, a local checkout under the skills directory (it never writes a
+# cache entry) — so check both or a local-checkout profile reads as missing.
 ls -d "$HOME"/.claude/plugins/cache/*/workbench-core >/dev/null 2>&1 \
+  || ls -d "$HOME"/.claude/skills/workbench-core >/dev/null 2>&1 \
   || missing+=("workbench-core")
 
 if [ ${#missing[@]} -gt 0 ]; then
