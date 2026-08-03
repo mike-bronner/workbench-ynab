@@ -198,9 +198,21 @@ assert_in "§4 splits the two reporting surfaces" "$s4" \
 # shellcheck disable=SC2016
 assert_in_flat_re "§4 forbids error.message in the HTML tax-summary fragment" "$s4" \
   'SLOT:section-12-tax-summary.*Never render .error\.message. there'
+# Two assertions, same bullet — mirroring the pairing above. The first pins the
+# surface itself (which surface, and why it is exempt: plain text, not markup).
+# The second pins the allowance CLAUSE verbatim, and is the one that carries the
+# `error.message` token: on its own the first regex stops at `error\.kind` and
+# never mentions `error.message` at all, so a meaning-changing edit that revokes
+# the allowance ("may report `error.kind` only. Never `error.message` here
+# either") would leave it green. Pinning `may report `error.kind` + `error.message``
+# as one contiguous clause means both directions redden — deleting the allowance,
+# or narrowing it to the kind alone.
 # shellcheck disable=SC2016
-assert_in_flat_re "§4 allows error.message only on the non-HTML dispatch/session surface" "$s4" \
+assert_in_flat_re "§4 scopes the non-HTML dispatch/session surface as plain text, not markup" "$s4" \
   'dispatch summary and the session output .* plain text, not markup .* report .error\.kind'
+# shellcheck disable=SC2016
+assert_in_flat_re "§4 allows error.message on that surface, by name" "$s4" \
+  'dispatch summary and the session output .* may report .error\.kind. [+] .error\.message.'
 # shellcheck disable=SC2016
 assert_in_flat_re "§4 states redact() does not HTML-escape" "$s4" \
   'redact.*(does not HTML-escape|masks home-directory spellings)'
