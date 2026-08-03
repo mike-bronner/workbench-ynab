@@ -431,8 +431,13 @@ def _probe(fd, data):
     return n
 os.write = _probe
 PY
-# ow_calls: the probe's record-file writes, one "fd bytes" line each.
-ow_calls() { [ -f "$OW_LOG" ] && awk '$1 != 1 && $1 != 2' "$OW_LOG" || true; }
+# ow_calls: the probe's record-file writes, one "fd bytes" line each. No log means
+# the shim never wrote at all — empty output, which reddens the counts below. An
+# awk failure is NOT swallowed: it too yields empty output and a non-zero status.
+ow_calls() {
+  [ -f "$OW_LOG" ] || return 0
+  awk '$1 != 1 && $1 != 2' "$OW_LOG"
+}
 PYTHONPATH="$OW_PROBE_DIR" AUDIT_WRITE_PROBE_LOG="$OW_LOG" \
   _audit_append "$CATEGORIZE_OP" "$CATEGORIZE_RES" false; rc=$?
 OW_FILE="$YNAB_AUDIT_DIR/audit-2026-06.jsonl"
