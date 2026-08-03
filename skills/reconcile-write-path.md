@@ -81,9 +81,16 @@ Before simulate or apply (both modes), the handler re-reads live state and
 compares it to the op's `before` snapshot:
 
 - `reconcile_account` — account-level `before` (`cleared_balance`, …) vs live,
-  via the executor's subset `isStale`.
+  via the executor's subset `isStale` (fail-closed on a baseline-free `before` —
+  `{}`, `null`, an array, a scalar — which `isStale` alone reads as not-stale).
 - `mark_cleared` — stale if **any** target transaction's live `cleared` differs
-  from the `before.cleared` baseline (fail-closed on a missing/malformed live txn).
+  from the `before.cleared` baseline (fail-closed on a missing `before.cleared`
+  baseline, and on a missing/malformed live txn).
+
+Both sub-actions fail **closed** on a `before` that carries no baseline: the
+schema leaves every `reconcileOp.before` field optional, so a schema-valid op can
+arrive with nothing to drift against, and reconciling against no baseline would
+overwrite state the human never approved.
 
 A stale op is `skipped-stale`: real apply skips it; dry-run surfaces the flag
 without aborting the batch.

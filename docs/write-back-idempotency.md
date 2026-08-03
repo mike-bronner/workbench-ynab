@@ -463,9 +463,8 @@ This is the same `readLiveState` read the executor already performs for drift
 detection, used for one extra decision.
 
 **The staleness comparison is delegated per op type — resume never rolls its
-own, with one documented exception (`reconcile_account`, below).** Each op type
-already owns a staleness check, and resume calls that check rather than
-applying one generic `Object.keys(...)` comparison to every op. This matters
+own.** Each op type already owns a staleness check, and resume calls that check
+rather than applying one generic `Object.keys(...)` comparison to every op. This matters
 most for `reconcile`, which is the **only** op type whose `before`/`after`
 snapshots have no `required` fields in the schema
 ([`assets/changeset-schema.json`](../assets/changeset-schema.json) —
@@ -480,27 +479,25 @@ above, `live == after` is tested first, so a reconcile op with `after: {}` would
 vacuously match and take **ALREADY APPLIED → skip** before the CONFLICT fallback
 is ever reached: resume would silently skip a real money op it never applied.
 
-Production solved this — but **only for one of `reconcile`'s two sub-actions.**
+Production solved this for **both** of `reconcile`'s sub-actions.
 `isReconcileStale`
 ([`assets/reconcile-handler.js`](../assets/reconcile-handler.js)) branches on the
-sub-action, and only one branch carries the guard:
+sub-action, and each branch carries its own baseline guard:
 
 - **`mark_cleared` — guarded, and resume inherits it.** The branch fails
   **closed** on a missing `before.cleared` baseline
   (`if (baseline === undefined) return true;`), and its comment names this exact
   case: *"a schema-valid op can reach here with `before: {}`; fail CLOSED."*
-- **`reconcile_account` — unguarded. ⚠️ Designed, not yet wired.** The branch is
-  a bare `return isStale(op.before, live);` with no baseline check, so `before:
-  {}` is vacuously non-stale here for exactly the reason the generic comparison
-  above is. Delegation alone does **not** close the trap for this sub-action.
-  Tracked as **#282**. Until that lands, resume must apply the empty-snapshot
-  fail-closed rule below **itself** for `reconcile_account` rather than assume
-  the delegate does it. Delegating and stopping there would silently skip a real
-  money op.
+- **`reconcile_account` — guarded, and resume inherits it.** The branch fails
+  **closed** on a baseline-free `before`
+  (`if (!hasComparableBaseline(op.before)) return true;`) before it reaches
+  `isStale`, so `before: {}` — and `null`, an array, a scalar, any non-plain
+  object — is stale here instead of vacuously matching. Shipped in **#282**.
 
-So "delegate to the op type's own check" is the rule, and it is sufficient
-**everywhere except `reconcile_account`**, which needs resume's own guard until
-#282 ships. Do not read the rule as a blanket guarantee.
+So "delegate to the op type's own check" is the rule, and it is sufficient for
+the `live == before` half of the branch on **every** op type, `reconcile_account`
+included. It is still not a blanket guarantee: it covers staleness only, never
+the `live == after` ALREADY-APPLIED half, which the next paragraph explains.
 
 **Delegation answers "is it stale?", not "is it already applied."**
 `isReconcileStale` reads only `op.before` — `op.after` is never referenced on its
@@ -520,11 +517,12 @@ and none of them ever triggers a silent re-apply:
   `cleared` baseline). `{}` *is* a comparable object, so the clause above does
   not cover it — it needs naming separately. This is the vacuity trap. Resume
   enforces this rule **directly**, on both `before` and `after`, for **every** op
-  type. Where the op type's own check already fails closed on it
-  (`mark_cleared`), resume's rule is redundant and harmless; where it does not
-  (`reconcile_account`, pending #282), resume's rule is the only thing standing
-  between an empty snapshot and a silently skipped money op. Do not weaken this
-  to "the delegate handles it."
+  type. Both reconcile sub-actions now fail closed on it themselves
+  (`mark_cleared`, and `reconcile_account` since #282), so on `before` resume's
+  rule is redundant and harmless there. It is not redundant on `after`: no op
+  type ships an ALREADY-APPLIED check to delegate to, so resume's own rule is the
+  only thing standing between an empty `after` and a silently skipped money op.
+  Do not weaken this to "the delegate handles it."
 - A **live read that throws** (network, 5xx, timeout). Resume has *less*
   evidence than a missing audit record, which §"Write-ahead ordering" already
   forbids dispatching on. So resume **does nothing to this op** — it does not
