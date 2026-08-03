@@ -54,7 +54,7 @@ The **tax-year label is the one thing the plan does not carry.** The plan gives
 you the *inputs* (`plan.tax_year`, below); the tax engine derives the year and
 its header label from them via `resolveTaxYear`, and you pass that label through
 verbatim. There is exactly one producer of that string in the tree — see
-[§12](#the-12-section-methodology) and
+[§12](#12-call--the-tax-summary-and-the-active-tax-year) and
 [docs/tax-year-resolution.md](../../docs/tax-year-resolution.md).
 
 From the plan you consume:

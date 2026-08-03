@@ -41,7 +41,7 @@ Workflow hygiene, common to all jobs:
 | `test` | ubuntu (Node floor + `lts/*` matrix) | First the swap-ready tool-name guard (`bin/check-tool-name-sources.sh`, issues #87/#131), then the M2 read-only guard (`scripts/check-readonly.sh`, issue #39 — no callable YNAB write tool and no bare `mcp__ynab__` namespace on any review surface) as explicit fail-fast steps, then the full bash + Node suite via `scripts/test.sh`, including the offline-boot proof (#14) against `node vendor/ynab-mcp/index.cjs` | A concrete YNAB tool name appeared outside the documented allowlist, a read-only review surface can call a write tool (or uses a bare namespace), or a test failed — the runner prints which file; the offline-boot proof failing usually means a bad re-vendor |
 | `bash-3-2` | macOS | Every suite carrying the `# bash-3.2-lane:` marker, under the runner's **bash 3.2**: the persona footer-escaping suites (`tests/persona-loader.test.sh`, `tests/unit/html-escape.test.sh`), the shared watchdog (`tests/unit/watchdog.test.sh`), the report writer (`tests/unit/report-writer.test.sh`), the report pruner and path expander (`tests/unit/ynab-prune.test.sh`), and the secret-scan guard (`tests/secret-scan.test.sh`) | The escaping regressed on macOS's default bash while staying green on bash ≥5 (issue #126 AC-3); the watchdog's process-group kill is job-control behaviour, which differs across bash majors (issue #188), and since issue #251 the escaping/report files drive their own call site down that timeout path; a 3.2-only construct or a BSD `find`/`stat`/`grep` branch broke (issues #65, #231) — or the runner image no longer ships bash 3.2 on PATH (the lane fails loudly rather than test the wrong interpreter) |
 | `assets-tests` | ubuntu | `npm --prefix assets ci && npm --prefix assets test` — the `assets/test/*.test.js` integration suites (apply executor, write-safety guardrail, handlers) against real installed deps | An assets integration test failed, or `package-lock.json` no longer reproduces an install |
-| `docs-links` | ubuntu | `lychee --offline --include-fragments` over `assets/**/*.md`, `docs/**/*.md`, and the root `README.md` — recursive, so nested docs (`assets/tax/README.md`, `assets/persona/*.md`, `docs/decisions/*.md`, …) are covered alongside the top-level files, and the README's links to the docs/ set are checked too | A relative link or `#fragment` cross-reference anywhere in the docs tree or the README points at nothing |
+| `docs-links` | ubuntu | `lychee --offline --include-fragments` over `assets/**/*.md`, `docs/**/*.md`, `skills/**/*.md`, `commands/**/*.md`, and the root `README.md` — recursive, so nested docs (`assets/tax/README.md`, `assets/persona/*.md`, `docs/decisions/*.md`, `skills/review/*.md`, …) are covered alongside the top-level files, and the README's links to the docs/ set are checked too | A relative link or `#fragment` cross-reference anywhere in the docs tree, the agent-facing `skills/`/`commands/` set, or the README points at nothing |
 
 ### Design decisions
 
@@ -105,9 +105,12 @@ severity flag or ignoring a rule globally.
 (`--offline`), so the job is hermetic and can't flake on someone else's
 server. What it does enforce is exactly what human review kept catching by
 hand: relative links and internal `#fragment` references across the docs set
-must resolve. The globs are recursive (`assets/**/*.md`, `docs/**/*.md` —
-issue #191): `**` matches zero or more path components, so top-level files
-stay covered while nested markdown gates too.
+must resolve. The globs are recursive (`assets/**/*.md`, `docs/**/*.md`,
+`skills/**/*.md`, `commands/**/*.md` — issues #191 and #260): `**` matches zero
+or more path components, so top-level files stay covered while nested markdown
+gates too. `skills/` and `commands/` are in scope because those files are
+agent-facing: an agent following a skill is *instructed* to open the paths it
+names, so a dangling link there is a live defect, not a reading annoyance.
 
 **Third-party actions are pinned to a full commit SHA.** First-party
 `actions/*` actions ride exact major tags, but a major tag is mutable — the
@@ -141,7 +144,7 @@ PATH="/bin:$PATH" bash scripts/test.sh tests/persona-loader.test.sh tests/secret
 npm --prefix assets ci && npm --prefix assets test
 
 # docs-links (brew install lychee)
-lychee --offline --include-fragments --no-progress 'assets/**/*.md' 'docs/**/*.md' 'README.md'
+lychee --offline --include-fragments --no-progress 'assets/**/*.md' 'docs/**/*.md' 'README.md' 'skills/**/*.md' 'commands/**/*.md'
 ```
 
 ## Cutting a release
