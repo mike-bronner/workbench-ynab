@@ -84,6 +84,15 @@ Two layers keep credentials out of version control:
    the ~1.46 MB vendored artifact (the repo's highest-risk supply-chain surface)
    is scanned for the unambiguous secret shapes.
 
+   That exclusion is also **scoped to the repo-root `vendor/`, and only it**. The
+   hex rule is handed an explicit list of top-level entries with `./vendor`
+   removed, rather than a `grep --exclude-dir=vendor` glob — `--exclude-dir`
+   matches a directory's *basename at every depth*, so it also skipped any nested
+   directory that merely happened to be named `vendor`, and a hex secret under
+   `src/vendor/` was invisible to the rule (issue #276). A nested `vendor/` is now
+   scanned by all three rules; only the one bundle directory the carve-out exists
+   for is skipped, and only by the hex rule.
+
    **Every file is scanned as text, in the C locale.** The scan deliberately does
    *not* skip "binary" files: a single NUL byte anywhere in a file is enough for
    `grep` to classify the whole file as binary and skip it, which would hide a

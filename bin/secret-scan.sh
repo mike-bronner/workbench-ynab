@@ -18,11 +18,15 @@
 #   3. PEM / private-key headers — any "-----BEGIN ... PRIVATE KEY-----" block.
 #
 # WHAT IT EXCLUDES, and why — the exclusion is scoped PER RULE, not blanket:
-#   * The hex rule (rule 1) — and ONLY the hex rule — skips vendor/. The bundle
-#     marker vendor/ynab-mcp/vendored.json legitimately carries 64-char-hex
-#     SHA-256 digests that are byte-for-byte indistinguishable from a YNAB PAT,
-#     so scanning vendor/ with the hex rule would only flag the repo's own
-#     digests. The cleartext-token rule (2) and PEM rule (3) DO scan vendor/:
+#   * The hex rule (rule 1) — and ONLY the hex rule — skips the REPO-ROOT vendor/.
+#     The bundle marker vendor/ynab-mcp/vendored.json legitimately carries
+#     64-char-hex SHA-256 digests that are byte-for-byte indistinguishable from a
+#     YNAB PAT, so scanning vendor/ with the hex rule would only flag the repo's
+#     own digests. The skip is anchored to that one root directory: a nested
+#     directory that merely happens to be NAMED vendor (src/vendor/, a/vendor/…)
+#     is still scanned by the hex rule (issue #276 — the old --exclude-dir=vendor
+#     matched the basename at every depth). The cleartext-token rule (2) and PEM
+#     rule (3) DO scan vendor/ at every depth:
 #     their shapes never legitimately appear there, so the ~1.46 MB bundle — the
 #     repo's highest-risk supply-chain surface — is covered for the unambiguous
 #     secret shapes, with no false positives.
@@ -115,9 +119,13 @@ check_stages() {
 
 # Common grep flags: recurse, show line numbers, extended regex, scan every file
 # as text, report ONLY the matched text, and prune the directories that are never
-# committed. vendor/ is NOT pruned here — it is excluded only for the hex rule
-# below (see the per-rule note above), so the cleartext-token and PEM rules still
-# reach into the bundle.
+# committed. vendor/ is NOT pruned here — the hex rule alone skips it, and it does
+# so through its scan-path list rather than a --exclude-dir glob (see
+# hex_scan_roots below), so the cleartext-token and PEM rules still reach into the
+# bundle. Note the asymmetry is deliberate: .git/ and node_modules/ SHOULD be
+# pruned wherever they appear, which is exactly what --exclude-dir's
+# match-the-basename-at-any-depth behaviour gives; the vendor/ carve-out wants the
+# opposite (one root directory only), which is why it cannot live on this list.
 #
 # --binary-files=text, and NO -I: a single NUL byte anywhere in a file makes grep
 # classify the WHOLE file as binary and skip it, so a credential in that file is
@@ -227,7 +235,13 @@ sanitize_hits() {
 
 # Run ONE scanning rule end to end and write its sanitized hits to stdout.
 # "$1" labels the rule in any diagnostic; the remaining arguments are appended to
-# GREP_BASE (the rule's pattern, plus any per-rule exclusion).
+# GREP_BASE — the rule's pattern, then the paths it scans.
+#
+# The scan paths are the CALLER's to choose rather than a hardcoded ".", and that
+# is what carries rule 1's vendor/ carve-out (issue #276): rules 2-3 pass "." to
+# sweep the whole tree, while rule 1 passes an explicit top-level root list with
+# the repo-root vendor/ removed. See hex_scan_roots below for why the prune has
+# to happen here, in the path list, rather than in a --exclude-dir glob.
 #
 # Same `if`-wrapped PIPESTATUS capture as sanitize_hits, for the same reason: the
 # collapsed pipefail scalar cannot tell grep's routine "no match" apart from a
@@ -237,7 +251,7 @@ scan_rule() {
   shift
   local -a st
   : >"$SCAN_ERR"
-  if LC_ALL=C grep "${GREP_BASE[@]}" "$@" . 2>"$SCAN_ERR" | sanitize_hits; then
+  if LC_ALL=C grep "${GREP_BASE[@]}" "$@" 2>"$SCAN_ERR" | sanitize_hits; then
     st=("${PIPESTATUS[@]}")
   else
     st=("${PIPESTATUS[@]}")
@@ -293,10 +307,59 @@ hits=""
 # all three of its stages; the stage that decides whether a credential is found
 # at all now gets the same treatment.
 
-# Rule 1 (hex) excludes vendor/: vendored.json carries legitimate 64-char-hex
-# SHA-256 digests indistinguishable from a YNAB PAT. The exclusion is scoped to
-# THIS rule alone.
+# Rule 1 (hex) excludes the REPO-ROOT vendor/: vendored.json carries legitimate
+# 64-char-hex SHA-256 digests indistinguishable from a YNAB PAT. The exclusion is
+# scoped to THIS rule alone, and — since issue #276 — to that ONE directory.
 #
+# THE MECHANISM, and why it is not --exclude-dir. grep matches --exclude-dir
+# against a directory's BASENAME at EVERY depth, so `--exclude-dir=vendor` pruned
+# any directory literally named vendor anywhere in the tree: a hex secret under
+# e.g. src/vendor/nested/ was invisible to rule 1, at any nesting depth. The
+# obvious patch does not work either, and is not portable — measured with
+# `--exclude-dir=./vendor`, BSD grep 2.6.0-FreeBSD prunes the root vendor/ (right
+# answer, by accident) while GNU grep 3.12 prunes NOTHING, which would put
+# vendored.json's legitimate digests straight back into the report.
+#
+# So the prune is anchored by CONSTRUCTION instead: rule 1 is handed an explicit
+# list of the repo's top-level entries with ./vendor removed. "vendor" is matched
+# once, as a root path, by shell string comparison — no glob semantics to differ
+# between greps — and every deeper directory of that name is scanned normally.
+#
+# .git/ and node_modules/ stay on GREP_BASE's --exclude-dir: those ARE meant to
+# be pruned at every depth, by every rule. Measured on both greps above:
+# --exclude-dir still applies to a directory named on the command line, so ./.git
+# arriving as its own root is skipped exactly as it was under a single "." root.
+#
+# Symlinked top-level entries are skipped, and that PRESERVES the old coverage
+# rather than narrowing it. `grep -r` follows a symlink NAMED ON THE COMMAND LINE
+# but never one it merely encounters while recursing, so under the previous "."
+# root a top-level symlink was never followed. Promoting it to its own root would
+# start following it (measured: GNU grep 3.12 reads through it into an out-of-tree
+# directory; BSD grep does not) — a divergence in both coverage and portability
+# that this repo never asked for. Skipping keeps rule 1 reading exactly the same
+# bytes as before, on both greps.
+hex_scan_roots=()
+shopt -s dotglob nullglob
+for entry in ./*; do
+  if [ "$entry" != ./vendor ] && [ ! -L "$entry" ]; then
+    hex_scan_roots+=("$entry")
+  fi
+done
+shopt -u dotglob nullglob
+
+# Fail closed on an empty root list — reachable, since a tree whose only real
+# top-level entry is vendor/ (everything else symlinked) produces one.
+#
+# Without this check the outcome depends on the bash running the guard, and
+# neither branch is acceptable: on 4.4+ the empty expansion leaves grep with no
+# path operand, so it reads STDIN — hanging on a terminal, or "passing" on an
+# empty pipe and printing the CLEAN message; on 3.2 the same expansion is an
+# unbound-variable error under `set -u`, which at least fails, but as a bare
+# exit 1 indistinguishable from "a secret was found". This file's whole premise
+# is that "the guard broke" is its own verdict, so say so explicitly: exit 2.
+[ "${#hex_scan_roots[@]}" -gt 0 ] \
+  || abort_scan 'rule 1 (64-hex PAT shape): no scannable top-level entries'
+
 # `|| exit $?` re-raises an abort out of the command substitution: abort_scan's
 # `exit` fires inside that subshell, not this one. Under the `set -e` at the top
 # of this file errexit already propagates it, so this is redundant TODAY — it is
@@ -306,7 +369,7 @@ hits=""
 # tests/secret-scan.test.sh go red — the abort block still reaches stderr from
 # inside the subshell, and the guard then prints the clean message and exits 0
 # anyway. Removing the re-raises alone, with `set -e` in place, reddens nothing.
-found="$(scan_rule 'rule 1 (64-hex PAT shape)' --exclude-dir=vendor -e "$PAT_HEX")" || exit $?
+found="$(scan_rule 'rule 1 (64-hex PAT shape)' -e "$PAT_HEX" "${hex_scan_roots[@]}")" || exit $?
 [ -n "$found" ] && hits="${hits}${found}"$'\n'
 
 # Rules 2 (cleartext token) and 3 (PEM) scan the WHOLE tree, vendor/ included —
@@ -314,7 +377,7 @@ found="$(scan_rule 'rule 1 (64-hex PAT shape)' --exclude-dir=vendor -e "$PAT_HEX
 # smuggled under vendor/ is caught. -e "$pat" is required: the PEM pattern starts
 # with '-', which grep would otherwise parse as an option flag.
 for pat in "$PAT_ENV" "$PAT_PEM"; do
-  found="$(scan_rule 'rules 2-3 (cleartext token / PEM header)' -e "$pat")" || exit $?
+  found="$(scan_rule 'rules 2-3 (cleartext token / PEM header)' -e "$pat" .)" || exit $?
   [ -n "$found" ] && hits="${hits}${found}"$'\n'
 done
 hits="$(assemble_hits "$hits")" || exit $?

@@ -126,6 +126,124 @@ run_case "64-hex digest under vendor/ is ignored"      0 "vendor/x.json"  "\"sha
 run_case "cleartext token under vendor/ IS caught"     1 "vendor/run.sh"  "${ENV_NAME}=${SYNTH_HEX}"
 run_case "PEM header under vendor/ IS caught"          1 "vendor/id_ec"   "${BEGIN_FRAG} EC ${KEY_FRAG}"
 
+# The hex carve-out is scoped to the REPO-ROOT vendor/, and only it (issue #276).
+# It used to be a `grep --exclude-dir=vendor`, which matches a directory's
+# BASENAME at EVERY depth — so a 64-hex secret under any nested directory that
+# merely happened to be named vendor was invisible to rule 1, at any depth. The
+# guard now hands rule 1 an explicit list of top-level entries with ./vendor
+# removed, which anchors the prune to that one root directory.
+#
+# These fixtures use SYNTH_HEX_ALT, not SYNTH_HEX. The value is a bare hex run
+# with nothing matching PAT_ENV or PAT_PEM around it, so an exit 1 here can only
+# have come from rule 1's own grep call — a hex rule broken back to the
+# basename-matching behaviour cannot ride on rules 2-3 to report a pass. Keeping
+# the value distinct from the one the cleartext/PEM cases carry also keeps the
+# two fixture sets from being confused for each other at a glance.
+HEX16_B='0ddba11feedfaced'                          # 16 more lowercase-hex chars
+SYNTH_HEX_ALT="${HEX16_B}${HEX16_B}${HEX16_B}${HEX16_B}"
+
+echo "Self-test: the hex rule's vendor/ carve-out is anchored to the repo root"
+# The regression the issue reports: invisible before the fix, caught after.
+# Reverting the guard to --exclude-dir=vendor turns both of these red.
+run_case "64-hex under a NESTED vendor/ IS caught"     1 "src/vendor/nested/leak.txt" "token: $SYNTH_HEX_ALT"
+run_case "64-hex under a shallower a/vendor/ IS caught" 1 "a/vendor/leak.txt"         "token: $SYNTH_HEX_ALT"
+# ...and the carve-out the exclusion actually exists for still holds. This is the
+# real bundle-marker path, so a fix that over-corrects into scanning the root
+# vendor/ (e.g. dropping the prune entirely) reddens here.
+run_case "64-hex digest under the repo-root vendor/ stays ignored" 0 \
+  "vendor/ynab-mcp/vendored.json" "\"bundle_sha256\": \"$SYNTH_HEX_ALT\""
+# Rules 2 and 3 never had a vendor exclusion and must not acquire one: a nested
+# vendor/ is scanned by every rule, exactly like any other directory.
+run_case "cleartext token under a NESTED vendor/ IS caught" 1 "src/vendor/run.sh" "${ENV_NAME}=${ENV_VALUE}"
+run_case "PEM header under a NESTED vendor/ IS caught"      1 "src/vendor/id_ec"  "${BEGIN_FRAG} EC ${KEY_FRAG}"
+
+# Rule 1 no longer scans a single "." root — it scans an explicit list of
+# top-level entries — so the ways that list can be built WRONG are now the
+# guard's blind spots, and each gets its own case.
+echo "Self-test: rule 1's explicit top-level root list covers the whole tree"
+# A dot-directory. The list is built from ./* , which skips dotted entries unless
+# `shopt -s dotglob` is set — dropping that one shopt would silently exempt
+# .github/, .claude-plugin/ and every other dotted top-level directory from the
+# hex rule while leaving all the cases above green. This is the only case that
+# reddens on it.
+run_case "64-hex under a DOTTED top-level dir is caught" 1 ".github/workflows/leak.yml" "token: $SYNTH_HEX_ALT"
+# A top-level FILE, which reaches grep as its own command-line operand rather
+# than through a directory walk. Every other hex case plants its fixture at least
+# one directory deep, so nothing else exercises that operand shape.
+run_case "64-hex in a top-level FILE is caught"          1 "leak.txt"                  "token: $SYNTH_HEX_ALT"
+# .git/ must stay pruned even though it now arrives as its own root: --exclude-dir
+# still applies to a directory named on the command line (measured on GNU grep
+# 3.12 and BSD grep 2.6.0-FreeBSD). Were that not so, every repo's own object
+# store would start tripping the hex rule.
+run_case "64-hex under .git/ is still ignored"           0 ".git/objects/leak"         "token: $SYNTH_HEX_ALT"
+
+# A top-level SYMLINK is skipped when the root list is built, and that PRESERVES
+# the pre-#276 coverage rather than narrowing it: `grep -r` follows a symlink
+# named on the command line but never one it meets while recursing, so under the
+# old single "." root a top-level symlink was never followed either. Without the
+# skip, promoting it to its own root makes the guard read out-of-tree content and
+# fail the build on a file that is not in the repo at all.
+#
+# DISCRIMINATES ON GNU GREP ONLY — state that plainly rather than overclaim.
+# Measured: GNU grep 3.12 follows the command-line symlink (so removing the skip
+# turns this red); BSD grep 2.6.0-FreeBSD does not follow it either way, so on the
+# bash-3.2/BSD lane this case passes with or without the skip. CI runs GNU grep,
+# which is where the mutation is caught.
+echo "Self-test: a top-level symlink is not followed (unchanged from before #276)"
+reset_sandbox
+OUTSIDE="$(mktemp -d)"
+printf 'token: %s\n' "$SYNTH_HEX_ALT" > "$OUTSIDE/outside.txt"
+ln -s "$OUTSIDE" "$SANDBOX/link"
+symlink_rc=0
+( cd "$SANDBOX" && bash bin/secret-scan.sh ) >/dev/null 2>&1 || symlink_rc=$?
+rm -rf "$OUTSIDE"
+if [ "$symlink_rc" -eq 0 ]; then
+  echo "  ✓ out-of-tree content behind a top-level symlink is not scanned (exit 0)"
+  pass=$((pass + 1))
+else
+  echo "  ✖ expected exit 0 (symlink not followed), got $symlink_rc"
+  fail=$((fail + 1))
+fi
+
+# Skipping symlinks makes an EMPTY root list reachable, so it is a real branch
+# rather than defensive dead code: a tree whose only real top-level entry is
+# vendor/ — with the guard's own bin/ symlinked in from outside — produces one.
+# The guard must abort on that list, taking the same exit-2 "the scan did not
+# complete" path a broken tool takes.
+#
+# stdin is redirected from /dev/null deliberately: it is what makes the mutation
+# observable instead of hanging this suite while grep waits on a terminal.
+#
+# Be precise about what removing the abort does, because it is bash-version
+# dependent and only half of it is measurable on this lane:
+#   * bash 3.2 (this lane): `"${hex_scan_roots[@]}"` on an empty array is an
+#     unbound-variable error under `set -u`, so the guard dies with exit 1 —
+#     measured, on GNU grep 3.12 and BSD grep 2.6.0-FreeBSD alike.
+#   * bash 4.4+ (what CI runs): that expansion is legal and expands to nothing,
+#     so grep is invoked with no path operand and reads stdin instead — /dev/null
+#     here, an empty pipe or a hung terminal in the wild. It matches nothing and
+#     the guard reports its CLEAN message.
+# Neither outcome is exit 2, so this case reddens either way — but only the
+# explicit abort makes the guard fail closed HONESTLY on both, rather than
+# leaning on a bash-3.2-only `set -u` accident that CI's bash does not reproduce.
+echo "Self-test: an empty rule-1 root list aborts, never hangs or reports clean"
+EMPTY_TREE="$(mktemp -d)"
+EMPTY_BIN="$(mktemp -d)"
+cp "$GUARD" "$EMPTY_BIN/secret-scan.sh"
+mkdir -p "$EMPTY_TREE/vendor"
+ln -s "$EMPTY_BIN" "$EMPTY_TREE/bin"
+empty_rc=0
+( cd "$EMPTY_TREE" && bash bin/secret-scan.sh ) > "$REPORT" 2>&1 </dev/null || empty_rc=$?
+rm -rf "$EMPTY_TREE" "$EMPTY_BIN"
+if [ "$empty_rc" -eq 2 ] && grep -q 'no scannable top-level entries' "$REPORT"; then
+  echo "  ✓ empty root list aborts (exit 2) carrying its own diagnostic"
+  pass=$((pass + 1))
+else
+  echo "  ✖ expected exit 2 and a 'no scannable top-level entries' abort —" \
+       "got exit $empty_rc"
+  fail=$((fail + 1))
+fi
+
 # A single NUL byte anywhere in a file used to make grep classify the WHOLE file
 # as binary and skip it, hiding any credential in it from EVERY rule below — and
 # this guard is the repo's only content-scanning CI gate (issue #255). The guard
@@ -141,8 +259,9 @@ run_case "PEM header under vendor/ IS caught"          1 "vendor/id_ec"   "${BEG
 #
 # The cleartext fixture's value is deliberately NOT the 64-hex shape its
 # neighbours use, for the same reason the invalid-UTF-8 section's cleartext case
-# avoids it. Rules 2 and 3 run on their OWN grep call site (the loop at
-# bin/secret-scan.sh:181), separate from rule 1's (:173) — so a hex-shaped value
+# avoids it. Rules 2 and 3 run on their OWN grep call site (the `for pat in
+# "$PAT_ENV" "$PAT_PEM"` loop in bin/secret-scan.sh), separate from rule 1's
+# (the scan_rule call just above that loop) — so a hex-shaped value
 # makes the file trip rule 1 as well, and the case reports exit 1 whether or not
 # the loop's own NUL-handling works. Measured: with the hex value, appending
 # --binary-files=without-match to the LOOP's grep alone left this case green
