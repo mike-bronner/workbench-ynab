@@ -395,8 +395,8 @@ the op's live state and the design compares it to **both** the `before` and the
 resume extends the comparison to `after`). The read tools, by op type, are the
 same logical read verbs the drift check already uses — the concrete namespaced
 names live in the single-source-of-truth capability map
-([`docs/mcp-capability-map.md`](./mcp-capability-map.md)), never inlined here
-(with the two gaps noted under the table):
+([`docs/mcp-capability-map.md`](./mcp-capability-map.md)), never inlined here.
+Every verb below resolves there:
 
 | Op type | Logical read verb | Field compared | "Already applied" when live == |
 |---|---|---|---|
@@ -430,18 +430,18 @@ ids even though the e2e harness exercises only the per-id form.
 > does carry per-category `budgeted` and would therefore *work* — but this table
 > names the verb the code actually resolves, not one that would be sufficient.
 
-> **Capability-map gap.** **Two** verbs in the table above — `get_account` and
-> `get_category` — are currently **missing** from both tool-name sources of truth
-> ([`docs/mcp-capability-map.md`](./mcp-capability-map.md) and
-> `skills/protocol/ynab-tools.md`), even though both are real vendored tools used
+> **Capability-map gap — closed (#247).** Two verbs in the table above —
+> `get_account` and `get_category` — were once missing from both tool-name
+> sources of truth ([`docs/mcp-capability-map.md`](./mcp-capability-map.md) and
+> `skills/protocol/ynab-tools.md`) even though both are real vendored tools used
 > by tested drift paths (`get_account` by reconcile, `get_category` by allocate).
-> Until that is fixed they are the two verbs in this table the map cannot resolve
-> to a namespaced name. Cite them from the e2e wiring and
-> `skills/reconcile-write-path.md` in the meantime. Tracked as **#247**, which
-> covers the class rather than either verb individually — resolving it belongs
-> there, not here. The gap is not cosmetic: a reader who cannot find a verb in
-> the map tends to substitute a wrong-but-map-conformant one, which is exactly
-> how `get_month` landed in this table in the first place.
+> Both are now in the capability table, so **every verb in this table resolves to
+> a namespaced name in the map**. The gap was never cosmetic: a reader who cannot
+> find a verb in the map tends to substitute a wrong-but-map-conformant one,
+> which is exactly how `get_month` landed in this table in the first place. It
+> cannot silently reopen — `tests/unit/tool-name-ssot-coverage.test.sh` fails
+> when a registered tool is absent from both source-of-truth files, and pins
+> these two verbs by name.
 
 ### The unified resume decision
 

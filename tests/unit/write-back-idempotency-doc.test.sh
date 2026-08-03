@@ -8,10 +8,13 @@
 # the two drift apart. Three drift classes are covered:
 #
 #   1. Live-read tool names. The tie-breaker table names one read verb per op
-#      type. The wrong verb has now been written into this table twice (once
+#      type. The wrong verb has been written into this table twice (once
 #      `list_accounts` for reconcile, once `get_month` for allocate) because the
-#      capability map is missing `get_account`/`get_category` (issue #247), so an
-#      author deferring to the map lands on a wrong-but-map-conformant name.
+#      capability map was missing `get_account`/`get_category` (issue #247), so an
+#      author deferring to the map landed on a wrong-but-map-conformant name.
+#      #247 added both verbs to the map and to the SSoT; the callout check below
+#      now reads those two files to confirm the gap is really closed, rather than
+#      taking the document's word for it.
 #      EVERY row is checked against the wiring
 #      `assets/test/e2e-write-back.test.js` actually drives through the real
 #      executor, and the row count is itself asserted — a row added to the table
@@ -208,20 +211,46 @@ else
   ok "\`get_month\` absent from the table, warned off in prose, unwired in e2e"
 fi
 
-# The two verbs the capability map cannot resolve must be flagged as such IN THE
-# GAP CALLOUT, with the tracking issue cited — otherwise a reader silently
-# substitutes a map-conformant wrong answer, which is how this defect recurred.
-# Scoped to the callout: both verbs and `#247` appear elsewhere in the document,
-# so a whole-document check would survive the citation being deleted from here.
-cap_gap="$(awk '/^> \*\*Capability-map gap\.\*\*/{f=1} f&&!/^>/{exit} f' "$REPO_ROOT/$DOC")"
+# The callout that used to flag `get_account` / `get_category` as unresolvable
+# now claims the opposite: #247 closed the gap and every verb in the table
+# resolves in the map. That is a claim about OTHER FILES, so read those files —
+# a callout asserting its own correctness proves nothing.
+#
+# Scoped to the callout: both verbs and `#247` appear elsewhere in this document,
+# so a whole-document check would survive the claim being deleted from here.
+#
+# The SSoT side is scoped to the tool-name LIST BLOCKS, not the whole file. Both
+# files discuss both verbs in prose right beside their lists, so an unscoped grep
+# would stay green if the name were dropped from the list itself — the exact
+# regression this pins. `MAP_TABLE` is the capability table (rows starting `| <n> |`);
+# `SSOT_LIST` is every prefixed name in the read/write fenced blocks of the SSoT.
+# The namespaced names are composed at runtime from the bare prefix + suffix, so
+# this file never holds a full concrete name and stays clean under
+# bin/check-tool-name-sources.sh.
+MAP="docs/mcp-capability-map.md"
+SSOT="skills/protocol/ynab-tools.md"
+NS_PREFIX="mcp__plugin_workbench-ynab_ynab__"
+
+map_table="$(awk '/^\| # \| Logical operation \|/{f=1} f&&/^$/{exit} f' "$REPO_ROOT/$MAP")"
+ssot_list="$(grep "^$NS_PREFIX" "$REPO_ROOT/$SSOT" || true)"
+
+cap_gap="$(awk '/^> \*\*Capability-map gap/{f=1} f&&!/^>/{exit} f' "$REPO_ROOT/$DOC")"
+gap_verbs_resolved=1
+for verb in get_account get_category; do
+  in_text "$map_table" "$NS_PREFIX""ynab_$verb" || gap_verbs_resolved=0
+  in_text "$ssot_list" "$NS_PREFIX""ynab_$verb" || gap_verbs_resolved=0
+done
+
 if [ -z "$cap_gap" ]; then
   no "the capability-map-gap callout is locatable in $DOC"
 elif ! in_text "$cap_gap" "#247"; then
   no "the capability-map-gap callout cites issue #247"
 elif ! in_text "$cap_gap" "get_account" || ! in_text "$cap_gap" "get_category"; then
-  no "the capability-map-gap callout names both unresolvable verbs"
+  no "the capability-map-gap callout names both once-unresolvable verbs"
+elif [ "$gap_verbs_resolved" -ne 1 ]; then
+  no "the callout claims the gap is closed, but \`get_account\`/\`get_category\` are missing from $MAP or $SSOT"
 else
-  ok "capability-map-gap callout names \`get_account\` + \`get_category\`, cites #247"
+  ok "capability-map-gap closed — \`get_account\` + \`get_category\` are in BOTH $MAP and $SSOT, callout cites #247"
 fi
 
 # --- 2. the reconcile fail-closed premise, read from source ------------------
