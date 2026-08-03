@@ -90,13 +90,24 @@ claude plugin install workbench-ynab@claude-workbench
 
 ### Local checkout (development)
 
-Point Claude Code at your clone:
+Link your clone into the skills directory, which Claude Code loads local plugin
+checkouts from:
 
 ```
 git clone https://github.com/mike-bronner/workbench-ynab
-cd workbench-ynab
-claude plugin install /absolute/path/to/workbench-ynab
+mkdir -p ~/.claude/skills
+ln -s "$PWD/workbench-ynab" ~/.claude/skills/workbench-ynab
 ```
+
+The link name must match the plugin name in
+[`.claude-plugin/plugin.json`](.claude-plugin/plugin.json). Claude Code loads the
+checkout as `workbench-ynab@skills-dir`; confirm it with `claude plugin list`.
+
+`claude plugin install` takes a plugin *name* resolved against a registered
+marketplace, not a filesystem path, and `claude plugin marketplace add` takes a
+marketplace — this repo ships a plugin manifest, not a marketplace manifest.
+Neither command accepts this checkout. See
+[docs/fresh-install-test.md](docs/fresh-install-test.md) for the verification.
 
 After installing either way, **restart Claude Code** so the plugin's agents, skills, commands, and the vendored MCP server are picked up.
 

@@ -123,9 +123,17 @@ claude plugin install workbench-ynab@claude-workbench
 
 ```
 git clone https://github.com/mike-bronner/workbench-ynab
-cd workbench-ynab
-claude plugin install /absolute/path/to/workbench-ynab
+mkdir -p ~/.claude/skills
+ln -s "$PWD/workbench-ynab" ~/.claude/skills/workbench-ynab
 ```
+
+The link name must match the plugin name in
+[`../.claude-plugin/plugin.json`](../.claude-plugin/plugin.json). Claude Code
+loads the checkout as `workbench-ynab@skills-dir`; confirm it with
+`claude plugin list`.
+
+Neither `claude plugin install` nor `claude plugin marketplace add` accepts this
+checkout — see [Gaps found](#gaps-found) for the verification.
 
 Either path vendors the frozen bundle in place — **no `node_modules` install and
 no `npx`-on-demand run at any point**. Confirm the vendored bundle arrived intact:
@@ -330,7 +338,7 @@ YNAB token; they cannot run headlessly and are exercised in
 
 | Step | Check | Where it runs |
 |---|---|---|
-| 2 | `claude plugin install` (both paths) + restart | verification-checklist §1 |
+| 2 | `claude plugin install` (marketplace path) + restart | verification-checklist §1 |
 | 4 | Interactive `setup` — real token seeded to Keychain | verification-checklist §1–2 |
 | 6b | Full-tree token-leak sweep (needs the real token present) | verification-checklist §2 & §8 |
 | 8 | Live `ynab_list_budgets` returns real budget names | verification-checklist §3 |
@@ -351,6 +359,29 @@ human release gate before `1.0.0`.
   Low severity; filed as a follow-up
   ([#230](https://github.com/mike-bronner/workbench-ynab/issues/230)) and since
   fixed — Step 1a now hard-stops on all four prerequisites.
+- **The documented local-checkout install path did not work** *(fixed)*. Step 2
+  told developers to run `claude plugin install /absolute/path/to/workbench-ynab`.
+  That is not a valid form of the command. Filed as
+  ([#269](https://github.com/mike-bronner/workbench-ynab/issues/269)) and since
+  fixed — Step 2 now links the checkout into `~/.claude/skills/`.
+
+  Verified empirically against Claude Code `2.1.220` on 2026-08-03, each command
+  run against a throwaway `CLAUDE_CONFIG_DIR` so the real profile stayed clean:
+
+  | Command | Outcome |
+  |---|---|
+  | `claude plugin install <checkout-path>` | ✘ `Failed to install plugin "<path>": Plugin "<path>" not found in any configured marketplace` |
+  | `claude plugin marketplace add <checkout-path>` | ✘ `Failed to add marketplace: Marketplace file not found at <path>/.claude-plugin/marketplace.json` |
+  | `ln -s <checkout-path> $CLAUDE_CONFIG_DIR/skills/workbench-ynab` | ✅ `claude plugin list` reports `workbench-ynab@skills-dir` … `Status: ✔ loaded`; `claude plugin details` inventories all 16 skills, 1 agent, and 2 hooks |
+
+  Both failures have the same root cause. `claude plugin install` takes a plugin
+  *name* (`<name>` or `<name>@<marketplace>`) resolved against registered
+  marketplaces, and it has no bare-path branch. `claude plugin marketplace add`
+  does take a path, but it wants a *marketplace* — this repo ships
+  `.claude-plugin/plugin.json`, not `.claude-plugin/marketplace.json`, so the
+  two-step `marketplace add` → `install <name>@<marketplace>` sequence fails at
+  the first step. Copying the checkout into the skills directory instead of
+  symlinking it works the same way.
 - No other gaps surfaced in the sandbox-executed steps: the bundle boots offline,
   the config path is correct, the token stays Keychain-only, the pre-approval
   glob is namespaced, and first-connection latency is negligible.
