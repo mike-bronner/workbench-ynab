@@ -241,8 +241,18 @@ test('(AC4) reconcile_account with no before baseline fails closed — skipped-s
   const apply = spy();
   // Live state is wide open — every field differs from the fixture's snapshot. With
   // no baseline, `isStale`'s subset comparison has zero keys to walk and reads
-  // not-stale, so a fail-OPEN handler would reconcile the account against state the
-  // human never saw. Fail-closed: skip, never dispatch.
+  // not-stale, so the guard is the only thing producing the stale verdict here.
+  //
+  // What this case does and does not prove. Revert the guard and this test still
+  // reddens, but via `blocked` / `balance_mismatch`, NOT via a dispatch to
+  // `applyOp`: this fixture's live `cleared_balance` (999000) does not equal the
+  // op's asserted `after.reconciled_balance` (1200000), so `processReconcileAccount`'s
+  // balance guard returns first and `applyOp` is never reached. Only the `status`
+  // and `reason` assertions below discriminate the mutation; `apply.calls.length`
+  // stays 0 on both the correct and the buggy path, so it is a contract assertion
+  // here, not mutation evidence. The `an empty object` row in the table below
+  // covers the same `{}` shape against a MATCHING live fixture, which is where a
+  // fail-open `{}` really does reach `applyOp` and move money.
   const res = await processReconcileOp(op, {
     activeBudgetId: BUDGET,
     dryRun: false,
@@ -255,14 +265,21 @@ test('(AC4) reconcile_account with no before baseline fails closed — skipped-s
   assert.equal(apply.calls.length, 0); // never reconciles an account with no baseline to compare
 });
 
-// Every remaining `before` shape that carries no comparable baseline (`{}` is
-// covered above). Exactly ONE of this table's 7 rows discriminates the new
-// baseline guard: `a populated non-plain object`. Reverting the guard to the bare
-// `isStale(op.before, live)` reddens that row plus the `{}` case above the table,
-// and nothing else. The other 6 rows here pin the branch's end-to-end contract,
-// which `isStale`'s own non-object rejection already satisfies; they are AC
-// coverage and regression cover, not proof of the guard. Do not read them as
-// mutation-discriminating.
+// Every `before` shape that carries no comparable baseline. Unlike the standalone
+// case above, these rows run against a live fixture that MATCHES the op's asserted
+// balance, so the balance guard cannot pre-empt the verdict and a fail-open branch
+// really does reach `applyOp`.
+//
+// Exactly TWO of this table's 8 rows discriminate the new baseline guard:
+// `an empty object` and `a populated non-plain object`. Reverting the guard to the
+// bare `isStale(op.before, live)` reddens those two (both with `applied` — the op
+// dispatches and moves money) plus the `{}` case above the table (which reddens
+// with `blocked`, for the different reason documented there), and nothing else.
+//
+// The other 6 rows pin the branch's end-to-end contract, which `isStale`'s own
+// null/non-object/array rejection (`assets/apply-executor.js`) already satisfies:
+// they stay green with or without the guard. They are AC coverage and regression
+// cover, not proof of the guard. Do not read them as mutation-discriminating.
 for (const [label, before] of [
   ['absent', undefined],
   ['null', null],
@@ -270,6 +287,7 @@ for (const [label, before] of [
   ['a populated array', ['cleared_balance']],
   ['a scalar string', 'cleared_balance'],
   ['a number', 1200000],
+  ['an empty object', {}],
   ['a populated non-plain object', Object.assign(new Date(), { cleared_balance: 1200000 })],
 ]) {
   test(`(AC4) reconcile_account fails closed when before is ${label}`, async () => {
