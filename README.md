@@ -119,24 +119,9 @@ Get a YNAB Personal Access Token from [YNAB → Account Settings → Developer S
 
 ## What it does
 
-Each review reads your budget (read-only) and produces a tax-aware report organized into **twelve analysis sections**:
+Each review reads your budget (read-only) and produces a tax-aware report organized into **twelve analysis sections**: transaction hygiene (tax-aware classification, duplicate detection, uncategorized, stale uncleared), spending and budget health (cost-cutting, budget health, unusual/large, reconciliation status), then a six-sub-score financial health score, a forecast, a prioritized action list, and a year-to-date tax summary.
 
-| # | Section | Surfaces |
-|---|---|---|
-| 1 | **Transaction Classification (tax-aware)** | Every transaction mapped to a category and a Schedule C/A/SE/1 tax line. |
-| 2 | **Duplicate Detection** | Likely double-entered transactions (transfer legs excluded). |
-| 3 | **Cost-Cutting** | Recurring/subscription spend where a cut is plausible, with the saving quantified. |
-| 4 | **Uncategorized** | Transactions with no category, including carryover from before the window. |
-| 5 | **Stale Uncleared** | Uncleared transactions older than the staleness window. |
-| 6 | **Budget Health** | Overspent categories, funding gaps, Ready-to-Assign, goal progress. |
-| 7 | **Unusual / Large** | Outliers for their category or payee. |
-| 8 | **Reconciliation Status** | Cleared-vs-reconciled drift per account. |
-| 9 | **Financial Health Score** | Six auditable 1–10 sub-scores rolled into one overall score. |
-| 10 | **Forecast** | Projected period-end balances and near-term cash flow. |
-| 11 | **Recommended Actions** | The prioritized action list, highest-impact first. |
-| 12 | **Tax Summary (YTD)** | Schedule C P&L, itemized-vs-standard, medical AGI threshold, SE tax, quarterly estimates. |
-
-The tax-aware sections are driven entirely by a **data-driven, shareable tax profile** — never hard-coded owner detail. For the full methodology, see [`docs/methodology.md`](docs/methodology.md); for the tax model and profile schema, see [`docs/tax-mapping.md`](docs/tax-mapping.md) and [`assets/tax/README.md`](assets/tax/README.md).
+The tax-aware sections are driven entirely by a **data-driven, shareable tax profile** — never hard-coded owner detail. The section-by-section table — what each analysis surfaces, which tier runs it, and how it diverges from the prototype — is [`docs/methodology.md`](docs/methodology.md); for the tax model and profile schema, see [`docs/tax-mapping.md`](docs/tax-mapping.md) and [`assets/tax/README.md`](assets/tax/README.md).
 
 ## The read / propose / approve loop
 
