@@ -317,20 +317,26 @@ echo "AC (#275): a record larger than a pipe buffer survives whole:"
 export YNAB_AUDIT_DIR="$SANDBOX/bigrec"
 export YNAB_AUDIT_MONTH="2026-06"
 export YNAB_AUDIT_TIMESTAMP="2026-06-20T10:03:00Z"
-# 200 000 bytes — far past a pipe buffer (64 KB on Linux, 16 KB on macOS) and past
+# 100 000 bytes — past a pipe buffer (64 KB on Linux, 16 KB on macOS) and far past
 # dd's 512-byte default block. What this pins is that the shim consumes its STDIN
 # to EOF and writes ALL of it: a shim that handled only one buffer's worth (a bare
 # `os.read(0, N)`, or `dd` with its default `bs`) would truncate the record here.
 # It does NOT by itself rule out a correct multi-write loop — the concurrency test
 # below is what pins the SINGLE-write property.
-BIG_VALUE="$(head -c 200000 /dev/zero | tr '\0' 'A')"
+#
+# Sized under 128 KB deliberately. Linux caps a SINGLE argv entry at
+# MAX_ARG_STRLEN (32 pages = 131 072 bytes), and _audit_append takes the operation
+# JSON as one argument, so a larger fixture fails in the writer's own `jq` build —
+# at the argv boundary, before the shim is ever reached. macOS has no per-argument
+# cap, so a 200 KB fixture passed locally and failed on the Linux CI lane.
+BIG_VALUE="$(head -c 100000 /dev/zero | tr '\0' 'A')"
 BIG_OP="$(jq -cn --arg s "$BIG_VALUE" '{id:"op-big-1",type:"categorize",transaction_id:"txn-big",before:{category_name:null},after:{category_name:$s}}')"
 _audit_append "$BIG_OP" "$CATEGORIZE_RES" false; rc=$?
 BIG_FILE="$YNAB_AUDIT_DIR/audit-2026-06.jsonl"
-assert_eq    "append of a 200 KB record succeeds"        "0" "$rc"
-assert_eq    "the 200 KB record is exactly one line"     "1" "$(wc -l < "$BIG_FILE" | tr -d ' ')"
-assert_empty "the 200 KB record ends in a newline"       "$(tail -c1 "$BIG_FILE")"
-assert_eq    "the record round-trips byte-exact (no truncation)" "200000" \
+assert_eq    "append of a 100 KB record succeeds"        "0" "$rc"
+assert_eq    "the 100 KB record is exactly one line"     "1" "$(wc -l < "$BIG_FILE" | tr -d ' ')"
+assert_empty "the 100 KB record ends in a newline"       "$(tail -c1 "$BIG_FILE")"
+assert_eq    "the record round-trips byte-exact (no truncation)" "100000" \
   "$(jq -r '.after.category_name | length' < "$BIG_FILE")"
 
 echo "AC (#275): concurrent appends never interleave — one write(2) per record:"
