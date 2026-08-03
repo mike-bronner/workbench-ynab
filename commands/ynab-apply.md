@@ -183,6 +183,16 @@ exit 0
 
 Otherwise continue with the to-apply set only.
 
+> **This filter is audit-only, and the GAP-11 design supersedes it.** It is
+> correct for the case it was written for — a clean prefix of applied ops — but it
+> trusts `result_status` as the sole verdict, so it cannot see the two dangerous
+> interleavings: an `applied` record the ledger contradicts (skipped here, when it
+> should be flagged), and a mutation that landed in YNAB with no record (re-dispatched
+> here, when it should be detected and the trail healed). `docs/write-back-idempotency.md`
+> designs the replacement: **live YNAB state as the authoritative tie-breaker**, with
+> the audit log as corroborating evidence that tells resume where to *look* rather
+> than what to *do*. Step 1b stays as-is until that resume implementation lands.
+
 ## Step 2 — Group the operations into typed batches
 
 Group the to-apply operations into coherent batches **by operation type** —

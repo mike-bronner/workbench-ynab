@@ -100,7 +100,10 @@ proposal to any write ([`assets/changeset-contract.md`](../assets/changeset-cont
    scheduled task is read-only or dry-run-only.
 5. **Audit** — every apply (dry-run included) is appended to the audit log for
    a durable, replayable record ([`docs/audit-log.md`](./audit-log.md)), which
-   also makes re-runs idempotent: already-applied operations are skipped.
+   also makes re-runs idempotent: already-applied operations are skipped. How a
+   crashed, partially-applied batch resumes without re-applying — the idempotency
+   key, the recovery procedures, and live-state verification as the tie-breaker —
+   is designed in [`docs/write-back-idempotency.md`](./write-back-idempotency.md).
 
 **Destructive operations get a second gate.** A `delete_duplicate` is always
 tagged `risk: "destructive"` and requires its own stronger confirmation beyond
