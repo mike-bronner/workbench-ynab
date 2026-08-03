@@ -109,12 +109,15 @@ require_nonempty() {
   [ -n "$1" ] || fail "$2 came back empty — the check below would assert nothing"
 }
 
-# The files the acceptance criteria and the issues behind them name explicitly.
+# The files whose lane membership is itself an acceptance criterion of the issue
+# that put them there (#231 for the original six; #270 for the scanning-grep pin,
+# whose behavioural cases only discriminate on the macOS runner's BSD grep).
 # Pinned BY NAME as well as by set-equality below: set-equality alone is
 # satisfied by dropping a file from the marker AND the lane at the same time,
 # which is exactly the regression this guard exists to stop.
 REQUIRED_MEMBERS='tests/persona-loader.test.sh
 tests/secret-scan.test.sh
+tests/unit/grep-locale-pin.test.sh
 tests/unit/html-escape.test.sh
 tests/unit/report-writer.test.sh
 tests/unit/watchdog.test.sh
