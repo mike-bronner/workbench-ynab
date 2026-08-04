@@ -45,7 +45,10 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GUARD="$SELF_DIR/../scripts/check-readonly.sh"
 INVENTORY="$SELF_DIR/../assets/write-safety-guardrail.js"   # the authoritative mutating-tool inventory
 
-PREFIX='mcp__plugin_workbench-ynab_ynab__'            # the callable namespace prefix
+# shellcheck source=/dev/null
+source "$SELF_DIR/lib/mutating-inventory.sh"          # mutating_inventory_verbs + the bare prefix
+
+PREFIX="$YNAB_TOOL_PREFIX"                            # the callable namespace prefix
 WRITE_CALL="${PREFIX}ynab_update_transaction"         # a callable write tool (assembled)
 READ_CALL="${PREFIX}ynab_list_transactions"           # a callable READ tool (allowed)
 GLOB="ynab_update_*"                                  # a deny-prose family glob (not callable)
@@ -76,32 +79,25 @@ extract_guard_verbs() {
   ' "$1" | sort -u
 }
 
-# extract_inventory_verbs <guardrail-js> — ALLOWED_TOOLS ∪ DENIED_TOOLS with the
-# namespace prefix stripped, one bare verb per line, sorted. Scoped to those two
-# array literals so an unrelated tool name elsewhere in the file (a JSDoc example,
-# say) can never masquerade as inventory. Non-zero if the file is unreadable.
-extract_inventory_verbs() {
-  [ -f "$1" ] || return 1
-  awk -F"'" -v pre="$PREFIX" '
-    /^const (ALLOWED|DENIED)_TOOLS = Object\.freeze\(\[/ { in_block = 1; next }
-    in_block && /^]\);/                                  { in_block = 0; next }
-    in_block && NF >= 2 && index($2, pre) == 1           { print substr($2, length(pre) + 1) }
-  ' "$1" | sort -u
-}
+# The inventory side of the cross-check — ALLOWED_TOOLS ∪ DENIED_TOOLS, bare
+# verbs, sorted — comes from tests/lib/mutating-inventory.sh's
+# `mutating_inventory_verbs`, shared with the tests that pin the inventory's
+# other mirrors (#257) so this extractor is not itself duplicated per mirror.
 
 # cross_check <guard-file> <inventory-file>
 #   0 — the two lists agree exactly
 #   1 — they diverge (a verb in one and not the other, either direction)
 #   2 — an input was unreadable or parsed empty: FAIL CLOSED. The emptiness test
-#       below is what guarantees that; the extractors' [ -f ] early-out is only a
-#       quieter route to the same answer (it spares the run a stray awk stderr
-#       line). Without the emptiness test, a renamed or reformatted inventory
+#       below is what guarantees that for BOTH sides; the extractors' own
+#       early-outs are a quieter route to the same answer (they spare the run a
+#       stray awk stderr line). Without the emptiness test, a renamed or
+#       reformatted inventory
 #       would parse to "" on BOTH sides, compare equal, and report a green
 #       cross-check that had verified nothing.
 cross_check() {
   local guard_verbs inventory_verbs
   guard_verbs="$(extract_guard_verbs "$1")" || return 2
-  inventory_verbs="$(extract_inventory_verbs "$2")" || return 2
+  inventory_verbs="$(mutating_inventory_verbs "$2")" || return 2
   [ -n "$guard_verbs" ] && [ -n "$inventory_verbs" ] || return 2
   [ "$guard_verbs" = "$inventory_verbs" ]
 }
@@ -237,7 +233,7 @@ cross_check "$GUARD" "$INVENTORY" || cross_rc=$?
 assert_rc "guard WRITE_VERBS == inventory (ALLOWED_TOOLS ∪ DENIED_TOOLS)" 0 "$cross_rc"
 if [ "$cross_rc" -ne 0 ]; then
   echo "    divergence (< guard only, > inventory only):"
-  diff <(extract_guard_verbs "$GUARD") <(extract_inventory_verbs "$INVENTORY") \
+  diff <(extract_guard_verbs "$GUARD") <(mutating_inventory_verbs "$INVENTORY") \
     | sed 's/^/      /' || true
 fi
 
@@ -255,7 +251,7 @@ assert_rc "unparseable inventory fails closed (not a silent pass)" 2 "$rc"
 # WITHOUT touching the inventory. Before this cross-check existed the whole suite
 # still passed 15/15. The dropped verb is read from the inventory rather than
 # hardcoded, so this stays honest if the write surface ever changes.
-drop_verb="$(extract_inventory_verbs "$INVENTORY" | head -1)"
+drop_verb="$(mutating_inventory_verbs "$INVENTORY" | head -1)"
 if [ -z "$drop_verb" ]; then
   echo "  ✖ cannot run the drift regression — the inventory parsed to no verbs"
   fail=$((fail + 1))
@@ -271,10 +267,10 @@ rc=0; cross_check "$SCRATCH/guard-extra.sh" "$INVENTORY" || rc=$?
 assert_rc "an extra verb in WRITE_VERBS is caught as divergence" 1 "$rc"
 
 echo "Self-test: EVERY write verb in the inventory is individually caught"
-# The original gap: only WRITE_CALL (one hardcoded verb) was ever probed, so the
-# other nine could vanish from WRITE_VERBS undetected. Drive each verb through the
+# The original gap: only WRITE_CALL (one hardcoded verb) was ever probed, so
+# every other verb could vanish from WRITE_VERBS undetected. Drive each verb through the
 # guard in both forms — callable (must fail) and bare deny-prose (must pass).
-INVENTORY_VERBS="$(extract_inventory_verbs "$INVENTORY")"
+INVENTORY_VERBS="$(mutating_inventory_verbs "$INVENTORY")"
 verb_count=0
 [ -n "$INVENTORY_VERBS" ] && verb_count="$(printf '%s\n' "$INVENTORY_VERBS" | wc -l | tr -d ' ')"
 if [ "$verb_count" -eq 0 ]; then
