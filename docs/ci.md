@@ -155,7 +155,10 @@ From the Actions tab, run **Release** with two inputs:
   versions, already-tagged versions, and versions not strictly greater than
   the current `plugin.json` version are all rejected before anything is
   written; versions go forward only.
-- `description` — the one-line commit + release headline.
+- `description` — the one-line commit + release headline. It titles the commit,
+  the annotated tag, and the GitHub Release. It is **also** the release notes'
+  fallback body, used only when the changelog has no entry for this version —
+  see below.
 
 The workflow then, in order:
 
@@ -173,10 +176,46 @@ The workflow then, in order:
    pushes `main` **and** the tag in a single `git push --atomic` — both refs
    land or neither does, because the monotonicity guard makes a same-version
    re-run impossible and a half-pushed release would have no way back — and
-   creates the GitHub release;
+   creates the GitHub release, whose **"What changed" section is the
+   [`CHANGELOG.md`](../CHANGELOG.md) entry for this version** (see below);
 5. triggers `update-marketplace-sha.yml` explicitly via `gh workflow run` —
    releases created with `GITHUB_TOKEN` emit sterile events that do **not**
    auto-trigger `on: release` workflows (GitHub's anti-recursion rule).
+
+### Where the release notes come from
+
+The release notes' **What changed** section is the `CHANGELOG.md` entry for the
+version being released. [`scripts/changelog-extract.sh`](../scripts/changelog-extract.sh)
+does the extraction: it takes the version and the changelog path as plain CLI
+arguments and prints the entry on stdout, with no dependency on Actions env
+vars or secrets — so `bash scripts/changelog-extract.sh 0.1.1 CHANGELOG.md`
+reproduces exactly what a release would publish, and
+[`tests/unit/changelog-extract.test.sh`](../tests/unit/changelog-extract.test.sh)
+tests it outside any workflow.
+
+It selects the section whose `## [X.Y.Z]` heading matches the version exactly
+(one leading `v` is stripped first, so `0.1.1` and `v0.1.1` agree, and `0.1.1`
+never matches `## [0.1.10]`), and returns everything down to the next `## [`
+heading or end-of-file, whitespace-trimmed.
+
+The release step branches on the script's exit code, and there are **exactly
+three outcomes**:
+
+| Exit | Meaning | What the release does |
+|---|---|---|
+| `0` | Entry found — including an entry that exists but is deliberately empty. | Publishes the extracted text (empty publishes empty notes). |
+| `3` | No `CHANGELOG.md`, or no heading for this version. | Falls back to the `description` input — the behaviour every release had before the workflow read the changelog. |
+| other | Extraction failed: bad arguments, a non-SemVer version, or a changelog path that is not a readable regular file. | **Fails the release** with an `::error::`. |
+
+The last row is the point of the split. A release is forward-only and
+human-dispatched, so quietly substituting the one-line `description` for notes
+the workflow *could not read* would ship wrong notes and leave nothing to
+notice it by. Only a genuinely missing entry is allowed to fall back.
+
+**Keep `CHANGELOG.md` ahead of the release:** move the `[Unreleased]` items
+into a `## [X.Y.Z] - YYYY-MM-DD` section and merge that to `main` *before*
+dispatching the release at that version. The workflow reads the changelog from
+the commit it is releasing; it never writes one.
 
 ### Why the release is two jobs
 
