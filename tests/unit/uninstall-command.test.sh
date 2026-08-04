@@ -86,6 +86,11 @@ doc_constants_block() { fenced_block "$DOC" '## Constants' bash; }
 # is "filesystem status" and misreads `%Lp`), BSD/macOS `stat -f '%Lp'` as the
 # fallback. Same helper the report-writer / audit-log / setup-config-write
 # suites use for mode-bit assertions.
+#
+# Deliberately NO `-L`, unlike the command's own capture: this is an lstat read,
+# so on a symlink it reports the LINK's mode. test_symlink_fixture_can_discriminate
+# depends on that — adding `-L` here for "consistency" with the command would make
+# the symlink tests' precondition vacuous.
 mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 
 # ---------------------------------------------------------------------------
@@ -457,6 +462,16 @@ test_settings_invalid_staged_json_is_rejected() {
 _s4_matches_644() { write_settings "$1"; chmod 644 "$1"; }
 _s4_matches_600() { write_settings "$1"; chmod 600 "$1"; }
 
+# settings.json as a SYMLINK to a hardened file — the dotfiles-manager shape
+# (chezmoi, Stow, dotbot). The target is kept outside .claude/ so nothing else in
+# the sandbox can find it by accident.
+_s4_matches_600_symlink() {
+  local target; target="$(dirname "$1")/../settings.dotfiles.json"
+  write_settings "$target"
+  chmod 600 "$target"
+  ln -s "$target" "$1"
+}
+
 test_settings_loose_mode_is_preserved() {
   run_step4 _s4_matches_644 'umask 022'
   assert_contains "$B_OUT" "Removed 3 workbench-ynab pre-approval entries" \
@@ -476,6 +491,35 @@ test_settings_hardened_mode_is_preserved() {
   assert_eq "600" "$(mode_of "$S4_SETTINGS")" \
     "a settings.json hardened to 0600 is not widened by the rewrite"
   rm -rf "$S4_SANDBOX"
+}
+
+# The mode is read THROUGH the symlink. `stat` without `-L` reports the link's
+# own mode (0755 on macOS, a fixed 0777 on GNU regardless of the target), which
+# the chmod would then publish — widening a target hardened to 0600 while
+# reporting success. The precondition asserts the link's own mode is not 0600, so
+# the test cannot pass by coincidence: that is the value a non-dereferencing read
+# would capture.
+test_settings_symlinked_mode_is_read_through_the_link() {
+  run_step4 _s4_matches_600_symlink 'umask 022'
+  assert_contains "$B_OUT" "Removed 3 workbench-ynab pre-approval entries" \
+    "the removal still runs over a symlinked settings.json"
+  assert_eq "600" "$(mode_of "$S4_SETTINGS")" \
+    "the symlink's target mode is preserved, not the link's own"
+  rm -rf "$S4_SANDBOX"
+}
+
+# The precondition above, as its own guard: a link whose own mode already equals
+# the target's would make that assertion vacuous on this platform.
+test_symlink_fixture_can_discriminate() {
+  local sb; sb="$(mktemp -d)"
+  mkdir -p "$sb/.claude"
+  _s4_matches_600_symlink "$sb/.claude/settings.json"
+  [ -L "$sb/.claude/settings.json" ] || fail "the fixture must make settings.json a symlink"
+  assert_eq "600" "$(mode_of "$sb/settings.dotfiles.json")" "the target is hardened to 0600"
+  # `mode_of` is an lstat read, so on the link it reports the link's own mode.
+  [ "$(mode_of "$sb/.claude/settings.json")" != "600" ] || \
+    fail "the link's own mode matches the target's — the symlink tests could not discriminate"
+  rm -rf "$sb"
 }
 
 # The staged .tmp is owner-only AT CREATION, not by a later chmod — so the
@@ -617,6 +661,19 @@ test_manual_step4_unreadable_mode_fails_closed() {
   assert_eq "600" "$(mode_of "$S4_SETTINGS")" "the original mode is left alone"
   assert_eq "0" "$S4_TMP_LEFT" "no stale .tmp is left beside the real file"
   rm -f "$expected"; rm -rf "$S4_SANDBOX"
+}
+
+# The by-hand chain reads the mode through a symlink too — the command site's
+# `-L` is no use to a user copy-pasting the doc's own chain.
+test_manual_step4_reads_the_mode_through_a_symlink() {
+  run_doc_step4 _s4_matches_600_symlink 'umask 022'
+  assert_json_valid "$S4_SETTINGS"
+  assert_eq "0" "$(jq --arg p "$PREFIX" \
+    '[.permissions.allow[] | select(type == "string" and startswith($p))] | length' "$S4_SETTINGS")" \
+    "the by-hand block still removes every prefixed entry over a symlink"
+  assert_eq "600" "$(mode_of "$S4_SETTINGS")" \
+    "the by-hand block preserves the symlink TARGET's mode, not the link's own"
+  rm -rf "$S4_SANDBOX"
 }
 
 # ---------------------------------------------------------------------------

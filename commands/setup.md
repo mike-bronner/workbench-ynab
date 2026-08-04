@@ -445,8 +445,15 @@ mkdir -p "$(dirname "$SETTINGS")"
 #
 # GNU `stat -c '%a'` is probed FIRST: on GNU, `stat -f` means "filesystem status"
 # and prints something unrelated instead of erroring. BSD/macOS `stat -f '%Lp'`
-# is the fallback. Same portable read the mode-bit test suites use.
-SETTINGS_MODE="$(stat -c '%a' "$SETTINGS" 2>/dev/null || stat -f '%Lp' "$SETTINGS" 2>/dev/null || true)"
+# is the fallback.
+#
+# `-L` (accepted by BOTH dialects) makes the read follow the symlink. Without it
+# `stat` reports the LINK's own mode, never the target's — 0755 on macOS, a fixed
+# 0777 on GNU regardless of the target. A settings.json symlinked into a dotfiles
+# repo (chezmoi, Stow, dotbot) is the common shape for this file, so an lstat read
+# would capture 0755/0777, `chmod` that onto the staged file, and publish it —
+# widening a target the user hardened to 0600 while reporting success.
+SETTINGS_MODE="$(stat -L -c '%a' "$SETTINGS" 2>/dev/null || stat -L -f '%Lp' "$SETTINGS" 2>/dev/null || true)"
 
 # Every gate below fails CLOSED, mirroring Step 4's config-write gates: any
 # failure drops the staged .tmp, leaves the real settings.json byte-for-byte

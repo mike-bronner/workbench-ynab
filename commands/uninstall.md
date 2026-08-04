@@ -136,7 +136,10 @@ the published file carries the *staged* file's mode. Staging under the ambient
 umask would silently reset a settings.json the user hardened to `600` back to
 the umask default (commonly `644`, world-readable). So the mode is captured
 before staging and re-applied to the `.tmp` before the swap, and the `.tmp`
-itself is born owner-only so the pending rewrite never sits world-readable.
+itself is born owner-only so the pending rewrite never sits world-readable. The
+capture dereferences symlinks (`stat -L`): a settings.json symlinked into a
+dotfiles repo would otherwise report the *link's* mode (`755` on macOS, `777` on
+Linux) and publish that over the hardened target.
 
 ```bash
 SETTINGS_RESULT="skipped"
@@ -150,8 +153,11 @@ else
     '[.permissions.allow // [] | .[] | select(type == "string" and startswith($p))] | length' "$SETTINGS")"
   # GNU `stat -c '%a'` is probed FIRST: on GNU, `stat -f` means "filesystem
   # status" and prints something unrelated instead of erroring. BSD/macOS
-  # `stat -f '%Lp'` is the fallback.
-  SETTINGS_MODE="$(stat -c '%a' "$SETTINGS" 2>/dev/null || stat -f '%Lp' "$SETTINGS" 2>/dev/null || true)"
+  # `stat -f '%Lp'` is the fallback. `-L` (accepted by both dialects) follows the
+  # symlink: without it the read returns the LINK's own mode (0755 on macOS, a
+  # fixed 0777 on GNU), which the `chmod` below would publish over a target the
+  # user hardened — settings.json symlinked into a dotfiles repo is common.
+  SETTINGS_MODE="$(stat -L -c '%a' "$SETTINGS" 2>/dev/null || stat -L -f '%Lp' "$SETTINGS" 2>/dev/null || true)"
   if [ "$MATCHED" -eq 0 ]; then
     echo "✅ glob not present — skipping (already clean)"
   elif [ -z "$SETTINGS_MODE" ]; then

@@ -84,7 +84,7 @@ Setup added the read-tool names to `permissions.allow`. Remove only the entries
 carrying the plugin prefix, and leave every other entry and key alone:
 
 ```bash
-SETTINGS_MODE="$(stat -c '%a' "$SETTINGS" 2>/dev/null || stat -f '%Lp' "$SETTINGS" 2>/dev/null)" \
+SETTINGS_MODE="$(stat -L -c '%a' "$SETTINGS" 2>/dev/null || stat -L -f '%Lp' "$SETTINGS" 2>/dev/null)" \
   && ( umask 077; jq --arg p "$TOOL_PREFIX" \
     '.permissions.allow |= map(select((type == "string" and startswith($p)) | not))' \
     "$SETTINGS" > "$SETTINGS.tmp" ) \
@@ -108,6 +108,13 @@ hardened to `600` back to the umask default (commonly `644`, world-readable).
 restores your mode before the swap. A failure at any of those links — including
 a mode that cannot be read — drops the temp file and leaves `settings.json`
 alone.
+
+`stat -L` follows symlinks on purpose. If your `settings.json` is a symlink into
+a dotfiles repo (chezmoi, Stow, dotbot), the mode that matters is the *target's*
+— without `-L` you would read the link's own mode instead (`755` on macOS, a
+fixed `777` on Linux) and hand that to `chmod`, widening the file you hardened.
+Note that `mv` still replaces the link with a regular file, so re-link it from
+your dotfiles repo afterwards.
 
 ## 5. Decide on the data directory
 

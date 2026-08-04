@@ -58,6 +58,11 @@ REAL_JQ="$(command -v jq)"
 # is "filesystem status" and misreads `%Lp`), BSD/macOS `stat -f '%Lp'` as the
 # fallback. Same helper the report-writer / audit-log / setup-config-write
 # suites use for mode-bit assertions.
+#
+# Deliberately NO `-L`, unlike the command's own capture: this is an lstat read,
+# so on a symlink it reports the LINK's mode. The symlink test below depends on
+# that to prove its precondition can discriminate — adding `-L` here for
+# "consistency" with the command would make that check vacuous.
 mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 
 # Portable inode read, same GNU-first probe order. `mv` on one filesystem is a
@@ -217,6 +222,36 @@ test_freshly_created_settings_is_not_world_readable() {
     "a settings.json created by setup is owner-only, not the ambient umask default"
   assert_exact_line "$(jq -r '.permissions.allow[]' "$S5_SETTINGS")" "$TOOL_A" \
     "the pre-approval still lands in the freshly created file"
+  rm -rf "$S5_HOME"
+}
+
+# A settings.json symlinked into a dotfiles repo (chezmoi, Stow, dotbot) is a
+# common shape for this file, and the mode that matters is the TARGET's. `stat`
+# without `-L` reads the LINK's own mode instead — 0755 on macOS, a fixed 0777 on
+# GNU regardless of the target — and that wrong mode is what the chmod would then
+# publish, widening a target the user hardened to 0600 while printing the ✅.
+#
+# The precondition below asserts the link's own mode is NOT 0600, so this test
+# cannot pass by coincidence on a platform where the two happen to agree: it is
+# exactly the value a non-dereferencing read would capture.
+test_symlinked_settings_mode_is_read_through_the_link() {
+  new_sandbox
+  mkdir -p "$S5_HOME/dotfiles"
+  local target="$S5_HOME/dotfiles/settings.json"
+  write_settings "$target"
+  chmod 600 "$target"
+  ln -s "$target" "$S5_SETTINGS"
+  [ -L "$S5_SETTINGS" ] || fail "the fixture must make settings.json a symlink"
+  assert_eq "600" "$(mode_of "$target")" "the symlink's target starts owner-only (0600)"
+  # `mode_of` is an lstat read, so on the link it reports the link's own mode.
+  [ "$(mode_of "$S5_SETTINGS")" != "600" ] || \
+    fail "the link's own mode matches the target's — the test could not discriminate"
+  run_step5
+  assert_eq "0" "$S5_RC" "the rewrite succeeds over a symlinked settings.json: $S5_OUT"
+  assert_eq "600" "$(mode_of "$S5_SETTINGS")" \
+    "the mode is captured through the symlink, so a hardened target is not widened"
+  assert_exact_line "$(jq -r '.permissions.allow[]' "$S5_SETTINGS")" "$TOOL_A" \
+    "the pre-approval still lands when settings.json is a symlink"
   rm -rf "$S5_HOME"
 }
 
