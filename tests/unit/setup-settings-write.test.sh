@@ -417,6 +417,36 @@ EOF
   rm -rf "$S5_HOME"
 }
 
+# Fail closed when the PUBLISH itself fails. `mv` is the last gate in the chain
+# and the only one whose failure leaves the staged .tmp valid and ready — so an
+# unguarded `mv` orphans that .tmp beside a real file that never got the rewrite,
+# while SETTINGS_OK stays 1 and the ✅ prints anyway.
+#
+# What discriminates here: the withheld ✅, the reported failure, and the .tmp
+# cleanup. With the guard removed the stub's failure is swallowed, so the success
+# line prints and the .tmp survives — both assertions redden. The untouched-file
+# check below does NOT discriminate on its own (a failing `mv` writes nothing
+# either way); it is here to pin the rest of the contract, not the gate.
+test_failed_publish_fails_closed() {
+  new_sandbox
+  write_settings "$S5_SETTINGS"
+  chmod 600 "$S5_SETTINGS"
+  cp "$S5_SETTINGS" "$S5_HOME/before"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$S5_BIN/mv"
+  chmod +x "$S5_BIN/mv"
+  run_step5
+  assert_contains "$S5_OUT" "Could not publish the rewritten settings" \
+    "the failed publish is reported"
+  assert_contains "$S5_OUT" "left untouched" "the report says the original was not modified"
+  case "$S5_OUT" in *"✅"*) fail "a failed publish must not print the success line" ;; esac
+  cmp -s "$S5_SETTINGS" "$S5_HOME/before" \
+    || fail "a failed publish modified settings.json — it must be left untouched"
+  assert_eq "600" "$(mode_of "$S5_SETTINGS")" "the original mode is left alone"
+  assert_eq "0" "$S5_TMP_LEFT" \
+    "the staged .tmp is cleaned up, not orphaned beside the real file"
+  rm -rf "$S5_HOME"
+}
+
 # The real jq must actually be reachable for the happy-path cases above — if it
 # were not, they would pass vacuously on an unwritten file.
 test_real_jq_is_available() {

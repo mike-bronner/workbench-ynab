@@ -597,6 +597,36 @@ test_settings_failed_mode_restore_fails_closed() {
   rm -f "$expected"; rm -rf "$S4_SANDBOX"
 }
 
+# Fail closed when the PUBLISH itself fails. `mv` is the last link in the chain
+# and the only one whose failure leaves a valid, ready .tmp behind — so an
+# unguarded `mv` orphans it beside a real file that never received the rewrite,
+# while SETTINGS_RESULT stays "removed" and the ✅ prints anyway. `mv` is stubbed
+# to fail; nothing else in the block calls it.
+#
+# What discriminates: the withheld "✅ Removed" line, the reported failure, and
+# the .tmp cleanup. The byte-for-byte check does NOT discriminate on its own (a
+# failing `mv` writes nothing either way) — it pins the rest of the contract.
+_s4_no_mv() {
+  write_settings "$1"; chmod 600 "$1"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$2/mv"
+  chmod +x "$2/mv"
+}
+
+test_settings_failed_publish_fails_closed() {
+  local expected; expected="$(mktemp)"; write_settings "$expected"
+  run_step4 _s4_no_mv 'umask 022'
+  assert_contains "$B_ERR" "Could not publish the rewritten settings" \
+    "the failed publish is reported"
+  assert_contains "$B_ERR" "left untouched" "the report says the original was not modified"
+  case "$B_OUT" in *"✅ Removed"*) fail "a failed publish must not print the removal success line" ;; esac
+  assert_eq "$(cat "$expected")" "$S4_AFTER" \
+    "a failed publish must leave settings.json byte-for-byte untouched"
+  assert_eq "600" "$(mode_of "$S4_SETTINGS")" "the original mode is left alone"
+  assert_eq "0" "$S4_TMP_LEFT" \
+    "the staged .tmp is cleaned up, not orphaned beside the real file"
+  rm -f "$expected"; rm -rf "$S4_SANDBOX"
+}
+
 # ---------------------------------------------------------------------------
 # AC #4 (issue #280) — the BY-HAND mirror in docs/uninstall.md, executed
 # ---------------------------------------------------------------------------
@@ -705,6 +735,22 @@ test_manual_step4_failed_mode_restore_fails_closed() {
     "a failed mode restore must leave settings.json byte-for-byte untouched"
   assert_eq "600" "$(mode_of "$S4_SETTINGS")" "the original mode is left alone"
   assert_eq "0" "$S4_TMP_LEFT" "the staged .tmp is cleaned up, not left beside the real file"
+  rm -f "$expected"; rm -rf "$S4_SANDBOX"
+}
+
+# The publish link, executed. The by-hand chain gets this for free — `mv` sits
+# inside the `&&` chain, so a failure falls through to the `||` cleanup — but
+# "for free" is exactly the property a future edit can silently drop (moving the
+# `mv` out of the chain, or onto its own line). This pins it the same way its
+# three sibling links are pinned.
+test_manual_step4_failed_publish_fails_closed() {
+  local expected; expected="$(mktemp)"; write_settings "$expected"
+  run_doc_step4 _s4_no_mv 'umask 022'
+  assert_contains "$B_OUT" "left untouched" "the by-hand chain reports the refusal"
+  assert_eq "$(cat "$expected")" "$S4_AFTER" \
+    "a failed publish must leave settings.json byte-for-byte untouched"
+  assert_eq "600" "$(mode_of "$S4_SETTINGS")" "the original mode is left alone"
+  assert_eq "0" "$S4_TMP_LEFT" "the staged .tmp is cleaned up, not orphaned beside the real file"
   rm -f "$expected"; rm -rf "$S4_SANDBOX"
 }
 

@@ -127,8 +127,8 @@ in the file — byte-for-byte alone.
 The filter is surgical in both directions: `map(select(...))` rewrites only the
 `permissions.allow` array, and the `type == "string"` test means a non-string
 element is preserved rather than crashing the filter. Every gate fails **closed**
-— a file that cannot be parsed, rewritten, or re-moded is left untouched and
-reported, never overwritten.
+— a file that cannot be parsed, rewritten, re-moded, or published is left
+untouched and reported, never overwritten.
 
 The rewrite also preserves the file's **permission mode** (issue #280). `mv` on
 one filesystem is a `rename(2)`: it replaces the destination inode outright, so
@@ -177,8 +177,11 @@ else
     rm -f "$SETTINGS.tmp"
     SETTINGS_RESULT="manual"
     echo "❌ Could not restore mode $SETTINGS_MODE on the staged settings — $SETTINGS left untouched. Remove the $TOOL_PREFIX entries by hand." >&2
+  elif ! mv "$SETTINGS.tmp" "$SETTINGS"; then
+    rm -f "$SETTINGS.tmp"
+    SETTINGS_RESULT="manual"
+    echo "❌ Could not publish the rewritten settings — $SETTINGS left untouched. Remove the $TOOL_PREFIX entries by hand." >&2
   else
-    mv "$SETTINGS.tmp" "$SETTINGS"
     SETTINGS_RESULT="removed"
     echo "✅ Removed $MATCHED workbench-ynab pre-approval entries from $SETTINGS — all other entries untouched"
   fi

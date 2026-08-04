@@ -505,7 +505,19 @@ else
       echo "❌ Could not restore mode $SETTINGS_MODE on the staged settings — $SETTINGS left untouched. Pre-approval is incomplete: any tool already added stays, the rest were not." >&2
       break
     fi
-    mv "$SETTINGS.tmp" "$SETTINGS"
+    # The publish itself is a gate too. `mv` can fail (ENOSPC on the rename's
+    # directory-entry write, a permission race, an immutable flag), and an
+    # unguarded one is silent: SETTINGS_OK stays 1, the ✅ prints, and the staged
+    # .tmp is orphaned beside a real file that never received the rewrite —
+    # reporting success for work that did not happen. The by-hand mirror in
+    # docs/uninstall.md gets this free from its `&&`/`||` chain; an imperative
+    # transcription has to say it.
+    if ! mv "$SETTINGS.tmp" "$SETTINGS"; then
+      rm -f "$SETTINGS.tmp"
+      SETTINGS_OK=0
+      echo "❌ Could not publish the rewritten settings — $SETTINGS left untouched. Pre-approval is incomplete: any tool already added stays, the rest were not." >&2
+      break
+    fi
   done <<< "$READ_TOOLS"
 fi
 [ "$SETTINGS_OK" -eq 1 ] \
