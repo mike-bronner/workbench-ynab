@@ -101,6 +101,30 @@ fields set" (issue #283). Every read path in the loader fails closed on it:
 | `_cfg_timezone`, `_cfg_tax_year` | Propagate `_cfg`'s non-zero status verbatim, so neither reports its own field as "missing" or "not overridden" when the real fault is the file. |
 | `_migrate_config`, `_cfg_budgets`, `_cfg_budget_field`, `_cfg_default_budget` | Same message, emit **nothing**, return **non-zero** — `_migrate_config` is a second read path into the same file and carries the guard itself. |
 
+### The consuming scripts fail closed too (issue #290)
+
+Emitting the signal is only half the contract — a reader that discards `_cfg`'s
+status puts the fail-open back one level up. Every executable config read in
+`bin/` consumes it:
+
+| Script | Reads | On a config file that does not parse |
+|---|---|---|
+| [`bin/report-writer.sh`](../bin/report-writer.sh) | `.report.template_path`, `.report.output_dir` | Exits **2** without writing, rather than assembling the report from the shipped default template into the shipped default directory. Passing both `--template` and `--output-dir` skips the config entirely, so a corrupt host can still render from the command line. |
+| [`bin/ynab-prune.sh`](../bin/ynab-prune.sh) | `.report.retention_days`, `.report.output_dir` | Exits **2** before scanning or deleting anything, rather than sweeping on the default 30-day threshold in the default directory. This tool deletes under `--apply`, so a defaulted threshold is a deletion the user never asked for. Passing both `--days` and `--output-dir` skips the config entirely. |
+| [`bin/persona.sh`](../bin/persona.sh) | `.persona.name`, `.persona.voice_overrides`, and `agent_name` in the **workbench-core** config | Exits **non-zero** from every subcommand (`name`, `html-name`, `footer`, `signoff`, `voice`) without rendering — see [docs/persona.md](persona.md#malformed-config-behaviour-fail-closed). It carries its **own** implementation of this guard rather than calling into this loader, because it reads **two different files** while the helpers here are hardwired to `$YNAB_CONFIG_FILE`. |
+
+**One deliberate exception: `/workbench-ynab:setup`.** Its own inline `cfg()`
+helper ([`commands/setup.md`](../commands/setup.md) Step 3) stays **fail-open**,
+and its `bin/persona.sh name` call is guarded with `|| PERSONA_DEFAULT=""`.
+Setup is the **repair path** — it reads the old file only to pre-fill prompts and
+then rewrites it — so a corrupt config must degrade to "no defaults to offer",
+never lock the user out of the one command that fixes the file.
+
+Neither script calls `_require_config` up front. Both are contracted to run on a
+host with **no config at all** — every path has a CLI flag and a shipped default
+— and `_require_config` refuses a missing file. Checking each read's status
+hardens the corrupt-file case without breaking the unconfigured one.
+
 ```text
 workbench-ynab: config at <path> is not valid JSON and could not be parsed.
 workbench-ynab: repair the file, or re-run /workbench-ynab:setup to recreate it.

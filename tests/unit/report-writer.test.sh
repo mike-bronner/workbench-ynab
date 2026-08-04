@@ -1019,4 +1019,149 @@ test_off_shape_tax_year_label_is_refused() {
   return 0
 }
 
+# --- unparseable config: fail closed (issue #290) ----------------------------
+#
+# A config.json that is PRESENT but does not parse must stop the writer, not read
+# back as "no fields set" and silently substitute $DEFAULT_TEMPLATE /
+# $DEFAULT_OUTPUT_DIR. The loader (bin/config.sh `_cfg`) already fails closed on
+# it as of #283; these tests pin that this writer CONSUMES that signal at both of
+# its config read sites.
+#
+# The four fixtures mirror tests/unit/config.test.sh's set, covering both jq
+# failure routes: a parse error (truncated, trailing comma, bare word) and "no
+# JSON value was ever produced" (a zero-byte file, which `jq empty` accepts
+# silently). Each gets its own path so a failing case names itself.
+# bad_config <name> <body> — write <body> to a uniquely-named sandbox config and
+# echo its path. Declarations are split because `local a=$1 b=$SANDBOX/$a` would
+# expand $a before the assignment lands, tripping `set -u`.
+bad_config() {
+  local name="$1" body="$2"
+  local path="$SANDBOX/bad-$name.json"
+  printf '%s' "$body" > "$path"
+  printf '%s' "$path"
+}
+
+# (i) The `.report.template_path` read (site 1). No --template is passed, so the
+#     writer reaches the config for the template. --output-dir IS passed, which
+#     isolates the failure to the template read: the run must die before the
+#     output-dir site is reached at all.
+test_unparseable_config_fails_closed_at_template_read() {
+  local body bad dir rc err
+  for body in '{ "report": { "template_path": "/x" }' '{ "report": {} }, }' 'not json at all' ''; do
+    bad="$(bad_config "tpl-$RANDOM" "$body")"
+    dir="$SANDBOX/tpl-fail-$RANDOM"
+    rc=0
+    # NOTE: run_writer_fixture always passes --template, so the real writer is
+    # invoked directly here with the fixture slots but NO --template.
+    err="$( YNAB_CONFIG_FILE="$bad" bash "$WRITER" --tier Weekly --date 2026-06-22 \
+              --output-dir "$dir" \
+              --slot 'kpi-dashboard=<div></div>' \
+              --slot 'section-1-classification=<div></div>' \
+              --slot 'footer-persona=Hobbes' 2>&1 >/dev/null )" || rc=$?
+    assert_eq "2" "$rc" "unparseable config → exit 2 at the .report.template_path read ($body)"
+    assert_contains "$err" "not valid JSON" "the loader's parse-failure message reaches the user ($body)"
+    assert_contains "$err" "$bad" "the error names the unparseable config file ($body)"
+    # Nothing written: the corrupt config must not produce a report assembled
+    # from the shipped default template.
+    [ -d "$dir" ] && fail "a refused unparseable config still created the output dir ($body)"
+  done
+  return 0
+}
+
+# (ii) The `.report.output_dir` read (site 2) — a SEPARATE call site that test (i)
+#      never reaches, because the run dies at the template read first. --template
+#      is supplied here (via run_writer_fixture) so the template site is skipped
+#      and the output-dir read is the one under test. Without this case, leaving
+#      site 2 unguarded would pass test (i) unchanged.
+test_unparseable_config_fails_closed_at_output_dir_read() {
+  local body bad rc err
+  for body in '{ "report": { "output_dir": "/tmp/x" }' '{ "report": {} }, }' 'not json at all' ''; do
+    bad="$(bad_config "dir-$RANDOM" "$body")"
+    # Clear the default dir first: the sandbox is shared across tests, so a
+    # report left there by an earlier test would make the "nothing written"
+    # assertion below fire on someone else's artifact — or, worse, pass
+    # vacuously if the ordering ever flipped.
+    rm -rf "$SANDBOX/Documents/Claude/Reports"
+    rc=0
+    err="$( YNAB_CONFIG_FILE="$bad" run_writer_fixture --tier Weekly --date 2026-06-22 2>&1 >/dev/null )" || rc=$?
+    assert_eq "2" "$rc" "unparseable config → exit 2 at the .report.output_dir read ($body)"
+    assert_contains "$err" "not valid JSON" "the loader's parse-failure message reaches the user ($body)"
+    assert_contains "$err" "$bad" "the error names the unparseable config file ($body)"
+    # The default ~/Documents/Claude/Reports (HOME is the sandbox) must NOT have
+    # been written to — that silent substitution is the whole bug.
+    [ -e "$SANDBOX/Documents/Claude/Reports/YNAB-Weekly-Review-2026-06-22.html" ] \
+      && fail "an unparseable config still wrote a report to the DEFAULT output dir ($body)"
+  done
+  return 0
+}
+
+# (iii) The guard must not have become "any config read is fatal". A PRESENT
+#       value is still used at both sites, and the LEGITIMATE EMPTIES still fall
+#       through to the writer's own defaults with exit 0 and no parse-failure
+#       message. Guards the new `if` blocks against over-reach in both
+#       directions.
+test_present_config_values_still_used_at_both_sites() {
+  local cfg="$SANDBOX/both-present.json" dir="$SANDBOX/both-present-out" out
+  cat > "$cfg" <<JSON
+{ "report": { "template_path": "$FIXTURE_TEMPLATE", "output_dir": "$dir" } }
+JSON
+  # NEITHER --template nor --output-dir, so both config sites are exercised.
+  out="$( YNAB_CONFIG_FILE="$cfg" bash "$WRITER" --tier Weekly --date 2026-06-22 \
+            --slot 'kpi-dashboard=<div class="kpi">x</div>' \
+            --slot 'section-1-classification=<div class="card">y</div>' \
+            --slot 'footer-persona=Hobbes' )"
+  assert_eq "$dir/YNAB-Weekly-Review-2026-06-22.html" "$out" \
+    "configured .report.template_path AND .report.output_dir both honoured"
+  assert_file_exists "$out"
+  # It really used the FIXTURE template, not the shipped default: the fixture
+  # declares only three block slots, and the run above supplied exactly those.
+  assert_contains "$(cat "$out")" '<div class="kpi">x</div>' "the configured template was the one rendered"
+}
+
+# (iii-b) LEGITIMATE EMPTY at the `.report.output_dir` site: an empty-object and
+#         a null-valued config each still fall through to the shipped default dir
+#         with exit 0 and no parse-failure message. --template is supplied, so the
+#         output-dir read is the site under test.
+test_legitimate_empty_output_dir_still_defaults_silently() {
+  local cfg err rc
+  printf '%s' '{}' > "$SANDBOX/empty-obj.json"
+  printf '%s' '{ "report": { "output_dir": null } }' > "$SANDBOX/null-out-dir.json"
+  for cfg in "$SANDBOX/empty-obj.json" "$SANDBOX/null-out-dir.json"; do
+    rm -rf "$SANDBOX/Documents/Claude/Reports"
+    rc=0
+    err="$( YNAB_CONFIG_FILE="$cfg" run_writer_fixture --tier Weekly --date 2026-06-22 2>&1 >/dev/null )" || rc=$?
+    assert_eq "0" "$rc" "legitimate empty output_dir ($(basename "$cfg")) still exits 0"
+    case "$err" in
+      *"not valid JSON"*) fail "legitimate empty output_dir ($(basename "$cfg")) reported a parse failure" ;;
+    esac
+    assert_file_exists "$SANDBOX/Documents/Claude/Reports/YNAB-Weekly-Review-2026-06-22.html"
+  done
+  return 0
+}
+
+# (iii-c) LEGITIMATE EMPTY at the `.report.template_path` site — a separate call
+#         site with its own new guard, so it needs its own case. No --template is
+#         passed and the field is null, so the read must return EMPTY-and-zero and
+#         the writer must fall through to the shipped default template. That
+#         default declares fifteen block slots the three supplied here do not
+#         cover, so the run lands on the missing-slot error (exit 1) — which is
+#         precisely the proof it got PAST the template read rather than dying at
+#         it (exit 2).
+test_legitimate_empty_template_path_falls_through_to_default() {
+  local cfg="$SANDBOX/null-tpl.json" rc=0 err
+  printf '%s' '{ "report": { "template_path": null } }' > "$cfg"
+  err="$( YNAB_CONFIG_FILE="$cfg" bash "$WRITER" --tier Weekly --date 2026-06-22 \
+            --output-dir "$SANDBOX/null-tpl-out" \
+            --slot 'kpi-dashboard=<div></div>' \
+            --slot 'section-1-classification=<div></div>' \
+            --slot 'footer-persona=Hobbes' 2>&1 >/dev/null )" || rc=$?
+  assert_eq "1" "$rc" "null .report.template_path falls through to the default template (missing-slot exit 1, not the config exit 2)"
+  case "$err" in
+    *"not valid JSON"*) fail "a null .report.template_path was reported as a parse failure" ;;
+  esac
+  # The default template is the one that got loaded — its extra slots are what
+  # the missing-slot error names.
+  assert_contains "$err" "section-9-net-worth" "the shipped default template was loaded (its slots are the ones reported missing)"
+}
+
 run_tests

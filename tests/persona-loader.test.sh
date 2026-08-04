@@ -112,10 +112,115 @@ ynab_emptyname="${TMPDIR_TEST}/ynab-emptyname.json"
 printf '{"persona":{"name":""}}' > "$ynab_emptyname"
 assert_name "empty-string persona.name falls back to Hobbes" "Hobbes" "$ynab_emptyname"
 
-# (5) malformed ynab JSON + no core falls back to Hobbes (no error)
-ynab_bad="${TMPDIR_TEST}/ynab-bad.json"
-printf 'this is not json {' > "$ynab_bad"
-assert_name "malformed config falls back to Hobbes" "Hobbes" "$ynab_bad"
+# (5) malformed config FAILS CLOSED (issue #290) --------------------------------
+#
+# This case used to assert the opposite ("malformed config falls back to Hobbes")
+# — the silent fail-open #290 exists to remove. A config that is PRESENT but does
+# not parse is no longer swallowed into the next precedence tier: every renderer
+# and every CLI subcommand stops non-zero, emits nothing on stdout, and names the
+# offending file on stderr.
+#
+# The four fixtures mirror tests/unit/config.test.sh's set exactly, because they
+# cover both jq failure routes: a parse error (truncated, trailing comma, bare
+# word) and "no JSON value was ever produced" (a zero-byte file, which `jq empty`
+# would accept silently — the reason the guard uses `jq -e 'type'`). Each gets its
+# own path so a failing case is named in the message and re-runnable in isolation.
+BAD_TRUNCATED="${TMPDIR_TEST}/bad-truncated.json"
+printf '{ "persona": { "name": "Calvin" }\n' > "$BAD_TRUNCATED"
+BAD_TRAILING_COMMA="${TMPDIR_TEST}/bad-trailing-comma.json"
+printf '{ "persona": { "name": "Calvin" }, }\n' > "$BAD_TRAILING_COMMA"
+BAD_NOT_JSON="${TMPDIR_TEST}/bad-not-json.json"
+printf 'this is not json {' > "$BAD_NOT_JSON"
+BAD_EMPTY="${TMPDIR_TEST}/bad-empty.json"
+: > "$BAD_EMPTY"
+
+# assert_fails_closed <desc> <bad-file> <ynab-cfg> <core-cfg> [args...] — run
+# persona.sh and assert the full fail-closed contract in one place: non-zero
+# exit, EMPTY stdout, and stderr naming <bad-file>.
+#
+# All three assertions are load-bearing and none subsumes another. Exit status
+# alone would pass for an unrelated crash; empty stdout alone would pass for a
+# renderer that legitimately emits nothing (`voice` on an unset field is exactly
+# that, which is why the corrupt-vs-unset distinction needs the status too); and
+# naming the file is what tells the user WHICH of the two configs persona.sh
+# reads is the broken one.
+assert_fails_closed() {
+  local desc="$1" bad="$2" ynab="$3" core="$4"; shift 4
+  local out err rc=0
+  out="$(run "$ynab" "$core" "$@" 2>"${TMPDIR_TEST}/fc-err")" || rc=$?
+  err="$(cat "${TMPDIR_TEST}/fc-err")"
+  if [ "$rc" -eq 0 ]; then
+    printf 'FAIL — %s: expected non-zero exit, got 0 (stdout %q)\n' "$desc" "$out"
+    fail=$((fail + 1))
+  else
+    printf 'ok   — %s (exit %d)\n' "$desc" "$rc"; pass=$((pass + 1))
+  fi
+  if [ -n "$out" ]; then
+    printf 'FAIL — %s: expected empty stdout, got %q\n' "$desc" "$out"
+    fail=$((fail + 1))
+  else
+    printf 'ok   — %s: emits nothing on stdout\n' "$desc"; pass=$((pass + 1))
+  fi
+  assert_contains "$desc: stderr names the unparseable file" "$bad" "$err"
+  assert_contains "$desc: stderr says the file is not valid JSON" "not valid JSON" "$err"
+  # The fallback name must not leak onto EITHER stream: a renderer that printed
+  # "Hobbes" and *also* exited non-zero would still have handed a caller doing
+  # `name=$(persona.sh name)` (no status check) the wrong name.
+  assert_absent "$desc: no Hobbes fallback leaks" "Hobbes" "$out$err"
+}
+
+# (5a) every fixture shape fails closed on the `name` subcommand.
+for bad in "$BAD_TRUNCATED" "$BAD_TRAILING_COMMA" "$BAD_NOT_JSON" "$BAD_EMPTY"; do
+  assert_fails_closed "unparseable ynab config ($(basename "$bad")): name" \
+    "$bad" "$bad" "$NO_FILE" name
+done
+
+# (5b) EVERY renderer subcommand fails closed, not just `name`. Each reaches the
+# config by a different route — footer and signoff and html-name through
+# persona_name, voice through its own _gated_cfg read of .persona.voice_overrides
+# — so one passing says nothing about the others. `voice` matters most: its
+# legitimate "unset" behaviour is *also* empty stdout + exit 0, so without the
+# status check a corrupt config is indistinguishable from an unconfigured host.
+for sub in footer signoff html-name voice; do
+  assert_fails_closed "unparseable ynab config: $sub" \
+    "$BAD_NOT_JSON" "$BAD_NOT_JSON" "$NO_FILE" "$sub"
+done
+
+# (5c) a corrupt WORKBENCH-CORE config fails closed too, at tier 2 — the ynab
+# config here is valid and simply has no persona.name, so resolution reaches the
+# core tier and stops there. Without this case the tier-2 read could keep the old
+# fail-open and every tier-1 test above would still pass.
+core_bad="${TMPDIR_TEST}/core-bad.json"
+printf '{ "agent_name": "Holmes"\n' > "$core_bad"
+assert_fails_closed "unparseable workbench-core config: name" \
+  "$core_bad" "$ynab_empty" "$core_bad" name
+
+# (5d) tier 1 SHORT-CIRCUITS a corrupt core config: a valid ynab persona.name is
+# found first, so the broken core file is never read and the run succeeds. This
+# pins that the guard did not turn into "any corrupt file anywhere is fatal",
+# which would break the common case of a user with a healthy ynab config and a
+# stale core one.
+assert_name "valid ynab name short-circuits an unparseable core config" \
+  "Calvin" "$ynab_calvin" "$core_bad"
+
+# (5e) the THREE LEGITIMATE EMPTIES are unchanged — this is what makes a non-zero
+# return mean exactly one thing. An absent file, an absent field, and a null
+# field each still resolve silently through the precedence chain with exit 0 and
+# NOTHING on stderr. (Tests (2)–(4) above already pin the resolved values; this
+# pins that they stay silent and zero-status, which the new guard could regress.)
+for legit in "$NO_FILE" "$ynab_empty" "$ynab_null"; do
+  rc=0
+  legit_err="$(run "$legit" "$NO_FILE" name 2>&1 >/dev/null)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf 'ok   — legitimate empty (%s) still exits 0\n' "$(basename "$legit")"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL — legitimate empty (%s) should exit 0, got %d\n' "$(basename "$legit")" "$rc"
+    fail=$((fail + 1))
+  fi
+  assert_absent "legitimate empty ($(basename "$legit")) writes nothing to stderr" \
+    "not valid JSON" "$legit_err"
+done
 
 # (5b) schema/runtime alignment (#28 round-7 follow-up): the config schema must
 # not mark persona.name required — tests (3)–(4) pin that the RUNTIME treats an

@@ -62,7 +62,12 @@
 # EXIT CODES
 #   0  success (preview printed, or deletion completed, or nothing to do)
 #   2  usage error (bad flag, non-numeric --days, an output dir that does not fully
-#      resolve, or one that resolves to the filesystem root), OR a PARTIAL
+#      resolve, or one that resolves to the filesystem root), OR a config.json that
+#      is present but does not parse (issue #290) — the loader names the file and
+#      the repair on stderr and this helper stops BEFORE scanning or deleting
+#      anything, rather than sweeping on a defaulted threshold / directory the user
+#      never chose. Passing both --days and --output-dir skips the config entirely.
+#      OR a PARTIAL
 #      --apply deletion — one or more matched reports could not be removed (e.g.
 #      denied by directory permissions); the rest WERE deleted and each failure
 #      was reported on stderr. A caller scripting these codes must not read a 2 as
@@ -120,8 +125,17 @@ done
 # Resolve the age threshold: --days → config → default. Must be a non-negative
 # integer — a bad value is a usage error, never a silent fallback that could
 # delete more than intended.
+#
+# The config read FAILS CLOSED on a config.json that is present but does not
+# parse (issue #290, extending #283). `_cfg` has already named the file and the
+# repair on stderr. This script DELETES files under --apply, so falling through
+# to DEFAULT_RETENTION_DAYS on a corrupt config would mean sweeping at 30 days
+# when the user configured, say, 365 — deleting reports they meant to keep, off
+# a threshold they never chose. The pre-existing stderr message does reach the
+# user here, but a loader that refuses to guess is the guarantee; a user reading
+# console output is not.
 if [ -z "$days" ]; then
-  days="$(_cfg '.report.retention_days')"
+  days="$(_cfg '.report.retention_days')" || exit 2
 fi
 [ -n "$days" ] || days="$DEFAULT_RETENTION_DAYS"
 case "$days" in
@@ -135,8 +149,13 @@ esac
 # — a mid-path ~ (`~user` / a `~` a variable's value introduced) or an unresolved
 # / self-referential $VAR. A path that does not fully resolve is a usage error,
 # never a silent scan of the wrong directory that reports "nothing to prune."
+#
+# Fails closed on an unparseable config too (issue #290): defaulting to
+# ~/Documents/Claude/Reports when the user configured a different directory
+# would sweep — and under --apply, delete from — a directory they never pointed
+# this tool at.
 if [ -z "$output_dir" ]; then
-  output_dir="$(_cfg '.report.output_dir')"
+  output_dir="$(_cfg '.report.output_dir')" || exit 2
 fi
 [ -n "$output_dir" ] || output_dir="$DEFAULT_OUTPUT_DIR"
 output_dir="$(expand_path "$output_dir")" \
