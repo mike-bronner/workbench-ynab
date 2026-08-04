@@ -23,6 +23,9 @@
 #     at the ambient umask;
 #   * the staged .tmp is owner-only AT CREATION (proved by neutralizing the
 #     mode-restoring chmod, so only the `umask 077` staging subshell is left);
+#   * a staged .tmp that came out empty or unparseable is never published —
+#     jq exits 0 over a 0-byte input without writing anything, so the exit-code
+#     gate alone would `mv` an empty file over the user's real settings;
 #   * every failure path fails CLOSED — the .tmp is dropped, the real file is
 #     byte-for-byte untouched, and the ✅ line is never printed.
 #
@@ -56,6 +59,12 @@ REAL_JQ="$(command -v jq)"
 # fallback. Same helper the report-writer / audit-log / setup-config-write
 # suites use for mode-bit assertions.
 mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+
+# Portable inode read, same GNU-first probe order. `mv` on one filesystem is a
+# rename(2), so the inode changing is proof the file was REPLACED — the only way
+# to tell "left untouched" from "overwritten with identical bytes" when the
+# fixture's content cannot itself discriminate (see the 0-byte case below).
+inode_of() { stat -c '%i' "$1" 2>/dev/null || stat -f '%i' "$1"; }
 
 # Print the first ```bash fenced block whose body contains <needle> — the same
 # needle-scoped extraction setup-command.test.sh uses. Deleting or restructuring
@@ -308,6 +317,68 @@ test_failed_mode_restore_fails_closed() {
   cmp -s "$S5_SETTINGS" "$S5_HOME/before" \
     || fail "a failed mode restore modified settings.json — it must be left untouched"
   assert_eq "0" "$S5_TMP_LEFT" "the staged .tmp is cleaned up, not left beside the real file"
+  rm -rf "$S5_HOME"
+}
+
+# Fail closed when the STAGED file comes out empty. jq treats a 0-byte input as
+# zero JSON values in the stream: the filter never runs, jq exits 0, and nothing
+# is written. So a settings.json that pre-exists EMPTY — a crashed editor, a
+# `touch`, a truncated write by an unrelated tool; the `[ -f ]` creation guard
+# only covers the MISSING-file case — passes the rewrite's exit-code gate with an
+# empty .tmp beside it. Only the staged-validity gate stops that .tmp being
+# published over the real file, which would wipe every permission, hook, env, and
+# mcpServers block the user had while the step printed its ✅.
+#
+# Nothing is stubbed here: this is the real jq on a real 0-byte file, so the test
+# pins the actual semantics rather than a shim's imitation of them.
+test_empty_pre_existing_settings_fails_closed() {
+  new_sandbox
+  : > "$S5_SETTINGS"
+  assert_eq "0" "$(wc -c < "$S5_SETTINGS" | tr -d ' ')" "the fixture starts as a 0-byte file"
+  # A byte-for-byte comparison cannot discriminate here: the staged file this
+  # gate rejects is ALSO 0 bytes, so an unguarded block publishes it and the size
+  # is unchanged. The inode is what tells "left alone" from "replaced" — `mv` is
+  # a rename(2), so publishing swaps the inode out.
+  local before_inode; before_inode="$(inode_of "$S5_SETTINGS")"
+  run_step5
+  assert_contains "$S5_OUT" "empty or invalid JSON" "the empty staged rewrite is reported"
+  assert_contains "$S5_OUT" "left untouched" "the report says the original was not modified"
+  case "$S5_OUT" in *"✅"*) fail "an empty staged rewrite must not print the success line" ;; esac
+  assert_eq "$before_inode" "$(inode_of "$S5_SETTINGS")" \
+    "the original settings.json inode survives — the empty staged file was never mv'd over it"
+  assert_eq "0" "$S5_TMP_LEFT" "the empty .tmp is cleaned up, not left beside the real file"
+  rm -rf "$S5_HOME"
+}
+
+# The same gate, reached by the other input shape that gets past an exit-code
+# check: a rewrite that exits 0 having written syntactically INVALID JSON. The jq
+# shim passes everything through to the real jq except the pre-approval filter
+# (recognised by its `permissions.allow` update), for which it emits truncated
+# JSON and exits 0 — the `_s4_bad_rewrite` technique from the sibling
+# uninstall-command suite. Distinct from the empty case above: there the staged
+# file is 0 bytes, here it is non-empty and unparseable.
+test_invalid_staged_rewrite_fails_closed() {
+  new_sandbox
+  write_settings "$S5_SETTINGS"
+  chmod 600 "$S5_SETTINGS"
+  cp "$S5_SETTINGS" "$S5_HOME/before"
+  cat > "$S5_BIN/jq" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    *'permissions.allow'*) printf '{"permissions": {"allow": [' ; exit 0 ;;
+  esac
+done
+exec "$REAL_JQ" "\$@"
+EOF
+  chmod +x "$S5_BIN/jq"
+  run_step5
+  assert_contains "$S5_OUT" "empty or invalid JSON" "the invalid staged rewrite is reported"
+  case "$S5_OUT" in *"✅"*) fail "an invalid staged rewrite must not print the success line" ;; esac
+  cmp -s "$S5_SETTINGS" "$S5_HOME/before" \
+    || fail "an invalid staged rewrite modified settings.json — it must be left untouched"
+  assert_eq "600" "$(mode_of "$S5_SETTINGS")" "the original mode is left alone"
+  assert_eq "0" "$S5_TMP_LEFT" "the invalid .tmp is cleaned up, not left beside the real file"
   rm -rf "$S5_HOME"
 }
 

@@ -472,6 +472,22 @@ else
       echo "❌ jq rewrite failed — $SETTINGS left untouched. Pre-approval is incomplete: any tool already added stays, the rest were not." >&2
       break
     fi
+    # The staged file must be non-empty, valid JSON before it is eligible to
+    # publish — the exit-code gate above is not enough on its own. jq treats a
+    # 0-byte input as ZERO JSON values in the stream: the filter never runs, jq
+    # exits 0, and nothing is written. So a settings.json that pre-exists empty
+    # (a crashed editor, a `touch`, a truncated write by an unrelated tool — the
+    # `[ -f ]` creation guard above only covers the MISSING-file case) would sail
+    # through the exit-code check and `mv` an empty .tmp over the real file,
+    # wiping the user's permissions/hooks/env/mcpServers while printing the ✅.
+    # (`jq -e .` rejects an empty file; `jq empty` would wave it through.) Same
+    # gate as Step 4's config write and commands/uninstall.md Step 4.
+    if ! jq -e . "$SETTINGS.tmp" >/dev/null 2>&1; then
+      rm -f "$SETTINGS.tmp"
+      SETTINGS_OK=0
+      echo "❌ Rewritten settings is empty or invalid JSON — $SETTINGS left untouched. Pre-approval is incomplete: any tool already added stays, the rest were not." >&2
+      break
+    fi
     # Re-apply the ORIGINAL mode to the staged file BEFORE the swap, so the
     # rename(2) carries the user's mode onto the real path instead of the
     # umask's. Fail closed: a mode we cannot restore is a mode we must not
