@@ -43,7 +43,7 @@
 #
 # WHY JSONL (one JSON object per line) and NOT a single growing JSON array
 #   Append-only is trivial and crash-safe with JSONL: a new record is one atomic
-#   `>>` write of a newline-terminated line — no read, no parse, no rewrite of what
+#   append of a newline-terminated line — no read, no parse, no rewrite of what
 #   is already on disk. Each record is one compact line (jq -c, no interior
 #   newlines), so the writer emits it plus its terminating newline in a SINGLE
 #   write(2) to the O_APPEND fd; a regular-file write of a sub-page buffer is copied
@@ -54,6 +54,26 @@
 #   read-modify-write of the whole file on every append (O(n) and not crash-safe: a
 #   truncated rewrite loses the entire history). Append-only integrity is the whole
 #   point of an audit log, so JSONL is the correct shape.
+#
+# DURABILITY — each record is fsync'd before the writer reports success (#275)
+#   The atomic single write above defeats a TORN record, but it only reaches the
+#   page cache: a power cut or kernel panic can still lose the tail of the file.
+#   That is unacceptable for the forensic record of every money mutation this
+#   plugin makes ("we lost the last N records to a power cut" is materially worse
+#   than a recomputed resume), so _audit_append fsync(2)s the file before it
+#   returns 0. Both properties hold together — ONE write(2), THEN fsync(2), on the
+#   same fd, in the same process (see _audit_fsync_append_program).
+#
+# EXTERNAL TOOLS
+#   jq       builds each record (as before).
+#   python3  the fsync shim. Bash has no builtin that flushes a file to disk, so
+#            the append is delegated to a tiny inline `python3 -c` program. See
+#            _audit_fsync_append_program for WHY python3 and not `dd conv=fsync`.
+#   Neither is optional. jq failing to build a record fails the append (its exit
+#   status is checked); python3 is probed with `command -v` before the write, and
+#   its absence fails the append too — the writer never falls back to an
+#   unflushed `>>`, because a record it cannot promise is durable is worse than
+#   a loud refusal.
 #
 #   The read helpers stay defensively lenient about one UNTERMINATED trailing line
 #   (all an out-of-band truncation could leave) and surface a malformed BODY line
@@ -200,13 +220,56 @@ JQ
 
 # --- writer -----------------------------------------------------------------
 
+# _audit_fsync_append_program
+#   Echo the inline python3 program that performs the durable append: read the
+#   whole record from STDIN, write it to the target file (argv[1]) in ONE
+#   write(2) on an O_APPEND fd, then fsync(2) that fd before exiting. Both
+#   guarantees — single atomic write AND flush to stable storage — are kept by
+#   the same process on the same descriptor.
+#
+#   WHY python3 AND NOT `dd conv=fsync` (#275 offered both; only this one works)
+#   `dd` cannot do an fsync'd APPEND on BSD/macOS, which this plugin targets
+#   (see docs/testing.md's macOS lane). All three formulations fail there:
+#     - `dd conv=fsync oflag=append of=FILE` → `dd: unknown open flag append`;
+#       `oflag=` is a GNU coreutils extension, absent from BSD dd.
+#     - `dd conv=fsync >> FILE`              → `dd: fsyncing stdout: Invalid
+#       argument`; BSD dd refuses to fsync a descriptor it did not open itself,
+#       so the write lands UNFLUSHED — the exact fail-open this issue closes.
+#     - `dd conv=fsync of=FILE` (no append)  → TRUNCATES the audit log. Fatal.
+#   Even where `oflag=append` exists, dd splits a record larger than its block
+#   size across several write(2) calls, breaking the single-atomic-write
+#   guarantee this file is built on. python3's os.write does exactly one.
+#
+#   Short writes fail CLOSED: os.write on a regular file writes the whole buffer
+#   except under ENOSPC-class failure, so a short return means the record is
+#   torn — the program exits non-zero rather than fsyncing a partial line and
+#   reporting success. (The no-fuse guard in _audit_append isolates the fragment
+#   on the next append; the reader skips an unterminated trailing line.)
+_audit_fsync_append_program() {
+  cat <<'PY'
+import os, sys
+data = sys.stdin.buffer.read()
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+try:
+    n = os.write(fd, data)
+    if n != len(data):
+        sys.exit("audit-log: short write (%d of %d bytes) — record is torn" % (n, len(data)))
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+}
+
 # _audit_append <operation_json> <result_json> <dry_run>
 #   Append exactly one JSONL record built from the three inputs. Pure: the only
 #   side effect is the append. The audit dir and monthly file are created on
 #   first write if absent. Append-only — never rewrites, truncates, or seeks; the
 #   record is emitted as a single atomic, newline-terminated write so a crash can
 #   never leave a partial/truncated line, and a new record is never fused onto a
-#   pre-existing dangling fragment.
+#   pre-existing dangling fragment. That write is then fsync(2)'d before this
+#   function returns 0, so a successful return means the record is on stable
+#   storage — not merely in the page cache (#275). If the fsync shim is missing or
+#   fails, the append FAILS (non-zero) rather than reporting an undurable success.
 #
 #   TRUSTED PASS-THROUGH — no normalization, no validation. The writer stores
 #   $res.status verbatim into result_status (and every other field likewise); it
@@ -277,6 +340,16 @@ _audit_append() {
   local dir; dir="$(_audit_dir)"
   local file; file="$(_audit_file)"
 
+  # Fail CLOSED when the fsync shim is unavailable, BEFORE creating anything: this
+  # function cannot keep the durability guarantee its callers and docs rely on
+  # without it, and an audit record that silently isn't durable is worse than a
+  # loud refusal. Checked here rather than at the write so a refused append leaves
+  # no trace at all — no audit dir, no file.
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "audit-log: python3 is required to fsync each record; refusing to append without a durability guarantee" 1>&2
+    return 1
+  fi
+
   if ! ( umask 077; mkdir -p "$dir" ) 2>/dev/null; then
     echo "audit-log: cannot create audit dir: $dir" 1>&2
     return 1
@@ -286,13 +359,15 @@ _audit_append() {
     return 1
   fi
 
-  # Atomic, never-truncating append. The record is one compact JSONL line (jq -c,
-  # no interior newlines), so a single `printf` to the O_APPEND fd (`>>`) emits the
-  # whole record plus its terminating newline in one write(2). A regular-file write
-  # of a sub-page buffer is copied to the page cache uninterruptibly, so a crash
-  # (SIGKILL / power loss) leaves either zero bytes or the whole newline-terminated
-  # record — never a partial, truncated line. O_APPEND also positions every write at
-  # EOF atomically, so concurrent appenders never interleave.
+  # Atomic, never-truncating, FSYNC'd append. The record is one compact JSONL line
+  # (jq -c, no interior newlines), so the shim emits the whole record plus its
+  # terminating newline in one write(2) on an O_APPEND fd, then fsync(2)s that fd
+  # before exiting. A regular-file write of a sub-page buffer is copied to the page
+  # cache uninterruptibly, so a crash (SIGKILL / power loss) leaves either zero
+  # bytes or the whole newline-terminated record — never a partial, truncated line
+  # — and the fsync means an ALREADY-RETURNED record is on stable storage, not just
+  # in the page cache (#275). O_APPEND also positions every write at EOF atomically,
+  # so concurrent appenders never interleave.
   #
   # Belt-and-suspenders: if the file somehow does NOT already end in a newline (a
   # dangling fragment from an out-of-band truncation — this writer never leaves one),
@@ -304,7 +379,12 @@ _audit_append() {
   if [ -s "$file" ] && [ -n "$(tail -c1 "$file")" ]; then
     nl=$'\n'
   fi
-  if ! ( umask 077; printf '%s%s\n' "$nl" "$record" >> "$file" ); then
+  # `umask 077` is belt-and-suspenders only — the shim already passes an explicit
+  # 0600 creation mode — and stays scoped to the subshell so sourcing this helper
+  # never mutates the caller's umask. The subshell's status is the pipeline's, i.e.
+  # the shim's, so a failed write or fsync fails the append.
+  if ! ( umask 077; printf '%s%s\n' "$nl" "$record" \
+           | python3 -c "$(_audit_fsync_append_program)" "$file" ); then
     echo "audit-log: append failed: $file" 1>&2
     return 1
   fi
