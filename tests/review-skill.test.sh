@@ -53,6 +53,76 @@ assert_absent_re() {
   fi
 }
 
+# ---- section-scoped assertions ------------------------------------------------
+# Whole-file greps above are fine for needles that appear exactly once, or for
+# genuinely document-level claims (the READ-ONLY banner, the write-verb bans).
+# They are NOT fine where the needle also appears in unrelated prose: e.g.
+# `bin/html-escape.sh` is named in §8's slot table (footer-persona) and
+# `tax profile unavailable (<error.kind>)` is named in §4, so a whole-file check
+# for either is satisfied by text that has nothing to do with the rule being
+# pinned. Those assertions are scoped to the section that must carry the
+# behaviour, mirroring tests/unit/portfolio-report.test.sh.
+
+# skill_section <n> — emit the body of the skill's "## <n>. …" section, up to (not
+# including) the next "## " heading or "---" rule. Empty when the section is
+# deleted or renumbered, so every scoped assertion goes red when its section moves.
+skill_section() {
+  awk -v h="^## $1\\\\. " '
+    $0 ~ h { f = 1; next }
+    f && (/^## / || /^---$/) { exit }
+    f
+  ' "$SKILL"
+}
+
+# skill_subsection <heading-prefix> — emit the body of the skill's
+# "### <heading-prefix>…" subsection, up to the next "## "/"### " heading or "---".
+# Both extractors drop the heading line itself (`next`): a heading restates its own
+# section's topic words, so including it would let the heading satisfy an assertion
+# meant to pin the body.
+skill_subsection() {
+  awk -v h="$1" '
+    index($0, "### " h) == 1 { f = 1; next }
+    f && (/^## / || /^### / || /^---$/) { exit }
+    f
+  ' "$SKILL"
+}
+
+# flatten — collapse newlines/runs of spaces, so a prose assertion survives
+# markdown line-wrapping.
+flatten() { tr '\n' ' ' | tr -s ' '; }
+
+# assert_in <desc> <text> <literal> — <text> must contain <literal>.
+assert_in() {
+  local desc="$1" text="$2" needle="$3"
+  if printf '%s\n' "$text" | grep -qF -- "$needle"; then
+    printf 'ok   — %s\n' "$desc"; pass=$((pass + 1))
+  else
+    printf 'FAIL — %s: %q not found in section\n' "$desc" "$needle"; fail=$((fail + 1))
+  fi
+}
+
+# assert_in_flat_re <desc> <text> <regex> — <text>, newline-flattened, must match.
+assert_in_flat_re() {
+  local desc="$1" text="$2" re="$3"
+  if printf '%s\n' "$text" | flatten | grep -qE -- "$re"; then
+    printf 'ok   — %s\n' "$desc"; pass=$((pass + 1))
+  else
+    printf 'FAIL — %s: /%s/ did not match (flattened) in section\n' "$desc" "$re"; fail=$((fail + 1))
+  fi
+}
+
+# assert_section_nonempty <desc> <text> — the extractor found the section at all.
+# Without this, every scoped assertion below would fail with a confusing message
+# (rather than "the section is gone") if a heading were renamed.
+assert_section_nonempty() {
+  local desc="$1" text="$2"
+  if [ -n "$text" ]; then
+    printf 'ok   — %s\n' "$desc"; pass=$((pass + 1))
+  else
+    printf 'FAIL — %s: section extractor returned nothing\n' "$desc"; fail=$((fail + 1))
+  fi
+}
+
 # ---- the skill exists at the AC-specified path --------------------------------
 if [ ! -f "$SKILL" ]; then
   printf 'FAIL — skill missing at %s\n' "$SKILL"
@@ -97,17 +167,55 @@ assert_present "no hardcoded tax constants rule"   "No hardcoded tax constants"
 # and a property name can be secret-shaped. The report is human-facing output, so
 # the unavailable-message must carry the redacted `error.kind` only — the old
 # "tax profile unavailable: <error path>" form interpolated the raw path.
+#
+# Scoped to §4 (the section that states the rule): the unavailable-message string
+# is now quoted in §8's trust-boundary contract too, so a whole-file check for it
+# would pass even if §4 stopped restricting the message at all.
+s4="$(skill_section 4)"
+assert_section_nonempty "§4 (config loaders) is present and extractable" "$s4"
+
 assert_absent_re "tax-unavailable message does not interpolate the raw error path" \
   'unavailable: <error'
 # shellcheck disable=SC2016  # literal needles: markdown backticks, no expansion
-assert_present    "tax-unavailable message reports error.kind" \
+assert_in "§4 tax-unavailable message reports error.kind" "$s4" \
   'tax profile unavailable (<error.kind>)'
 # shellcheck disable=SC2016
-assert_present    "report is restricted to error.kind + error.message" \
-  'Report only `error.kind` + `error.message`'
+assert_in "§4 pins error.kind to the fixed enum values" "$s4" \
+  '`schema` / `io` / `parse` / `depth`'
 # shellcheck disable=SC2016
-assert_present    "raw errors[] detail is banned from the report" \
+assert_in "§4 raw errors[] detail is banned from the report" "$s4" \
   'never the `error.errors[]`'
+
+# ---- error.message is scoped to the NON-HTML surface only (issue #273) --------
+# The old wording ("Report only `error.kind` + `error.message`") named one rule for
+# every surface, so it read as license to interpolate `error.message` into the
+# `SLOT:section-12-tax-summary` HTML fragment. That message embeds the
+# caller-supplied `tax_profile_path` / $YNAB_TAX_PROFILE_FILE through redact(),
+# which masks home directories only and does NOT HTML-escape. §4 must now split the
+# two surfaces explicitly and forbid the message on the markup side.
+assert_in "§4 splits the two reporting surfaces" "$s4" \
+  'Two surfaces, two different rules'
+# shellcheck disable=SC2016
+assert_in_flat_re "§4 forbids error.message in the HTML tax-summary fragment" "$s4" \
+  'SLOT:section-12-tax-summary.*Never render .error\.message. there'
+# Two assertions, same bullet — mirroring the pairing above. The first pins the
+# surface itself (which surface, and why it is exempt: plain text, not markup).
+# The second pins the allowance CLAUSE verbatim, and is the one that carries the
+# `error.message` token: on its own the first regex stops at `error\.kind` and
+# never mentions `error.message` at all, so a meaning-changing edit that revokes
+# the allowance ("may report `error.kind` only. Never `error.message` here
+# either") would leave it green. Pinning `may report `error.kind` + `error.message``
+# as one contiguous clause means both directions redden — deleting the allowance,
+# or narrowing it to the kind alone.
+# shellcheck disable=SC2016
+assert_in_flat_re "§4 scopes the non-HTML dispatch/session surface as plain text, not markup" "$s4" \
+  'dispatch summary and the session output .* plain text, not markup .* report .error\.kind'
+# shellcheck disable=SC2016
+assert_in_flat_re "§4 allows error.message on that surface, by name" "$s4" \
+  'dispatch summary and the session output .* may report .error\.kind. [+] .error\.message.'
+# shellcheck disable=SC2016
+assert_in_flat_re "§4 states redact() does not HTML-escape" "$s4" \
+  'redact.*(does not HTML-escape|masks home-directory spellings)'
 
 # ---- all 12 methodology sections (AC) ----------------------------------------
 sections=(
@@ -193,6 +301,57 @@ assert_present "HTML-escapes untrusted YNAB strings" "HTML-escape"
 # ad-hoc hand-escaping — so the section emitters and persona/report-writer all use
 # a single implementation that can't drift.
 assert_present "routes YNAB strings through the shared escaper" "bin/html-escape.sh"
+
+# ---- the tax-loader failure text is a NAMED, ESCAPED source (issue #273) ------
+# Every needle below is scoped to the trust-boundary subsection. Both are
+# genuinely ambiguous document-wide: `bin/html-escape.sh` appears in §8's slot
+# table (footer-persona) and `tax profile unavailable (<error.kind>)` appears in
+# §4, so whole-file checks would stay green with the trust-boundary contract
+# deleted outright.
+tb="$(skill_subsection 'Trust boundary')"
+assert_section_nonempty "§8 trust-boundary subsection is present and extractable" "$tb"
+
+assert_in_flat_re "trust boundary enumerates its escaped sources as four" "$tb" \
+  'Four sources, one rule, no carve-outs'
+# The "four" above is a prose claim; these four pin it to actual named sources, so
+# the count cannot drift away from the list it describes.
+assert_in "…source 1: payee names and memos" "$tb" \
+  "**Payee names and memos**"
+assert_in "…source 2: category and account names" "$tb" \
+  "**Category and account names**"
+assert_in "…source 3: formatted amounts (the off-the-wire currency_symbol)" "$tb" \
+  "**Formatted amounts**"
+assert_in "…source 4: the tax-loader failure text" "$tb" \
+  "**The tax-loader failure text**"
+# shellcheck disable=SC2016
+assert_in "…identifying §4's profile-failure string" "$tb" \
+  'tax profile unavailable (<error.kind>)'
+# The §12 tax-year failure fills the SAME slot on the SAME failure class; naming
+# only its sibling would ship the rule half-applied.
+# shellcheck disable=SC2016
+assert_in "…and the sibling tax-year failure string that fills the same slot" "$tb" \
+  'tax year unresolvable (<error kind>)'
+assert_in "…and the slot both of them reach" "$tb" \
+  "SLOT:section-12-tax-summary"
+# The escaper call itself, not just a mention of the helper: `--` before the value
+# so a failure text starting `-h`/`--raw` is escaped as DATA, never a flag.
+# shellcheck disable=SC2016
+assert_in "routes the failure text through the shared escaper before the slot fill" "$tb" \
+  'safe_tax_error="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" -- "$tax_error")"'
+assert_in_flat_re "trust boundary states config strings are a trust boundary" "$tb" \
+  'trust boundary, not trusted input'
+assert_in_flat_re "trust boundary admits no exemption beyond the pre-escaped persona name" "$tb" \
+  'No string interpolated into a fragment is outside this rule'
+
+# The §12 failure path must point back at the escaping contract where it is
+# rendered, not only from §8 — an instruction is followed where it is read.
+s12="$(skill_subsection '§12 call')"
+assert_section_nonempty "§12 call subsection is present and extractable" "$s12"
+assert_in_flat_re "§12 routes the tax-year failure text through the escaper too" "$s12" \
+  'tax year unresolvable .*bin/html-escape\.sh. before it fills the slot'
+# shellcheck disable=SC2016
+assert_in_flat_re "§12 tax-year failure carries the kind only, never a thrown message" "$s12" \
+  'carries the error \*\*kind\*\* only .* never a thrown error.s .message.'
 
 # ---- milliunit rule (AC) -----------------------------------------------------
 assert_present_re "divides milliunits by 1000" "milliunit|/ ?1000|by .*1000"
