@@ -676,6 +676,38 @@ test_manual_step4_reads_the_mode_through_a_symlink() {
   rm -rf "$S4_SANDBOX"
 }
 
+# The two remaining links in the by-hand `&&` chain, EXECUTED rather than
+# string-matched. Their command-site mirrors are covered by
+# test_settings_invalid_staged_json_is_rejected and
+# test_settings_failed_mode_restore_fails_closed; the doc had only grep-level
+# proof, which cannot catch a broken `&&`/`||` short-circuit that leaves the
+# predicate text intact.
+
+# The rewrite "succeeds" but stages invalid JSON — the `jq -e .` link, not the
+# exit status of the rewrite, is what must stop the swap.
+test_manual_step4_invalid_staged_json_is_rejected() {
+  local expected; expected="$(mktemp)"; write_settings "$expected"
+  run_doc_step4 _s4_bad_rewrite 'umask 022'
+  assert_contains "$B_OUT" "left untouched" "the by-hand chain reports the refusal"
+  assert_eq "$(cat "$expected")" "$S4_AFTER" \
+    "an invalid staged rewrite must leave settings.json byte-for-byte untouched"
+  assert_eq "0" "$S4_TMP_LEFT" "the invalid staged .tmp is cleaned up, not left beside the real file"
+  rm -f "$expected"; rm -rf "$S4_SANDBOX"
+}
+
+# The mode cannot be re-applied to the staged file — the `chmod` link must break
+# the chain rather than let the swap publish at the umask's mode.
+test_manual_step4_failed_mode_restore_fails_closed() {
+  local expected; expected="$(mktemp)"; write_settings "$expected"
+  run_doc_step4 _s4_no_chmod 'umask 022'
+  assert_contains "$B_OUT" "left untouched" "the by-hand chain reports the refusal"
+  assert_eq "$(cat "$expected")" "$S4_AFTER" \
+    "a failed mode restore must leave settings.json byte-for-byte untouched"
+  assert_eq "600" "$(mode_of "$S4_SETTINGS")" "the original mode is left alone"
+  assert_eq "0" "$S4_TMP_LEFT" "the staged .tmp is cleaned up, not left beside the real file"
+  rm -f "$expected"; rm -rf "$S4_SANDBOX"
+}
+
 # ---------------------------------------------------------------------------
 # AC #5 / #6 — the data directory: prompt content, then all four branches
 # ---------------------------------------------------------------------------
