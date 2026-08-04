@@ -55,7 +55,13 @@
 # EXIT CODES
 #   0  report written
 #   1  a required slot was missing / empty (no file written)
-#   2  usage error (bad flag, bad tier, bad date, unknown slot, missing template)
+#   2  usage error (bad flag, bad tier, bad date, unknown slot, missing template),
+#      OR a config.json that is present but does not parse (issue #290) — the
+#      loader names the file and the repair on stderr and this writer stops
+#      WITHOUT writing, rather than silently falling back to the shipped default
+#      template / output directory. Passing both --template and --output-dir
+#      skips the config entirely, so an unconfigured or corrupt host can still
+#      render by supplying every path on the command line.
 #
 # bash 3.2 compatible (macOS system bash): indexed arrays only (no associative
 # arrays / `declare -A`), no `${x,,}`, no mapfile. Array expansions are guarded so
@@ -228,14 +234,37 @@ fi
 
 # --- resolve template -------------------------------------------------------
 template="$cli_template"
-[ -z "$template" ] && template="$(_cfg '.report.template_path')"
+# The config read FAILS CLOSED on a config.json that is present but does not
+# parse (issue #290, extending #283). `_cfg` has already named the file and the
+# repair on stderr, so this just stops — silently substituting $DEFAULT_TEMPLATE
+# would render the report from a template the user did not choose, and a
+# corrupt file is indistinguishable from an unset field at this call site.
+#
+# The status is checked in an `if` block rather than the previous
+# `[ -z … ] && template="$(_cfg …)"` one-liner: in an && chain the assignment's
+# status is the chain's status, and under `set -uo pipefail` (no `set -e`) that
+# status is simply discarded — the fail-open would survive the guard.
+#
+# NOT `_require_config` up front: this writer is contracted to run on a host with
+# NO config at all (every path has a CLI flag and a shipped default), and
+# _require_config refuses a missing file. Per-read status checks harden the
+# corrupt-file case without breaking the unconfigured one.
+if [ -z "$template" ]; then
+  template="$(_cfg '.report.template_path')" || exit 2
+fi
 [ -z "$template" ] && template="$DEFAULT_TEMPLATE"
 template="$(expand_path "$template")" || usage_err "template path did not fully resolve (a leading ~ or a \$VAR expand_path could not settle — e.g. a self-referential value): check --template / .report.template_path"
 [ -f "$template" ] || usage_err "template not found: $template"
 
 # --- resolve output directory (config → default), tolerate a trailing slash --
 out_dir="$cli_output_dir"
-[ -z "$out_dir" ] && out_dir="$(_cfg '.report.output_dir')"
+# Fails closed on an unparseable config for the same reason as the template read
+# above (issue #290) — here the cost of falling through is writing the report to
+# ~/Documents/Claude/Reports when the user configured it somewhere else entirely,
+# leaving unencrypted financial records in a directory they are not watching.
+if [ -z "$out_dir" ]; then
+  out_dir="$(_cfg '.report.output_dir')" || exit 2
+fi
 [ -z "$out_dir" ] && out_dir="$DEFAULT_OUTPUT_DIR"
 out_dir="$(expand_path "$out_dir")" || usage_err "output dir did not fully resolve (a leading ~ or a \$VAR expand_path could not settle — e.g. a variable whose value is itself unresolvable, or a self-referential value): check .report.output_dir"
 # A path that expands to empty (e.g. .report.output_dir referencing an unset

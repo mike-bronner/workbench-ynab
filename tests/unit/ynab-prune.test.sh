@@ -438,4 +438,115 @@ test_retention_age_boundary_is_exact() {
   return 0
 }
 
+# --- unparseable config: fail closed (issue #290) ----------------------------
+#
+# A config.json that is PRESENT but does not parse must stop this pruner BEFORE
+# it scans or deletes anything, not read back as "no fields set" and sweep on
+# $DEFAULT_RETENTION_DAYS / $DEFAULT_OUTPUT_DIR. This tool DELETES under --apply,
+# so a silent default is a deletion at a threshold and in a directory the user
+# never chose.
+#
+# The four fixtures mirror tests/unit/config.test.sh's set, covering both jq
+# failure routes: a parse error (truncated, trailing comma, bare word) and "no
+# JSON value was ever produced" (a zero-byte file, which `jq empty` accepts
+# silently).
+bad_prune_config() {
+  local name="$1" body="$2"
+  local path="$SANDBOX/bad-$name.json"
+  printf '%s' "$body" > "$path"
+  printf '%s' "$path"
+}
+
+# (i) The `.report.retention_days` read (site 1). --output-dir IS passed and
+#     --days is NOT, so the run must die at the retention read, before the
+#     output-dir site is ever reached.
+test_unparseable_config_fails_closed_at_retention_read() {
+  local body bad dir rc err
+  for body in '{ "report": { "retention_days": 365 }' '{ "report": {} }, }' 'not json at all' ''; do
+    bad="$(bad_prune_config "days-$RANDOM" "$body")"
+    dir="$SANDBOX/prune-days-fail-$RANDOM"
+    seed_reports "$dir"
+    rc=0
+    err="$( YNAB_CONFIG_FILE="$bad" bash "$PRUNE" --output-dir "$dir" --apply 2>&1 >/dev/null )" || rc=$?
+    assert_eq "2" "$rc" "unparseable config → exit 2 at the .report.retention_days read ($body)"
+    assert_contains "$err" "not valid JSON" "the loader's parse-failure message reaches the user ($body)"
+    assert_contains "$err" "$bad" "the error names the unparseable config file ($body)"
+    # NOTHING deleted — this is the assertion the whole guard exists for. The old
+    # reports here are years past the DEFAULT 30-day threshold, so a fail-open
+    # would have removed them.
+    assert_file_exists "$dir/YNAB-Weekly-Review-2020-01-01.html"
+    assert_file_exists "$dir/YNAB-Monthly-Review-2020-02-15.html"
+    assert_file_exists "$dir/YNAB-Weekly-Review-2099-01-01.html"
+    assert_file_exists "$dir/notes.txt"
+  done
+  return 0
+}
+
+# (ii) The `.report.output_dir` read (site 2) — a SEPARATE call site that test (i)
+#      never reaches, because the run dies at the retention read first. --days IS
+#      passed here so the retention site is skipped and the output-dir read is the
+#      one under test. Without this case, leaving site 2 unguarded would pass test
+#      (i) unchanged.
+test_unparseable_config_fails_closed_at_output_dir_read() {
+  local body bad dir rc err
+  for body in '{ "report": { "output_dir": "/tmp/x" }' '{ "report": {} }, }' 'not json at all' ''; do
+    bad="$(bad_prune_config "dir-$RANDOM" "$body")"
+    # Seed the DEFAULT directory (HOME is the sandbox): a fail-open at this site
+    # sweeps exactly here, so this is where the damage would land.
+    dir="$SANDBOX/Documents/Claude/Reports"
+    rm -rf "$dir"
+    seed_reports "$dir"
+    rc=0
+    err="$( YNAB_CONFIG_FILE="$bad" bash "$PRUNE" --days 30 --apply 2>&1 >/dev/null )" || rc=$?
+    assert_eq "2" "$rc" "unparseable config → exit 2 at the .report.output_dir read ($body)"
+    assert_contains "$err" "not valid JSON" "the loader's parse-failure message reaches the user ($body)"
+    assert_contains "$err" "$bad" "the error names the unparseable config file ($body)"
+    assert_file_exists "$dir/YNAB-Weekly-Review-2020-01-01.html"
+    assert_file_exists "$dir/YNAB-Monthly-Review-2020-02-15.html"
+  done
+  return 0
+}
+
+# (iii) The guard must not have become "any config read is fatal". A PRESENT value
+#       is still used at both sites, and the legitimate empties still fall through
+#       to the shipped defaults with exit 0 and no parse-failure message.
+test_present_config_values_still_used_at_both_prune_sites() {
+  local cfg="$SANDBOX/prune-both-present.json" dir="$SANDBOX/prune-both-present-dir" out rc=0
+  seed_reports "$dir"
+  # 3650 days keeps even the 2020 reports — a threshold the DEFAULT 30 would not
+  # produce, so this discriminates "config honoured" from "defaulted".
+  cat > "$cfg" <<JSON
+{ "report": { "retention_days": 3650, "output_dir": "$dir" } }
+JSON
+  out="$( YNAB_CONFIG_FILE="$cfg" bash "$PRUNE" --apply )" || rc=$?
+  assert_eq "0" "$rc" "present config values → exit 0"
+  assert_file_exists "$dir/YNAB-Weekly-Review-2020-01-01.html"
+  assert_contains "$out" "$dir" "the configured output_dir is the directory scanned"
+}
+
+test_legitimate_empty_config_fields_still_default_silently() {
+  local cfg dir err rc
+  printf '%s' '{}' > "$SANDBOX/prune-empty-obj.json"
+  printf '%s' '{ "report": { "retention_days": null, "output_dir": null } }' > "$SANDBOX/prune-null-fields.json"
+  for cfg in "$SANDBOX/prune-empty-obj.json" "$SANDBOX/prune-null-fields.json"; do
+    # Both fields empty → default 30 days in the default ~/Documents/Claude/Reports.
+    dir="$SANDBOX/Documents/Claude/Reports"
+    rm -rf "$dir"
+    seed_reports "$dir"
+    rc=0
+    err="$( YNAB_CONFIG_FILE="$cfg" bash "$PRUNE" --apply 2>&1 >/dev/null )" || rc=$?
+    assert_eq "0" "$rc" "legitimate empty config ($(basename "$cfg")) still exits 0"
+    case "$err" in
+      *"not valid JSON"*) fail "legitimate empty config ($(basename "$cfg")) reported a parse failure" ;;
+    esac
+    # It really ran on the defaults: the 2020 reports are past 30 days and gone,
+    # the fresh one and the non-report survive.
+    [ -e "$dir/YNAB-Weekly-Review-2020-01-01.html" ] \
+      && fail "legitimate empty config ($(basename "$cfg")) did not prune on the default threshold"
+    assert_file_exists "$dir/YNAB-Weekly-Review-2099-01-01.html"
+    assert_file_exists "$dir/notes.txt"
+  done
+  return 0
+}
+
 run_tests

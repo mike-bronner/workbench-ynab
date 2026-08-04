@@ -47,3 +47,9 @@ disk indefinitely.
   or any sub-directory.
 - **Retention is config-driven.** The threshold comes from
   `.report.retention_days` (default 30) — never hardcode a different value here.
+- **A corrupt config stops the run.** If `config.json` is present but does not
+  parse, the helper exits **2** before scanning or deleting anything, naming the
+  file on stderr (issue #290). It does not sweep on the defaulted threshold or
+  the defaulted directory. Report the parse failure and the repair; do not retry
+  with `--days`/`--output-dir` to route around it unless the user asks for that
+  explicitly.

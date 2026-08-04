@@ -373,4 +373,52 @@ test_step13_documents_required_timezone_invariant() {
     "the walk forbids writing an invalid/empty .timezone"
 }
 
+# --- setup is the REPAIR path: it must survive a corrupt config (issue #290) ---
+#
+# bin/persona.sh now exits non-zero on a config file that is present but does not
+# parse. Setup calls it to pre-fill the persona prompt — and setup is the one
+# command that FIXES a corrupt config, so that call must degrade to "no default
+# to offer" rather than abort the run.
+#
+# The assertion is scoped to the fenced block that makes the call, not a
+# whole-file grep: `PERSONA_DEFAULT` also appears in the surrounding prose and in
+# the field-walk table, so an unscoped check would pass even if the `||` guard
+# were deleted from the actual command line.
+test_persona_default_call_tolerates_an_unparseable_config() {
+  local block
+  # The needle is literal command source text — never expanded here.
+  # shellcheck disable=SC2016
+  block="$(extract_fenced_block_containing 'bin/persona.sh" name')"
+  [ -n "$block" ] || { fail "could not extract the Step 3 PERSONA_DEFAULT block"; return; }
+  # shellcheck disable=SC2016
+  assert_contains "$block" '|| PERSONA_DEFAULT=""' \
+    "the PERSONA_DEFAULT call carries the || fallback, so an unparseable config cannot abort setup"
+
+  # Behavioural half: run the extracted block against the REAL bin/persona.sh
+  # with a config that does not parse, and confirm it survives with an empty
+  # default rather than a guessed name.
+  #
+  # HONEST SCOPE — verified by mutation, not assumed. Deleting the `||` guard
+  # does NOT redden this half: the block runs without `set -e`, so the failed
+  # substitution leaves PERSONA_DEFAULT empty and the script continues to exit 0
+  # either way. The source-text assertion above is the one that pins the guard.
+  # What this half independently proves is that persona.sh is genuinely reachable
+  # and non-zero-exiting here (so the guard is answering a real failure, not a
+  # hypothetical), and it is the assertion that would catch setup's block gaining
+  # a `set -e`/`set -o errexit` — the change that WOULD make the missing guard
+  # abort the run.
+  local sb rc=0 out
+  sb="$(mktemp -d)"
+  printf '{ "persona": { "name": "Calvin"\n' > "$sb/bad.json"
+  # The trailing printf is literal source written INTO run.sh — $PERSONA_DEFAULT
+  # must expand there (after the block sets it), not here.
+  # shellcheck disable=SC2016
+  { printf 'set -u\n'; printf '%s\n' "$block"; printf 'printf "[%%s]\\n" "$PERSONA_DEFAULT"\n'; } > "$sb/run.sh"
+  out="$( CLAUDE_PLUGIN_ROOT="$REPO_ROOT" YNAB_CONFIG_FILE="$sb/bad.json" \
+            WORKBENCH_CORE_CONFIG_FILE="$sb/absent.json" bash "$sb/run.sh" 2>/dev/null )" || rc=$?
+  assert_eq "0" "$rc" "the extracted PERSONA_DEFAULT block survives an unparseable config"
+  assert_eq "[]" "$out" "it degrades to an empty persona default rather than a guessed name"
+  rm -rf "$sb"
+}
+
 run_tests

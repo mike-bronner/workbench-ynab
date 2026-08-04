@@ -135,7 +135,7 @@ visible rather than masquerading as a plain "missing slot".
 |---|---|
 | `0` | Report written; the absolute path is on stdout. |
 | `1` | A required slot was missing or empty — **no file written**. |
-| `2` | Usage error: bad flag, bad `--tier`, an out-of-range or malformed `--date`, an unknown, invalid, or **duplicate** slot name, an output dir or template path that resolves to empty, to the filesystem root `/`, or that **does not fully resolve** (a surviving component-leading `~` — including a `~user` form — or `$VAR`), or a **missing or malformed** template. |
+| `2` | Usage error: bad flag, bad `--tier`, an out-of-range or malformed `--date`, an unknown, invalid, or **duplicate** slot name, an output dir or template path that resolves to empty, to the filesystem root `/`, or that **does not fully resolve** (a surviving component-leading `~` — including a `~user` form — or `$VAR`), or a **missing or malformed** template. Also a `config.json` that is present but **does not parse** (issue #290) — the writer stops **without writing** rather than falling back to the shipped default template / output directory; see [docs/config-loader.md](config-loader.md#malformed-config-behaviour-fail-closed). Passing both `--template` and `--output-dir` skips the config entirely. |
 
 ## Portability
 

@@ -154,14 +154,24 @@ Read the existing config first so every prompt can default to the current value:
 have_cfg=0
 [ -f "$CONFIG_FILE" ] && have_cfg=1
 # Read a field's current value (empty when absent/unset):
+#
+# DELIBERATELY fail-open, unlike every other config reader in the plugin
+# (bin/config.sh, bin/persona.sh, bin/report-writer.sh, bin/ynab-prune.sh all
+# fail closed on an unparseable file — issue #290). Setup is the REPAIR path: it
+# reads the old file only to pre-fill prompts and then REWRITES it, so a corrupt
+# file must degrade to "no defaults to offer", never lock the user out of the one
+# command that fixes it. See docs/config-loader.md.
 cfg() { [ "$have_cfg" = 1 ] && jq -r "$1 // empty" "$CONFIG_FILE" 2>/dev/null; }
 ```
 
 Resolve the **persona default** through the shared loader so the prompt offers
-the right name (explicit override → workbench-core agent name → `Hobbes`):
+the right name (explicit override → workbench-core agent name → `Hobbes`). The
+`||` fallback is load-bearing for the same repair-path reason: `persona.sh` now
+exits non-zero on a config file that does not parse (issue #290), and setup must
+carry on with no pre-filled name rather than abort:
 
 ```bash
-PERSONA_DEFAULT="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/persona.sh" name)"
+PERSONA_DEFAULT="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/persona.sh" name)" || PERSONA_DEFAULT=""
 ```
 
 Walk the M1-6 schema fields (see `docs/config-schema.md`) with `AskUserQuestion`,
