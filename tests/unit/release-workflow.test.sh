@@ -27,6 +27,11 @@
 #     refuses to re-run;
 #   * the sterile-event chain (gh workflow run) that makes the marketplace pin
 #     fire at all;
+#   * the release notes' "What changed" source (issue #70): the CHANGELOG entry
+#     via scripts/changelog-extract.sh, with EXACTLY two outcomes besides
+#     success — fall back to the dispatch description when there is no entry,
+#     fail the run on any other extraction error. A third branch, or a silent
+#     substitution, would publish wrong notes on a forward-only release;
 #   * the pin workflow's portability (plugin name read from plugin.json),
 #     annotated-tag dereference, manual-backfill tag consumption, loud
 #     missing-token and malformed-marketplace failures, silent no-ops, and the
@@ -114,6 +119,55 @@ exec_only() { printf '%s\n' "$1" | grep -v '^ *#' || true; }
 # assertions still see the URL.
 cont_block() {
   printf '%s\n' "$2" | awk -v pat="$1" 'index($0, pat){f=1} f{print} f && !/\\$/{exit}'
+}
+
+# notes_branch — release.yml's CHANGELOG→notes branch (issue #70), lifted out
+# of the `run:` block scalar and dedented so it can actually be EXECUTED. Every
+# other assertion in this file is a static text check because workflows only
+# run on GitHub's runners; this one branch is different — it is ordinary shell
+# with no Actions dependency, and it decides whether a release publishes real
+# notes, the fallback description, or nothing at all. Text alone cannot tell a
+# working three-way branch from a broken one, so the tests below run this text
+# verbatim against real fixtures. Lifting (rather than restating) the shell is
+# what keeps that honest: edit the workflow and these tests run the edit.
+notes_branch() {
+  awk '
+    index($0, "NOTES_RC=0") { f = 1 }
+    f { sub(/^          /, ""); print }
+    f && /^fi$/ { exit }
+  ' "$RELEASE"
+}
+
+# run_notes_branch <version> <desc> <changelog-mode> — execute notes_branch in a
+# throwaway tree holding the real extractor, then print the resulting
+# WHAT_CHANGED between markers so a trailing-newline difference cannot hide.
+# Echoes the branch's own stdout first; sets $rc. <changelog-mode> is one of:
+#   entry   a changelog whose 9.9.9 section has a body
+#   empty   a changelog whose 9.9.9 section is empty
+#   none    no changelog at all
+#   broken  a DIRECTORY at CHANGELOG.md — extraction fails (exit 2)
+run_notes_branch() {
+  local version="$1" desc="$2" mode="$3" dir
+  dir=$(mktemp -d)
+  mkdir -p "$dir/scripts"
+  cp "$REPO_ROOT/scripts/changelog-extract.sh" "$dir/scripts/changelog-extract.sh"
+  case "$mode" in
+    entry) printf '# Changelog\n\n## [9.9.9] - 2026-01-02\n\n### Added\n\n- Real entry text\n\n## [9.9.8] - 2026-01-01\n\n- older\n' > "$dir/CHANGELOG.md" ;;
+    empty) printf '# Changelog\n\n## [9.9.9] - 2026-01-02\n\n## [9.9.8] - 2026-01-01\n\n- older\n' > "$dir/CHANGELOG.md" ;;
+    none) : ;;
+    broken) mkdir "$dir/CHANGELOG.md" ;;
+    *) fail "unknown changelog mode: $mode" ;;
+  esac
+
+  set +e
+  out=$(cd "$dir" && NEW_VERSION="$version" DESC="$desc" bash -c "
+    set -euo pipefail
+    $(notes_branch)
+    printf '<<<%s>>>' \"\$WHAT_CHANGED\"
+  " 2>&1)
+  rc=$?
+  set -e
+  rm -rf "$dir"
 }
 
 # --- release.yml: trigger + inputs ------------------------------------------
@@ -433,6 +487,99 @@ test_release_creates_github_release() {
   # e.g. v1.2.30 when releasing v1.2.3.
   # shellcheck disable=SC2016
   assert_contains "$notes" 'grep -vFx "v${NEW_VERSION}"' "previous-tag lookup must be fixed-string, whole-line anchored"
+}
+
+test_release_notes_come_from_the_changelog() {
+  # Issue #70: "What changed" must be the CHANGELOG entry, not the dispatch
+  # description. Scope every assertion to the release step — file-wide would be
+  # satisfied by the step's own rationale comment.
+  notes=$(step_block "name: Create GitHub release" "name: Trigger marketplace SHA pin" "$RELEASE")
+  notes=$(exec_only "$notes")
+  # The extractor must exist, and be called with plain CLI args only — the
+  # standalone contract its unit tests rely on.
+  assert_file_exists "$REPO_ROOT/scripts/changelog-extract.sh"
+  # shellcheck disable=SC2016  # literal workflow text: $NEW_VERSION expands on the runner
+  assert_contains "$notes" 'bash scripts/changelog-extract.sh "$NEW_VERSION" CHANGELOG.md' \
+    "the notes must be extracted from CHANGELOG.md by the standalone script"
+  # The "What changed" slot must interpolate the extracted text. Pinning the
+  # slot (not merely "the variable is assigned somewhere") is what catches a
+  # revert to ${DESC} here while the assignment lingers above it.
+  # shellcheck disable=SC2016
+  assert_contains "$notes" '--notes "## What changed
+
+          ${WHAT_CHANGED}' "the What-changed slot must render the extracted entry"
+}
+
+test_release_notes_fallback_is_exactly_two_branches() {
+  # Exit 3 (no CHANGELOG / no matching heading) falls back to the dispatch
+  # description; ANY other non-zero fails the run. Key the block on the exit-3
+  # condition, polarity included: invert or delete it and the block empties,
+  # reddening every assertion below as one unit.
+  # shellcheck disable=SC2016  # literal workflow text: $NOTES_RC expands on the runner
+  branch=$(guard_block 'if [ "$NOTES_RC" -eq 3 ]' "$RELEASE")
+  # shellcheck disable=SC2016
+  [ -n "$branch" ] || fail 'the changelog fallback must branch on: if [ "$NOTES_RC" -eq 3 ]'
+  # shellcheck disable=SC2016
+  assert_contains "$branch" 'WHAT_CHANGED="$DESC"' "a missing entry must fall back to the dispatch description"
+  # shellcheck disable=SC2016
+  assert_contains "$branch" 'elif [ "$NOTES_RC" -ne 0 ]' "any other extraction failure must be its own branch"
+  assert_contains "$branch" "::error::" "an extraction failure must be an ::error:: annotation"
+  assert_contains "$branch" "exit 1" "an extraction failure must fail the release, not merely warn"
+  # A bare `else` would be a silent third outcome — the fail-open this split
+  # exists to prevent. `elif` is not matched by this whole-line grep.
+  if printf '%s\n' "$branch" | grep -qE '^ *else *$'; then
+    fail "the fallback must have no catch-all else branch — exactly two outcomes besides success"
+  fi
+}
+
+test_release_notes_branch_publishes_the_changelog_entry() {
+  # Executed, not grepped: the real branch, the real extractor, a real file.
+  run_notes_branch 9.9.9 "dispatch headline" entry
+  assert_eq 0 "$rc" "a present entry must not fail the step"
+  assert_contains "$out" "- Real entry text" "the notes must be the changelog entry"
+  assert_contains "$out" "<<<### Added" "the entry must be whitespace-trimmed into WHAT_CHANGED"
+  case "$out" in
+    *"dispatch headline"*) fail "the dispatch description must not appear when an entry exists" ;;
+    *) : ;;
+  esac
+}
+
+test_release_notes_branch_falls_back_when_there_is_no_changelog() {
+  run_notes_branch 9.9.9 "dispatch headline" none
+  assert_eq 0 "$rc" "a missing changelog must not fail the release"
+  assert_contains "$out" "<<<dispatch headline>>>" "a missing changelog must fall back to the description"
+}
+
+test_release_notes_branch_falls_back_when_the_version_has_no_entry() {
+  run_notes_branch 1.2.3 "dispatch headline" entry
+  assert_eq 0 "$rc" "an unlisted version must not fail the release"
+  assert_contains "$out" "<<<dispatch headline>>>" "an unlisted version must fall back to the description"
+}
+
+test_release_notes_branch_publishes_an_empty_entry_as_empty() {
+  # The fail-open this contract exists to prevent: a version section that
+  # exists but is empty must publish empty notes, NOT quietly swap in the
+  # one-line dispatch description as though no entry had been written.
+  run_notes_branch 9.9.9 "dispatch headline" empty
+  assert_eq 0 "$rc" "an empty entry must not fail the release"
+  assert_contains "$out" "<<<>>>" "an empty entry must publish empty notes"
+  case "$out" in
+    *"dispatch headline"*) fail "an empty entry must not fall back to the dispatch description" ;;
+    *) : ;;
+  esac
+}
+
+test_release_notes_branch_fails_the_release_on_an_extraction_error() {
+  # Anything other than "no entry" must abort. A release is forward-only, so
+  # publishing the description in place of notes the workflow could not read
+  # would ship wrong notes with nothing to notice it by.
+  run_notes_branch 9.9.9 "dispatch headline" broken
+  assert_eq 1 "$rc" "an extraction error must fail the step"
+  assert_contains "$out" "::error::" "an extraction error must be an ::error:: annotation"
+  case "$out" in
+    *"<<<"*) fail "an extraction error must abort before WHAT_CHANGED is used" ;;
+    *) : ;;
+  esac
 }
 
 test_release_chains_marketplace_pin_explicitly() {

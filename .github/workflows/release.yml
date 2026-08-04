@@ -274,6 +274,20 @@ jobs:
             "refs/heads/main:refs/heads/main" \
             "refs/tags/v${NEW_VERSION}:refs/tags/v${NEW_VERSION}"
 
+      # "What changed" is the CHANGELOG entry for this version (issue #70),
+      # extracted by scripts/changelog-extract.sh — a standalone script taking
+      # plain CLI args, so the extraction is unit-tested outside CI
+      # (tests/unit/changelog-extract.test.sh) rather than only observable in a
+      # release run.
+      #
+      # Exactly TWO fallback branches, no third. Exit 3 means "no CHANGELOG.md,
+      # or no `## [X.Y.Z]` heading for this version" — the documented fallback
+      # to ${DESC}, the behaviour every release had before this step read the
+      # changelog at all. ANY other non-zero exit is an extraction failure and
+      # FAILS the run: silently publishing ${DESC} instead would hide a broken
+      # changelog on a forward-only, human-dispatched action nobody re-runs.
+      # Exit 0 with empty output is NOT a fallback — a version section that
+      # exists and is deliberately empty publishes empty notes.
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -290,11 +304,21 @@ jobs:
             COMPARE=""
           fi
 
+          NOTES_RC=0
+          WHAT_CHANGED=$(bash scripts/changelog-extract.sh "$NEW_VERSION" CHANGELOG.md) || NOTES_RC=$?
+          if [ "$NOTES_RC" -eq 3 ]; then
+            echo "No CHANGELOG.md entry for v${NEW_VERSION} — using the dispatch description."
+            WHAT_CHANGED="$DESC"
+          elif [ "$NOTES_RC" -ne 0 ]; then
+            echo "::error::scripts/changelog-extract.sh failed (exit ${NOTES_RC}) on CHANGELOG.md for v${NEW_VERSION} — refusing to publish the dispatch description in place of release notes it could not extract."
+            exit 1
+          fi
+
           gh release create "v${NEW_VERSION}" \
             --title "v${NEW_VERSION} — ${DESC}" \
             --notes "## What changed
 
-          ${DESC}
+          ${WHAT_CHANGED}
 
           ${COMPARE}
 
