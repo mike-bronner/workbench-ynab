@@ -13,6 +13,16 @@ them into a dated version section when that version is released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Impossible dates no longer answer plausibly but wrongly.** A date with a
+  valid shape but no place on the calendar — `2025-02-30`, `2025-13-45` — was
+  accepted by several date seams and rolled over onto a real date two days
+  away, so an estimated-tax payment could be booked to the wrong quarter and a
+  duplicate pair could surface (or hide) on a date nobody supplied. Every civil
+  date now routes through one strict calendar-validating parser and is refused
+  outright.
+
 ## [0.1.1] - 2026-08-03
 
 This first public release productizes the April 2026 prototype: the one-off
