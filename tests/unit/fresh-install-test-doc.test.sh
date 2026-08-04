@@ -110,8 +110,35 @@ fi
 assert_contains "prereq step enforces the pinned Node floor" "meets the Node >= "
 
 # --- both install paths covered (AC #1) ----------------------------------------
-assert_contains "documents the marketplace install path" "workbench-ynab@claude-workbench"
-assert_contains "documents the local-checkout install path" "claude plugin install /absolute/path/to/workbench-ynab"
+# Section-scoped to Step 2. Neither needle recurs elsewhere in the doc today, so a
+# whole-file grep would also go red on deletion — but the Gaps entry now discusses
+# both install commands in prose (the #269 verification record), which is exactly
+# the drift that turns an unscoped pin vacuous. Scoping matches this file's
+# convention for step-specific pins and holds if that prose grows a code sample.
+assert_in_section "Step 2" "documents the marketplace install path" "claude plugin install workbench-ynab@claude-workbench"
+# Needle omits the leading `~` deliberately: shellcheck SC2088 flags a quoted tilde,
+# and it buys no discrimination here — `.claude/skills/workbench-ynab` already pins
+# the skills-dir mechanism, and stays correct if the doc switches to `$HOME/`.
+assert_in_section "Step 2" "documents the local-checkout install path" ".claude/skills/workbench-ynab"
+# The local-checkout path used to read `claude plugin install <path>`, which is not
+# a valid form of the command (issue #269 — `install` resolves a plugin NAME against
+# registered marketplaces and has no bare-path branch). Pin the refuted form out of
+# Step 2. Scoped, NOT whole-file: the Gaps entry quotes the old instruction verbatim
+# as the historical record of what was wrong, so a whole-file grep fails on the
+# correct doc. Step 2 is where a revert would land, which is what this must catch.
+if doc_section "Step 2" | grep -qF -- "claude plugin install /absolute/path"; then
+  no "local-checkout path avoids the refuted bare-path install form"
+else
+  ok "local-checkout path avoids the refuted bare-path install form"
+fi
+# `marketplace add <path>` is the OTHER refuted form (#269): it takes a marketplace
+# manifest, and this repo ships a plugin manifest. Pin it out of Step 2 specifically
+# — the Gaps entry legitimately names it while explaining why it fails.
+if doc_section "Step 2" | grep -qF -- "claude plugin marketplace add /"; then
+  no "local-checkout path avoids the refuted marketplace-add-a-path form"
+else
+  ok "local-checkout path avoids the refuted marketplace-add-a-path form"
+fi
 
 # --- config lands out of repo (AC #6) ------------------------------------------
 # Section-scoped to Step 5: the config path recurs 3× (Step 0 precondition, Step 5
