@@ -29,6 +29,18 @@ name: Release
 # forward only. Because those guards make a same-version re-run impossible,
 # main and the tag are pushed in a SINGLE atomic push (issue #203) — a
 # partial push would strand the release with no automated way back.
+#
+# Job split (issue #252): the `assets/` integration suite runs third-party
+# install scripts and module top-level code, so it lives in its own job
+# (`assets-tests`) scoped to `permissions: contents: read` — never on the
+# runner that mints this workflow's `contents: write` + `actions: write`
+# token. Co-residency, not credential-on-disk, is the exposure the split
+# closes: same VM and same UID means untrusted code can detach a background
+# process that outlives its step and scrape the token out of the push
+# process's /proc/<pid>/{cmdline,environ}, which no amount of scrubbing,
+# `env:`-passing, or `persist-credentials: false` in a shared job can prevent.
+# `release` gates on it via `needs:`, which strengthens the old
+# step-ordering guarantee into a separate-VM one.
 
 on:
   workflow_dispatch:
@@ -51,19 +63,70 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The untrusted-code job (issue #252). `npm --prefix assets ci` executes
+  # third-party install scripts, and `npm --prefix assets test` executes their
+  # module top-level code — so this job is scoped to `permissions: contents:
+  # read`, overriding the workflow-level `contents: write` + `actions: write`.
+  # No write-scoped token is ever minted on this runner, which is the only way
+  # to close the co-residency vector: Actions does not reap detached children
+  # at step boundaries, so a dep that backgrounds a process on a shared VM can
+  # poll `ps` / /proc for a push credential in another step's argv OR env.
+  # Mirrors ci.yml's `assets-tests` job; `release` gates on it via `needs:`.
+  assets-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Publish the exact commit this suite tested. Two jobs mean two checkouts
+    # of a moving `main`, so the release job re-checks this against its own
+    # HEAD — otherwise the split would quietly allow a release whose assets/
+    # suite ran against a different tree.
+    outputs:
+      sha: ${{ steps.tested.outputs.sha }}
+    steps:
+      # ref: main matches the release job's checkout — this suite must gate the
+      # exact tree being released, not whatever ref the dispatch came from.
+      # persist-credentials: false leaves not even the read-only token on disk
+      # beside the third-party install; nothing in this job speaks to git.
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Record the tested commit
+        id: tested
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Run the assets integration suite
+        run: |
+          set -euo pipefail
+          npm --prefix assets ci
+          npm --prefix assets test
+
   release:
     runs-on: ubuntu-latest
+    # The assets suite must be green before any write happens. As a job
+    # dependency this is strictly stronger than the step ordering it replaces:
+    # the untrusted install cannot run late, cannot run concurrently, and
+    # cannot run on this runner at all.
+    needs: assets-tests
     steps:
       # persist-credentials: false is a supply-chain guard (issue #203), not a
       # style choice. By default checkout writes the job's GITHUB_TOKEN —
       # carrying this workflow's `contents: write` + `actions: write` — into
       # .git/config as an http.extraheader, where it stays for the whole job.
-      # `npm --prefix assets ci` runs third-party install scripts in that same
-      # job, so a compromised transitive dep of assets/ could read the header
-      # and push to main or dispatch workflows. With nothing persisted there is
-      # no credential on disk for untrusted code to find; the release push
-      # authenticates explicitly instead, at push time, after every test has
-      # already run. Local git (rev-parse, tag, commit) needs no credential.
+      # The untrusted `assets/` install has since moved off this runner
+      # entirely (issue #252), so this is now defence in depth rather than the
+      # sole barrier: the credential is on disk for no longer than it must be,
+      # and the release push authenticates explicitly instead, at push time.
+      # Local git (rev-parse, tag, commit) needs no credential.
       - name: Checkout main
         uses: actions/checkout@v4
         with:
@@ -71,6 +134,23 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
           persist-credentials: false
+
+      # The job split (issue #252) buys isolation at the cost of a second
+      # checkout of a moving ref: `main` can advance between the assets-tests
+      # job's checkout and this one, which would release a tree the assets/
+      # suite never saw. Re-checking the SHA restores the single-checkout
+      # guarantee. An empty TESTED_SHA (output dropped, job rewired) fails the
+      # same way — a gate that cannot read its input has not passed.
+      - name: Assert main has not moved since the assets suite ran
+        env:
+          TESTED_SHA: ${{ needs.assets-tests.outputs.sha }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ -z "$TESTED_SHA" ] || [ "$TESTED_SHA" != "$HEAD_SHA" ]; then
+            echo "::error::main is $HEAD_SHA but the assets/ suite tested '$TESTED_SHA' — the tree being released was never covered by that suite. Re-run the release."
+            exit 1
+          fi
 
       # Guard rails first — both checks run BEFORE any write occurs.
       - name: Validate version
@@ -144,21 +224,16 @@ jobs:
       # bash suite and the Node suite, including the offline-boot proof
       # (tests/integration/offline-boot.test.sh, issue #78). Runs with NO
       # node_modules present, matching test.yml's dependency-free job.
+      #
+      # The assets/ integration suite is NOT run here: it needs its own deps
+      # (ajv, ajv-formats), and installing them would both pollute the
+      # offline-boot proof's resolution path and put untrusted code on the
+      # runner that holds the push credential. It runs in the `assets-tests`
+      # job instead (issue #252), which `needs:` gates ahead of this one — so
+      # "no node_modules while the offline-boot proof runs" is now a
+      # separate-VM guarantee rather than a step-ordering one.
       - name: Run the test suite
         run: bash scripts/test.sh
-
-      # The assets/ integration suite needs its own deps (ajv, ajv-formats) —
-      # run it AFTER the dependency-free suite so node_modules never exists
-      # while the offline-boot proof runs (mirrors ci.yml's assets-tests job).
-      # This is the untrusted-code window the checkout step's
-      # persist-credentials: false exists for: third-party install scripts and
-      # module top-level code run here, and there is deliberately no push
-      # credential anywhere on disk or in this step's env while they do.
-      - name: Run the assets integration suite
-        run: |
-          set -euo pipefail
-          npm --prefix assets ci
-          npm --prefix assets test
 
       - name: Commit, tag, push
         env:
@@ -190,13 +265,29 @@ jobs:
           # or neither does and a plain re-run is a clean retry.
           #
           # The credential is supplied here, in the URL, rather than persisted
-          # in .git/config by checkout — see the checkout step. Every untrusted
-          # assets/ dependency has already installed and run by this point.
+          # in .git/config by checkout — see the checkout step. No untrusted
+          # assets/ dependency ever runs on this runner (issue #252): the
+          # `assets-tests` job installed and ran them on a separate VM, which
+          # `needs:` already gated green before this job started.
           git push --atomic \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
             "refs/heads/main:refs/heads/main" \
             "refs/tags/v${NEW_VERSION}:refs/tags/v${NEW_VERSION}"
 
+      # "What changed" is the CHANGELOG entry for this version (issue #70),
+      # extracted by scripts/changelog-extract.sh — a standalone script taking
+      # plain CLI args, so the extraction is unit-tested outside CI
+      # (tests/unit/changelog-extract.test.sh) rather than only observable in a
+      # release run.
+      #
+      # Exactly TWO fallback branches, no third. Exit 3 means "no CHANGELOG.md,
+      # or no `## [X.Y.Z]` heading for this version" — the documented fallback
+      # to ${DESC}, the behaviour every release had before this step read the
+      # changelog at all. ANY other non-zero exit is an extraction failure and
+      # FAILS the run: silently publishing ${DESC} instead would hide a broken
+      # changelog on a forward-only, human-dispatched action nobody re-runs.
+      # Exit 0 with empty output is NOT a fallback — a version section that
+      # exists and is deliberately empty publishes empty notes.
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -213,11 +304,21 @@ jobs:
             COMPARE=""
           fi
 
+          NOTES_RC=0
+          WHAT_CHANGED=$(bash scripts/changelog-extract.sh "$NEW_VERSION" CHANGELOG.md) || NOTES_RC=$?
+          if [ "$NOTES_RC" -eq 3 ]; then
+            echo "No CHANGELOG.md entry for v${NEW_VERSION} — using the dispatch description."
+            WHAT_CHANGED="$DESC"
+          elif [ "$NOTES_RC" -ne 0 ]; then
+            echo "::error::scripts/changelog-extract.sh failed (exit ${NOTES_RC}) on CHANGELOG.md for v${NEW_VERSION} — refusing to publish the dispatch description in place of release notes it could not extract."
+            exit 1
+          fi
+
           gh release create "v${NEW_VERSION}" \
             --title "v${NEW_VERSION} — ${DESC}" \
             --notes "## What changed
 
-          ${DESC}
+          ${WHAT_CHANGED}
 
           ${COMPARE}
 

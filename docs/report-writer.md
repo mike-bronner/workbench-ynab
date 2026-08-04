@@ -49,7 +49,7 @@ The template path is resolved the same way: `--template` flag →
 
 ```bash
 report-writer.sh \
-  --tier   <Weekly|Monthly|Quarterly-Tax|Annual> \
+  --tier   <Weekly|Monthly|Quarterly-Tax|Annual|Portfolio> \
   --date   <YYYY-MM-DD> \
   [--template   <path>]      # default: .report.template_path, else bundled asset
   [--output-dir <dir>]       # default: .report.output_dir, else ~/Documents/Claude/Reports
@@ -84,14 +84,17 @@ report-writer.sh \
   template path (`--template` /
   `.report.template_path`) is resolved the same way. Any number of **trailing
   slashes** on the directory is tolerated. A path that resolves to **empty**
-  (e.g. an unset variable) — or to the bare filesystem **root `/`** — is
-  **refused**; the writer never writes to the filesystem root. A path that
-  **cannot be fully resolved** — a `$VAR` that survives expansion (a
-  self-referential value like `FOO='$FOO/x'`, or one the shell cannot expand),
-  or a `~` that still begins **any** path component (a `~user` form the helper
-  does not expand, or a `~` a variable's value shoved mid-path such as
-  `prefix/$VAR` with `VAR='~/x'` → `prefix/~/x`) — is also **refused** (usage
-  error, no file) rather than written to a wrong location. A **relative** resolved directory is made
+  (e.g. a variable **set** to an empty value) — or to the bare filesystem
+  **root `/`** — is **refused**; the writer never writes to the filesystem root.
+  A path that **cannot be fully resolved** — a reference to an **unset** variable
+  (a typo'd `$TYPO`, refused rather than swallowed to `""` — which, embedded in a
+  longer path like `$TYPO/reports`, would otherwise collapse to `/reports`), a
+  `$VAR` that survives expansion (a self-referential value like `FOO='$FOO/x'`,
+  or one the shell cannot expand), or a `~` that still begins **any** path
+  component (a `~user` form the helper does not expand, or a `~` a variable's
+  value shoved mid-path such as `prefix/$VAR` with `VAR='~/x'` → `prefix/~/x`) —
+  is also **refused** (usage error, no file) rather than written to a wrong
+  location. A **relative** resolved directory is made
   absolute against the current working directory, so the emitted path is always
   absolute.
 - The directory is created with **`mkdir -p`** before writing (no error if it
@@ -132,7 +135,7 @@ visible rather than masquerading as a plain "missing slot".
 |---|---|
 | `0` | Report written; the absolute path is on stdout. |
 | `1` | A required slot was missing or empty — **no file written**. |
-| `2` | Usage error: bad flag, bad `--tier`, an out-of-range or malformed `--date`, an unknown, invalid, or **duplicate** slot name, an output dir or template path that resolves to empty, to the filesystem root `/`, or that **does not fully resolve** (a surviving component-leading `~` — including a `~user` form — or `$VAR`), or a **missing or malformed** template. |
+| `2` | Usage error: bad flag, bad `--tier`, an out-of-range or malformed `--date`, an unknown, invalid, or **duplicate** slot name, an output dir or template path that resolves to empty, to the filesystem root `/`, or that **does not fully resolve** (a surviving component-leading `~` — including a `~user` form — or `$VAR`), or a **missing or malformed** template. Also a `config.json` that is present but **does not parse** (issue #290) — the writer stops **without writing** rather than falling back to the shipped default template / output directory; see [docs/config-loader.md](config-loader.md#malformed-config-behaviour-fail-closed). Passing both `--template` and `--output-dir` skips the config entirely. |
 
 ## Portability
 

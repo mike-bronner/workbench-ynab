@@ -43,28 +43,43 @@ CONFIG_FILE="$CONFIG_DIR/config.json"
 
 ## Step 1 — Verify prerequisites
 
-### 1a. CLI tools (hard-stop on a miss)
+### 1a. Prerequisites (hard-stop on a miss)
 
-Run a single Bash check for the host tools the rest of the command needs:
+Run a single Bash check for the four prerequisites the rest of the command (and
+the plugin at large) needs — the three host CLI tools plus the `workbench-core`
+plugin. **All four hard-stop**: a miss exits non-zero here, before Step 1b's
+probe, before Step 2's token prompt, and before any config write. This is
+deliberately stricter than Step 1b, which only *reports*: the scheduled-tasks
+MCP being unreachable costs you one optional deploy, whereas a missing
+prerequisite silently degrades the whole install (a missing `workbench-core`
+drops the persona name to its `Hobbes` fallback and takes the shared memory
+vault and session lifecycle with it), so it is caught up front rather than
+discovered later.
 
 ```bash
 missing=()
 for cmd in node jq security; do
   command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
 done
+# workbench-core is a Claude Code plugin, not a CLI: assert its install
+# footprint under the plugins cache (marketplace install and local checkout
+# both land there).
+ls -d "$HOME"/.claude/plugins/cache/*/workbench-core >/dev/null 2>&1 \
+  || missing+=("workbench-core")
 if [ ${#missing[@]} -gt 0 ]; then
   echo "❌ Missing prerequisites: ${missing[*]}"
   for m in "${missing[@]}"; do
     case "$m" in
-      jq)       echo "   • jq — install with: brew install jq" ;;
-      node)     echo "   • node — install via your preferred path (nvm, brew install node, …)" ;;
-      security) echo "   • security — ships with macOS; this command is macOS-only" ;;
+      jq)             echo "   • jq — install with: brew install jq" ;;
+      node)           echo "   • node — install via your preferred path (nvm, brew install node, …)" ;;
+      security)       echo "   • security — ships with macOS; this command is macOS-only" ;;
+      workbench-core) echo "   • workbench-core — install with: claude plugin install workbench-core@claude-workbench" ;;
     esac
   done
-  echo "   Install the missing tool(s) and re-run /workbench-ynab:setup."
+  echo "   Install the missing prerequisite(s) and re-run /workbench-ynab:setup."
   exit 1
 fi
-echo "✅ node, jq, security all present"
+echo "✅ node, jq, security, workbench-core all present"
 
 # node being ON PATH is not enough — it must also be NEW ENOUGH for the
 # vendored bundle (issue #3). bin/node-floor.sh compares `node --version`
@@ -139,14 +154,24 @@ Read the existing config first so every prompt can default to the current value:
 have_cfg=0
 [ -f "$CONFIG_FILE" ] && have_cfg=1
 # Read a field's current value (empty when absent/unset):
+#
+# DELIBERATELY fail-open, unlike every other config reader in the plugin
+# (bin/config.sh, bin/persona.sh, bin/report-writer.sh, bin/ynab-prune.sh all
+# fail closed on an unparseable file — issue #290). Setup is the REPAIR path: it
+# reads the old file only to pre-fill prompts and then REWRITES it, so a corrupt
+# file must degrade to "no defaults to offer", never lock the user out of the one
+# command that fixes it. See docs/config-loader.md.
 cfg() { [ "$have_cfg" = 1 ] && jq -r "$1 // empty" "$CONFIG_FILE" 2>/dev/null; }
 ```
 
 Resolve the **persona default** through the shared loader so the prompt offers
-the right name (explicit override → workbench-core agent name → `Hobbes`):
+the right name (explicit override → workbench-core agent name → `Hobbes`). The
+`||` fallback is load-bearing for the same repair-path reason: `persona.sh` now
+exits non-zero on a config file that does not parse (issue #290), and setup must
+carry on with no pre-filled name rather than abort:
 
 ```bash
-PERSONA_DEFAULT="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/persona.sh" name)"
+PERSONA_DEFAULT="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/persona.sh" name)" || PERSONA_DEFAULT=""
 ```
 
 Walk the M1-6 schema fields (see `docs/config-schema.md`) with `AskUserQuestion`,
@@ -167,6 +192,7 @@ absent). Collect, in order:
 | 10 | Schedules that apply | `.tax_profile.schedules` | `C, A, SE, 1` |
 | 11 | Persona name | `.persona.name` | `$PERSONA_DEFAULT` (the default voice) |
 | 12 | Report output directory | `.report.output_dir` | `~/Documents/Claude/Reports` |
+| 13 | Timezone (IANA) | `.timezone` | `$SYS_TZ` — the machine's resolved zone (never "system local") |
 
 Notes for the walk:
 
@@ -192,6 +218,28 @@ Notes for the walk:
   the name — never write a violating `persona.name` into `config.json`. An
   empty answer is fine (the loader falls back silently), and `--` guards
   against a name that itself looks like a flag.
+- **`timezone` is REQUIRED and validated (issue #31).** It is the single source
+  of truth for every date-sensitive review computation (window, carryover,
+  month/quarter boundaries, tax year), so the loader (`_cfg_timezone`) **fails
+  closed** on a missing or invalid value — a fresh config MUST carry it. Resolve
+  the machine's zone to **offer as the default**, and write the resolved
+  identifier (never the literal `system local`):
+
+  ```bash
+  source "${CLAUDE_PLUGIN_ROOT}/bin/config.sh"   # for _is_valid_timezone
+  SYS_TZ="$(readlink /etc/localtime 2>/dev/null | sed -n 's#.*/zoneinfo/##p')"
+  [ -n "$SYS_TZ" ] && _is_valid_timezone "$SYS_TZ" || SYS_TZ="UTC"   # last-resort default
+  ```
+
+  Pre-fill the `.timezone` prompt with `$SYS_TZ` (or the existing config value on
+  a re-run), and **validate the collected value before it enters the config**:
+
+  ```bash
+  _is_valid_timezone "$COLLECTED_TZ" || { echo "❌ '$COLLECTED_TZ' is not a valid IANA timezone (e.g. America/Phoenix, UTC)."; }
+  ```
+
+  On a non-zero result, surface the error and re-ask — never write an invalid or
+  empty `.timezone`. A valid IANA identifier is the only acceptable value.
 - Use `schema_version: 1`.
 
 When every field is gathered, **assemble the full JSON, show it to the user**,
@@ -205,10 +253,31 @@ user, or fields added by a future schema) are preserved — never a blind
 overwrite:
 
 ```bash
-mkdir -p "$CONFIG_DIR"
+# The data dir holds config.json — your tax profile (filing status, rates,
+# thresholds) and business identity — and every other generated artifact, so it
+# is owner-only (mode 0700) from creation (issue #65, GAP-21). Setup is the FIRST
+# creator of this dir on a fresh install; later writers deliberately never widen a
+# parent they didn't create, so if setup left it 0755 the loose mode would stick.
+# `( umask 077; mkdir -p )` gives a FRESH dir 0700 with no world-readable window;
+# the explicit chmod additionally tightens a dir left 0755 by a pre-privacy
+# install (setup is idempotent and the recommended step after every update).
+# Both steps fail CLOSED like every gate in Step 4 (mirrors bin/ynab-migrate.sh's
+# `do_seed_config` guard, which returns 2, and bin/audit-log.sh): a swallowed
+# chmod failure on a pre-existing 0755 dir would print the ✅ banner while
+# $CONFIG_DIR — which also holds audit/, monitor-state.json, and
+# tax-tracker.json — stays world-traversable, letting other local users
+# enumerate every financial artifact's filename and mtime.
+if ! ( umask 077; mkdir -p "$CONFIG_DIR" ); then
+  echo "❌ Could not create the data directory $CONFIG_DIR — aborting setup." >&2
+  exit 1
+fi
+if ! chmod 700 "$CONFIG_DIR"; then
+  echo "❌ Could not restrict $CONFIG_DIR to owner-only (mode 0700) — aborting setup so no financial artifact lands in a world-traversable directory." >&2
+  exit 1
+fi
 
-# $NEW_JSON is the object Step 3 assembled (schema_version + budget + optional
-# business + tax_profile + persona + report). Merge it over the existing file so
+# $NEW_JSON is the object Step 3 assembled (schema_version + timezone + budget +
+# optional business + tax_profile + persona + report). Merge it over the existing file so
 # unknown/hand-added keys survive. `*` deep-merges objects; the new values win.
 #
 # Every gate below fails CLOSED (issue #154): any failure removes the staged
@@ -228,11 +297,25 @@ if [ -f "$CONFIG_FILE" ]; then
   fi
 fi
 
+# Stage the merged config. The `( umask 077; … )` subshell is what makes the
+# .tmp owner-only AT CREATION TIME: the `>` redirect happens inside the subshell,
+# so the file is born 0600 and there is NO window in which it is world-readable
+# (issue #65 AC #2 — "no window where a file is world-readable before the
+# chmod... not a post-write chmod"). config.json holds your tax profile and
+# business identity, so that window would expose real financial detail. This is
+# the same creation-time pattern every other artifact class uses: `mktemp` (the
+# report writer), a tightened-umask subshell (bin/audit-log.sh), or an explicit
+# `mode:0o600` (the monitor-state and tax-tracker writers). The umask only
+# constrains a NEWLY created file, so the explicit `chmod 600` further down stays
+# as defense-in-depth — it re-tightens a .tmp left over from an earlier run at
+# looser permissions, which `>` truncates but never re-modes.
+#
 # Check the merge's exit code explicitly: on failure the > redirect has already
-# truncated the .tmp, so drop it instead of letting it near the real path.
-if ! printf '%s\n' "$EXISTING" \
+# truncated the .tmp, so drop it instead of letting it near the real path. The
+# subshell's exit status is the pipeline's, so `if !` still sees a jq failure.
+if ! ( umask 077; printf '%s\n' "$EXISTING" \
   | jq --argjson new "$NEW_JSON" '. * $new' \
-  > "$CONFIG_FILE.tmp"; then
+  > "$CONFIG_FILE.tmp" ); then
   rm -f "$CONFIG_FILE.tmp"
   echo "❌ jq merge failed — $CONFIG_FILE left untouched." >&2
   exit 1
@@ -264,6 +347,20 @@ if [ "$TOKEN_SCAN" -eq 0 ]; then
 elif [ "$TOKEN_SCAN" -ne 1 ]; then
   rm -f "$CONFIG_FILE.tmp"
   echo "❌ Could not verify the staged config is token-free (jq failed to scan it) — $CONFIG_FILE left untouched." >&2
+  exit 1
+fi
+
+# Defense-in-depth on the 0600 guarantee. The staging subshell above already
+# CREATED the .tmp owner-only via `umask 077`, so this chmod is a second layer,
+# not the only one: it re-tightens a .tmp that survived an interrupted run at
+# looser permissions (the `>` redirect truncates such a file but leaves its mode
+# alone), making 0600 hold no matter how the .tmp came to exist. The atomic mv
+# then carries that mode onto the real path, tightening an existing 0644 config
+# too. Fail CLOSED like every gate above: on a chmod failure drop the staged file
+# and leave the real config untouched rather than publish a world-readable one.
+if ! chmod 600 "$CONFIG_FILE.tmp"; then
+  rm -f "$CONFIG_FILE.tmp"
+  echo "❌ Could not restrict config.json to owner-only (mode 0600) — $CONFIG_FILE left untouched." >&2
   exit 1
 fi
 mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
@@ -338,17 +435,103 @@ duplicates (mirrors the bujo-setup pre-approval snippet):
 ```bash
 SETTINGS="$HOME/.claude/settings.json"
 mkdir -p "$(dirname "$SETTINGS")"
-[ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
+# A settings.json this command brings into existence is born owner-only: the
+# `( umask 077; … )` subshell applies AT CREATION TIME, so there is never a
+# window in which the new file is world-readable (the same creation-time pattern
+# Step 4 uses for config.json). Claude Code's settings.json can carry `env`,
+# `hooks`, and `mcpServers` blocks that in common practice hold inline secrets,
+# so the ambient-umask default (commonly 0644) is the wrong mode for a file we
+# create ourselves.
+[ -f "$SETTINGS" ] || ( umask 077; echo '{}' > "$SETTINGS" )
 
-while IFS= read -r tool; do
-  [ -z "$tool" ] && continue
-  jq --arg p "$tool" '
-    .permissions //= {} |
-    .permissions.allow //= [] |
-    if .permissions.allow | index($p) then . else .permissions.allow += [$p] end
-  ' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
-done <<< "$READ_TOOLS"
-echo "✅ Read-only YNAB tools pre-approved (write tools remain gated until Sprint 4)"
+# Capture the mode the user chose BEFORE any rewrite (issue #280). `mv` on one
+# filesystem is a rename(2): it replaces the destination inode outright, so the
+# published file's mode is the STAGED file's mode, never the original's. Without
+# this capture, a settings.json a user hardened to 0600 comes back at the ambient
+# umask default (commonly 0644, world-readable) after the first pre-approval is
+# added. settings.json is Claude Code's own shared config — not a plugin-owned
+# artifact in SECURITY.md's inventory — so preserve the mode the user chose
+# rather than impose one of ours.
+#
+# GNU `stat -c '%a'` is probed FIRST: on GNU, `stat -f` means "filesystem status"
+# and prints something unrelated instead of erroring. BSD/macOS `stat -f '%Lp'`
+# is the fallback.
+#
+# `-L` (accepted by BOTH dialects) makes the read follow the symlink. Without it
+# `stat` reports the LINK's own mode, never the target's — 0755 on macOS, a fixed
+# 0777 on GNU regardless of the target. A settings.json symlinked into a dotfiles
+# repo (chezmoi, Stow, dotbot) is the common shape for this file, so an lstat read
+# would capture 0755/0777, `chmod` that onto the staged file, and publish it —
+# widening a target the user hardened to 0600 while reporting success.
+SETTINGS_MODE="$(stat -L -c '%a' "$SETTINGS" 2>/dev/null || stat -L -f '%Lp' "$SETTINGS" 2>/dev/null || true)"
+
+# Every gate below fails CLOSED, mirroring Step 4's config-write gates: any
+# failure drops the staged .tmp, leaves the real settings.json byte-for-byte
+# untouched, and reports. Pre-approval is a convenience — a failure stops THIS
+# step and withholds the ✅, rather than aborting setup (Steps 6-7 do not depend
+# on it), matching the SSoT-unreadable degrade above.
+SETTINGS_OK=1
+if [ -z "$SETTINGS_MODE" ]; then
+  SETTINGS_OK=0
+  echo "❌ Could not read the permission mode of $SETTINGS — skipping pre-approval, because publishing the rewrite would reset the mode to the ambient umask." >&2
+else
+  while IFS= read -r tool; do
+    [ -z "$tool" ] && continue
+    # `( umask 077; … )` stages the .tmp owner-only at creation, so the pending
+    # rewrite is never world-readable while it sits beside the real file.
+    if ! ( umask 077; jq --arg p "$tool" '
+      .permissions //= {} |
+      .permissions.allow //= [] |
+      if .permissions.allow | index($p) then . else .permissions.allow += [$p] end
+    ' "$SETTINGS" > "$SETTINGS.tmp" ); then
+      rm -f "$SETTINGS.tmp"
+      SETTINGS_OK=0
+      echo "❌ jq rewrite failed — $SETTINGS left untouched. Pre-approval is incomplete: any tool already added stays, the rest were not." >&2
+      break
+    fi
+    # The staged file must be non-empty, valid JSON before it is eligible to
+    # publish — the exit-code gate above is not enough on its own. jq treats a
+    # 0-byte input as ZERO JSON values in the stream: the filter never runs, jq
+    # exits 0, and nothing is written. So a settings.json that pre-exists empty
+    # (a crashed editor, a `touch`, a truncated write by an unrelated tool — the
+    # `[ -f ]` creation guard above only covers the MISSING-file case) would sail
+    # through the exit-code check and `mv` an empty .tmp over the real file,
+    # wiping the user's permissions/hooks/env/mcpServers while printing the ✅.
+    # (`jq -e .` rejects an empty file; `jq empty` would wave it through.) Same
+    # gate as Step 4's config write and commands/uninstall.md Step 4.
+    if ! jq -e . "$SETTINGS.tmp" >/dev/null 2>&1; then
+      rm -f "$SETTINGS.tmp"
+      SETTINGS_OK=0
+      echo "❌ Rewritten settings is empty or invalid JSON — $SETTINGS left untouched. Pre-approval is incomplete: any tool already added stays, the rest were not." >&2
+      break
+    fi
+    # Re-apply the ORIGINAL mode to the staged file BEFORE the swap, so the
+    # rename(2) carries the user's mode onto the real path instead of the
+    # umask's. Fail closed: a mode we cannot restore is a mode we must not
+    # publish over.
+    if ! chmod "$SETTINGS_MODE" "$SETTINGS.tmp"; then
+      rm -f "$SETTINGS.tmp"
+      SETTINGS_OK=0
+      echo "❌ Could not restore mode $SETTINGS_MODE on the staged settings — $SETTINGS left untouched. Pre-approval is incomplete: any tool already added stays, the rest were not." >&2
+      break
+    fi
+    # The publish itself is a gate too. `mv` can fail (ENOSPC on the rename's
+    # directory-entry write, a permission race, an immutable flag), and an
+    # unguarded one is silent: SETTINGS_OK stays 1, the ✅ prints, and the staged
+    # .tmp is orphaned beside a real file that never received the rewrite —
+    # reporting success for work that did not happen. The by-hand mirror in
+    # docs/uninstall.md gets this free from its `&&`/`||` chain; an imperative
+    # transcription has to say it.
+    if ! mv "$SETTINGS.tmp" "$SETTINGS"; then
+      rm -f "$SETTINGS.tmp"
+      SETTINGS_OK=0
+      echo "❌ Could not publish the rewritten settings — $SETTINGS left untouched. Pre-approval is incomplete: any tool already added stays, the rest were not." >&2
+      break
+    fi
+  done <<< "$READ_TOOLS"
+fi
+[ "$SETTINGS_OK" -eq 1 ] \
+  && echo "✅ Read-only YNAB tools pre-approved (write tools remain gated until Sprint 4)"
 ```
 
 On **No**, skip silently — the user can re-run setup later to enable it.
@@ -568,6 +751,15 @@ Print a clean summary block:
   scheduled-task prompt with any changes — it is idempotent and the
   recommended refresh path.
 
+  🔒 Privacy — generated reports (~/Documents/Claude/Reports) and your data dir
+     (~/.claude/plugins/data/workbench-ynab-claude-workbench) are UNENCRYPTED
+     plaintext financial records — full transaction history, balances, and tax
+     detail. They are created owner-only (files mode 0600, directories mode
+     0700). ⚠️ ~/Documents/Claude may sync to iCloud Drive on macOS: keep these
+     on local, FileVault-encrypted storage and don't point .report.output_dir at
+     a shared or cloud-synced folder. Prune old reports with
+     /workbench-ynab:ynab-prune. Full inventory: SECURITY.md → Generated Artifacts.
+
   ⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.
 ═══════════════════════════════════════════
 ```
@@ -581,6 +773,11 @@ if Step 6 failed), the review line from Step 8 (`cron "<REV_CRON>"` when deploye
 Step 7 (`cron "<MON_CRON>"` when deployed, `disabled` when
 `schedules.monitor.enabled: false`, or `skipped` when the scheduled-tasks MCP was
 unreachable).
+
+Print the **🔒 Privacy notice verbatim** too — it identifies the report and data
+directories as unencrypted financial records and warns about the iCloud sync risk
+(issue #65). It is the user's first notice that these artifacts exist and where
+they live; do not abbreviate or drop it.
 
 ## Notes — idempotency & boundaries
 

@@ -33,8 +33,9 @@
 #
 # USAGE
 #   report-writer.sh \
-#     --tier   <Weekly|Monthly|Quarterly-Tax|Annual> \
+#     --tier   <Weekly|Monthly|Quarterly-Tax|Annual|Portfolio> \
 #     --date   <YYYY-MM-DD> \
+#     [--tax-year <label>]     # "Tax Year YYYY"; required for a tier with a tax section
 #     [--template   <path>]    # default: .report.template_path, else bundled asset
 #     [--output-dir <dir>]     # default: .report.output_dir, else ~/Documents/Claude/Reports
 #     --slot   <name>=<html>   # repeatable: ONE per block slot in the template
@@ -54,7 +55,13 @@
 # EXIT CODES
 #   0  report written
 #   1  a required slot was missing / empty (no file written)
-#   2  usage error (bad flag, bad tier, bad date, unknown slot, missing template)
+#   2  usage error (bad flag, bad tier, bad date, unknown slot, missing template),
+#      OR a config.json that is present but does not parse (issue #290) — the
+#      loader names the file and the repair on stderr and this writer stops
+#      WITHOUT writing, rather than silently falling back to the shipped default
+#      template / output directory. Passing both --template and --output-dir
+#      skips the config entirely, so an unconfigured or corrupt host can still
+#      render by supplying every path on the command line.
 #
 # bash 3.2 compatible (macOS system bash): indexed arrays only (no associative
 # arrays / `declare -A`), no `${x,,}`, no mapfile. Array expansions are guarded so
@@ -73,10 +80,11 @@ shopt -u patsub_replacement 2>/dev/null || true
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Shipped fallback output directory (prototype default, SKILL.md line 143),
-# notated to the user as ~/Documents/Claude/Reports. Resolved eagerly via $HOME
-# so it is already absolute before path handling.
-DEFAULT_OUTPUT_DIR="$HOME/Documents/Claude/Reports"
+# DEFAULT_OUTPUT_DIR (the shipped fallback report dir, ~/Documents/Claude/Reports)
+# is single-sourced in bin/path-expand.sh — the module both this writer and
+# bin/ynab-prune.sh source — so the two can't drift on where reports live. It is
+# in scope by the time it is used (out_dir default, below), after the source line
+# further down.
 DEFAULT_TEMPLATE="${REPO_ROOT}/assets/report/template.html"
 
 # Reuse the shared loader's `_cfg` (jq-read with `// empty`) so the config shape
@@ -91,84 +99,20 @@ DEFAULT_TEMPLATE="${REPO_ROOT}/assets/report/template.html"
 # shellcheck source=/dev/null
 . "${REPO_ROOT}/bin/html-escape.sh"
 
+# The ONE shared config-path resolver (`expand_path`). bin/ynab-prune.sh sources
+# the same module, so write and prune agree byte-for-byte on where reports live —
+# no second copy that could drift the way prune's tilde-only handling once did.
+# shellcheck source=/dev/null
+. "${REPO_ROOT}/bin/path-expand.sh"
+
 prog="report-writer.sh"
 err()   { printf '%s: %s\n' "$prog" "$1" >&2; }
 usage_err() { err "$1"; exit 2; }
 
-# expand_path <path> — resolve a leading ~ and $VAR / ${VAR} references WITHOUT
-# eval (no command/arithmetic substitution is ever executed — a config path is
-# data, not code), returning the FULLY resolved path or FAILING (non-zero, no
-# output) rather than a partially-resolved one. The tilde and the variable
-# substitution run in ONE fixpoint loop: each pass resolves a leading ~ AND the
-# first $VAR/${VAR}, then repeats until the string stops changing. Expansion is
-# therefore TRANSITIVE — a $VAR whose value itself contains $OTHER expands too —
-# and a leading ~ introduced by a variable's VALUE (not just one typed literally
-# at the front) is resolved as well, which a single pre-loop tilde check missed.
-#
-# A partially-resolved path is NEVER emitted. If the result still carries a
-# component-leading ~ (a `~user`, or a `~` a variable's value introduced mid-path)
-# or an unresolved $VAR after the loop settles — a self-referential
-# value like FOO='$FOO/x' that exhausts the guard, or any value the shell cannot
-# fully expand — the function returns 1 WITHOUT printing, and the caller turns
-# that into a usage_err (exit 2, no file). Silently writing to `$PWD/~/…` or a
-# path still holding a literal `$FOO` is exactly the falsely-successful report
-# this helper exists to prevent.
-expand_path() {
-  local p="$1" guard=0 before match name value
-  # Literal ~ in these case patterns is intentional: we MATCH an input that
-  # begins with a literal tilde and rewrite it to $HOME. (Not a tilde meant to
-  # shell-expand — that is exactly what this function exists to do by hand.)
-  # The guard caps iterations, and each pass resolves only the FIRST reference
-  # (single-occurrence replace, not global — see below), so a self-referential
-  # value grows only LINEARLY: it exhausts the cap in bounded time and is then
-  # refused by the post-loop guard, rather than looping — or ballooning — forever.
-  # shellcheck disable=SC2088
-  while [ "$guard" -lt 64 ]; do
-    before="$p"
-    # Resolve a leading ~ — including one a variable's value introduced on an
-    # earlier pass (the old single pre-loop check never saw those).
-    case "$p" in
-      "~")   p="$HOME" ;;
-      "~/"*) p="${HOME}/${p#\~/}" ;;
-    esac
-    # Resolve the first $NAME / ${NAME} reference (an unset name → empty).
-    if [[ "$p" =~ (\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)) ]]; then
-      match="${BASH_REMATCH[1]}"
-      name="${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}"
-      value="${!name:-}"
-      # Replace only the FIRST occurrence (single `/`, not global `//`). A global
-      # replace lets a value that names itself TWICE (FOO='$FOO$FOO') DOUBLE the
-      # occurrence count every pass — exponential growth that pegs CPU/memory and
-      # hangs long before the iteration cap, never reaching the refuse-loudly guard.
-      # One-at-a-time keeps a self-referential value LINEAR: it hits the cap and is
-      # refused. Repeated legitimate references still fully resolve over more passes.
-      p="${p/"$match"/$value}"
-    fi
-    # Nothing changed this pass → settled (fully resolved, or stuck on a
-    # self-reference the checks below will reject).
-    [ "$p" = "$before" ] && break
-    guard=$((guard + 1))
-  done
-  # Refuse a still-partial path rather than emit it. The tilde and $VAR guards are
-  # SYMMETRIC — each rejects its token wherever it survives the loop, not just at
-  # the front:
-  #   * A `~` that begins ANY path component (start-of-string OR right after a `/`)
-  #     is refused. The loop resolves a LEADING current-user `~`/`~/`; every other
-  #     tilde form is one this helper deliberately does NOT expand — a `~user`
-  #     (another user's home; expanding it needs eval or passwd parsing, both barred
-  #     by the no-eval design) or a `~` a variable's value shoved mid-string
-  #     (`prefix/$VAR` with VAR='~/x' → `prefix/~/x`). Emitting either would write to
-  #     a LITERAL `~mike`/`~` directory at exit 0 — the falsely-successful report
-  #     this helper exists to prevent. A `~` MID-component (a literal char in a name
-  #     like `file~backup`) is not a tilde form and is left untouched.
-  #   * A surviving $VAR/${VAR} anywhere (a self-referential value that exhausts the
-  #     guard, or any value the shell cannot expand) is likewise refused.
-  # The caller turns the non-zero return into a usage_err (exit 2, no file).
-  # shellcheck disable=SC2088
-  case "$p" in "~"* | *"/~"*) return 1 ;; esac
-  [[ "$p" =~ (\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*) ]] && return 1
-  printf '%s' "$p"
-}
+# expand_path is provided by the sourced bin/path-expand.sh — the shared config-
+# path resolver. It expands a leading ~ and $VAR/${VAR} references WITHOUT eval and
+# REFUSES (non-zero, no output) a path that does not fully resolve, so this writer
+# and bin/ynab-prune.sh resolve `.report.output_dir` identically.
 
 # html_escape is provided by the sourced bin/html-escape.sh — the shared, audited
 # escaper. It escapes the five HTML metacharacters (`&` first) so a scalar the
@@ -191,6 +135,7 @@ trim() {
 # --- parse args -------------------------------------------------------------
 tier=""
 date=""
+tax_year=""
 cli_template=""
 cli_output_dir=""
 slot_names=()
@@ -200,6 +145,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --tier)       [ "$#" -ge 2 ] || usage_err "--tier needs a value";       tier="$2";           shift 2 ;;
     --date)       [ "$#" -ge 2 ] || usage_err "--date needs a value";       date="$2";           shift 2 ;;
+    --tax-year)   [ "$#" -ge 2 ] || usage_err "--tax-year needs a value";   tax_year="$2";       shift 2 ;;
     --template)   [ "$#" -ge 2 ] || usage_err "--template needs a value";   cli_template="$2";   shift 2 ;;
     --output-dir) [ "$#" -ge 2 ] || usage_err "--output-dir needs a value"; cli_output_dir="$2"; shift 2 ;;
     --slot)
@@ -244,10 +190,13 @@ while [ "$#" -gt 0 ]; do
 done
 
 # --- validate tier + date ---------------------------------------------------
+# `Portfolio` is the cross-budget rollup (M6-7, issue #85) — not a lookback tier
+# but a report kind, and it reuses this same writer (and therefore the same
+# frozen template, print CSS included) rather than growing a second assembler.
 case "$tier" in
-  Weekly|Monthly|Quarterly-Tax|Annual) : ;;
-  "") usage_err "--tier is required (one of: Weekly, Monthly, Quarterly-Tax, Annual)" ;;
-  *)  usage_err "invalid --tier '$tier' (expected: Weekly, Monthly, Quarterly-Tax, Annual)" ;;
+  Weekly|Monthly|Quarterly-Tax|Annual|Portfolio) : ;;
+  "") usage_err "--tier is required (one of: Weekly, Monthly, Quarterly-Tax, Annual, Portfolio)" ;;
+  *)  usage_err "invalid --tier '$tier' (expected: Weekly, Monthly, Quarterly-Tax, Annual, Portfolio)" ;;
 esac
 # Shape AND range: month 01-12, day 01-31 (a real calendar day-of-month check —
 # e.g. Feb 30 — is beyond the AC and left to the caller, but obviously-invalid
@@ -258,16 +207,64 @@ elif [[ ! "$date" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$ ]]; the
   usage_err "invalid --date '$date' (expected YYYY-MM-DD, month 01-12, day 01-31)"
 fi
 
+# --- validate the tax-year label (issue #17) --------------------------------
+# OPTIONAL: a tier with no tax section passes nothing and the {{tax_year}} slot
+# renders empty, mirroring the tier-dependent Section-12 block slot. When supplied
+# it must be one of the two shapes the tax engine's resolveTaxYear path produces —
+# the plain label, or the January changeover label naming both years.
+#
+# WHAT THIS CHECK DOES AND DOES NOT PROVE. It is a SHAPE gate, not a provenance
+# gate: a shell script receiving a string cannot tell where that string came from,
+# so a hand-typed "Tax Year 2025" passes exactly like an engine-produced one. What
+# it does buy is that the obviously-wrong sources cannot pass at all — a budget
+# name ("Personal 2024"), a bare year, a config string, a locale-formatted date —
+# and that the changeover label's two-year shape survives to the header intact.
+#
+# The actual "sourced exclusively from resolveTaxYear" guarantee is upstream, in
+# the SINGLE-PRODUCER rule: exactly one place in the tree builds this label
+# (`headerLabel` in lib/tax/taxYear.mjs), exactly one place surfaces it
+# (`meta.taxYearLabel` in lib/tax/index.mjs, whose year comes from resolveTaxYear
+# and from nowhere else), and every consumer is contracted to pass it verbatim.
+# That rule is pinned by tests/unit/tax-year.test.mjs (the label has one producer)
+# and tests/unit/tax-engine.test.mjs (meta.taxYear is resolved, never echoed).
+# This gate is the last line of defence behind it, not the guarantee itself.
+if [ -n "$tax_year" ] && [[ ! "$tax_year" =~ ^Tax\ Year\ [0-9]{4}(\ \([0-9]{4}\ close-out\ through\ [0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])\))?$ ]]; then
+  usage_err "invalid --tax-year '$tax_year' (expected 'Tax Year YYYY', optionally followed by ' (YYYY close-out through YYYY-MM-DD)') — pass the engine's meta.taxYearLabel verbatim"
+fi
+
 # --- resolve template -------------------------------------------------------
 template="$cli_template"
-[ -z "$template" ] && template="$(_cfg '.report.template_path')"
+# The config read FAILS CLOSED on a config.json that is present but does not
+# parse (issue #290, extending #283). `_cfg` has already named the file and the
+# repair on stderr, so this just stops — silently substituting $DEFAULT_TEMPLATE
+# would render the report from a template the user did not choose, and a
+# corrupt file is indistinguishable from an unset field at this call site.
+#
+# The status is checked in an `if` block rather than the previous
+# `[ -z … ] && template="$(_cfg …)"` one-liner: in an && chain the assignment's
+# status is the chain's status, and under `set -uo pipefail` (no `set -e`) that
+# status is simply discarded — the fail-open would survive the guard.
+#
+# NOT `_require_config` up front: this writer is contracted to run on a host with
+# NO config at all (every path has a CLI flag and a shipped default), and
+# _require_config refuses a missing file. Per-read status checks harden the
+# corrupt-file case without breaking the unconfigured one.
+if [ -z "$template" ]; then
+  template="$(_cfg '.report.template_path')" || exit 2
+fi
 [ -z "$template" ] && template="$DEFAULT_TEMPLATE"
 template="$(expand_path "$template")" || usage_err "template path did not fully resolve (a leading ~ or a \$VAR expand_path could not settle — e.g. a self-referential value): check --template / .report.template_path"
 [ -f "$template" ] || usage_err "template not found: $template"
 
 # --- resolve output directory (config → default), tolerate a trailing slash --
 out_dir="$cli_output_dir"
-[ -z "$out_dir" ] && out_dir="$(_cfg '.report.output_dir')"
+# Fails closed on an unparseable config for the same reason as the template read
+# above (issue #290) — here the cost of falling through is writing the report to
+# ~/Documents/Claude/Reports when the user configured it somewhere else entirely,
+# leaving unencrypted financial records in a directory they are not watching.
+if [ -z "$out_dir" ]; then
+  out_dir="$(_cfg '.report.output_dir')" || exit 2
+fi
 [ -z "$out_dir" ] && out_dir="$DEFAULT_OUTPUT_DIR"
 out_dir="$(expand_path "$out_dir")" || usage_err "output dir did not fully resolve (a leading ~ or a \$VAR expand_path could not settle — e.g. a variable whose value is itself unresolvable, or a self-referential value): check .report.output_dir"
 # A path that expands to empty (e.g. .report.output_dir referencing an unset
@@ -327,8 +324,21 @@ fi
 # never even reaches the completeness gate. Guard it here: the count of raw
 # `<!-- SLOT:` openers must equal the count of well-formed `<!-- SLOT:name -->`
 # markers, or the template is malformed and we refuse loudly (exit 2, no file).
-raw_slot_openers="$(grep -oE '<!-- SLOT:' "$template" | wc -l | tr -d '[:space:]')"
-wellformed_slots="$(grep -oE '<!-- SLOT:[a-z0-9-]+ -->' "$template" | wc -l | tr -d '[:space:]')"
+#
+# LC_ALL=C on all three slot scans (issue #270): under a UTF-8 locale an invalid
+# UTF-8 byte anywhere on a line makes grep silently skip that line — measured on
+# BSD grep 2.6.0-FreeBSD under C.UTF-8 and en_US.UTF-8, which is the macOS
+# runner this writer's suite gates on. That is not merely a miscount here. A
+# skipped line drops the SAME slot from both counts below, so the malformed-
+# template gate still balances and passes, and the slot also vanishes from
+# `required_slots` — so the completeness gate never demands it, the fill loop
+# re-emits its marker verbatim, and the writer produces an exit-0 report with a
+# raw `<!-- SLOT:name -->` in it. Byte-wise matching is what a marker scan wants.
+# GNU grep 3.12 (the ubuntu lanes) is NOT affected on these `-o` scans, so the
+# macOS lane is the only place a lost pin here would be caught — which is why
+# tests/unit/grep-locale-pin.test.sh is a member of it.
+raw_slot_openers="$(LC_ALL=C grep -oE '<!-- SLOT:' "$template" | wc -l | tr -d '[:space:]')"
+wellformed_slots="$(LC_ALL=C grep -oE '<!-- SLOT:[a-z0-9-]+ -->' "$template" | wc -l | tr -d '[:space:]')"
 if [ "$raw_slot_openers" != "$wellformed_slots" ]; then
   usage_err "malformed <!-- SLOT: --> marker in template — every slot marker must match '<!-- SLOT:name -->' (name: lowercase letters, digits, hyphen): $template"
 fi
@@ -339,7 +349,7 @@ fi
 required_slots=()
 while IFS= read -r name; do
   [ -n "$name" ] && required_slots+=("$name")
-done < <(grep -oE '<!-- SLOT:[a-z0-9-]+ -->' "$template" \
+done < <(LC_ALL=C grep -oE '<!-- SLOT:[a-z0-9-]+ -->' "$template" \
            | sed -E 's/^<!-- SLOT:([a-z0-9-]+) -->$/\1/' | sort -u)
 
 if [ "${#required_slots[@]}" -eq 0 ]; then
@@ -414,10 +424,10 @@ fi
 
 # Scalar slots FIRST, before the block fragments are spliced in — for two reasons:
 #   1. A fragment's own text may legitimately contain the literal `{{output_path}}`
-#      / `{{tier}}` / `{{report_date}}` (e.g. a YNAB payee or memo). Substituting
-#      the scalars first leaves that fragment text intact instead of a later
-#      scalar pass silently overwriting it (and leaking the local save path).
-#   2. Each scalar value is enum/regex-validated (tier/date) or HTML-escaped
+#      / `{{tier}}` / `{{report_date}}` / `{{tax_year}}` (e.g. a YNAB payee or memo).
+#      Substituting the scalars first leaves that fragment text intact instead of a
+#      later scalar pass silently overwriting it (and leaking the local save path).
+#   2. Each scalar value is enum/regex-validated (tier/date/tax_year) or HTML-escaped
 #      (out_path), so no scalar substitution can introduce a `<!-- SLOT:name -->`
 #      needle for the block pass below to mis-splice.
 # Every scalar the writer injects is HTML-escaped — the writer OWNS escaping the
@@ -429,6 +439,7 @@ tier_display="$tier"
 html="${html//\{\{tier\}\}/$(html_escape "$tier_display")}"
 html="${html//\{\{report_date\}\}/$(html_escape "$date")}"
 html="${html//\{\{output_path\}\}/$(html_escape "$out_path")}"
+html="${html//\{\{tax_year\}\}/$(html_escape "$tax_year")}"
 
 # Block slots — filled in a SINGLE left-to-right pass over the template so a
 # fragment's value is NEVER re-scanned. A per-slot global `${html//needle/value}`
@@ -472,10 +483,29 @@ html="$assembled"
 # file in the destination dir, then mv it into place — an atomic swap, so a
 # failed same-day rerun (same tier+date → same path) can never destroy a prior
 # good report, and a partially-written file is never observable at the final path.
-mkdir -p "$out_dir" || { err "could not create output directory: $out_dir"; exit 1; }
+#
+# PRIVACY — the report is an UNENCRYPTED financial record (full transaction
+# history, balances, payees, tax detail), so it is created owner-only from the
+# first byte (issue #65, GAP-21):
+#   * The output directory is created under `umask 077`, so any component this
+#     writer makes is 0700 with no world-readable window — the caller's umask is
+#     untouched (the subshell scopes it). We do NOT force-chmod an ALREADY-EXISTING
+#     directory: the configured output_dir may be a location the user shares
+#     deliberately, and (like the .mjs state writers) we don't overreach on a
+#     parent we didn't create. The file itself is hardened unconditionally below.
+#   * The report file is 0600. `mktemp` already creates the temp file 0600 (so it
+#     is never world-readable, even briefly), and the explicit chmod ENFORCES that
+#     BEFORE the atomic swap — the file at its final path is never observable with
+#     looser permissions, and the guarantee no longer depends on mktemp's umask.
+if ! ( umask 077; mkdir -p "$out_dir" ); then err "could not create output directory: $out_dir"; exit 1; fi
 tmp="$(mktemp "${out_dir}/.report-writer.XXXXXX")" || { err "could not create a temp file in: $out_dir"; exit 1; }
 if ! printf '%s\n' "$html" > "$tmp"; then
   err "could not write report: $out_path"
+  rm -f "$tmp"
+  exit 1
+fi
+if ! chmod 600 "$tmp"; then
+  err "could not restrict report permissions: $out_path"
   rm -f "$tmp"
   exit 1
 fi

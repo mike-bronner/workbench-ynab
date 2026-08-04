@@ -90,13 +90,24 @@ claude plugin install workbench-ynab@claude-workbench
 
 ### Local checkout (development)
 
-Point Claude Code at your clone:
+Link your clone into the skills directory, which Claude Code loads local plugin
+checkouts from:
 
 ```
 git clone https://github.com/mike-bronner/workbench-ynab
-cd workbench-ynab
-claude plugin install /absolute/path/to/workbench-ynab
+mkdir -p ~/.claude/skills
+ln -s "$PWD/workbench-ynab" ~/.claude/skills/workbench-ynab
 ```
+
+The link name must match the plugin name in
+[`.claude-plugin/plugin.json`](.claude-plugin/plugin.json). Claude Code loads the
+checkout as `workbench-ynab@skills-dir`; confirm it with `claude plugin list`.
+
+`claude plugin install` takes a plugin *name* resolved against a registered
+marketplace, not a filesystem path, and `claude plugin marketplace add` takes a
+marketplace — this repo ships a plugin manifest, not a marketplace manifest.
+Neither command accepts this checkout. See
+[docs/fresh-install-test.md](docs/fresh-install-test.md) for the verification.
 
 After installing either way, **restart Claude Code** so the plugin's agents, skills, commands, and the vendored MCP server are picked up.
 
@@ -119,24 +130,9 @@ Get a YNAB Personal Access Token from [YNAB → Account Settings → Developer S
 
 ## What it does
 
-Each review reads your budget (read-only) and produces a tax-aware report organized into **twelve analysis sections**:
+Each review reads your budget (read-only) and produces a tax-aware report organized into **twelve analysis sections**: transaction hygiene (tax-aware classification, duplicate detection, uncategorized, stale uncleared), spending and budget health (cost-cutting, budget health, unusual/large, reconciliation status), then a six-sub-score financial health score, a forecast, a prioritized action list, and a year-to-date tax summary.
 
-| # | Section | Surfaces |
-|---|---|---|
-| 1 | **Transaction Classification (tax-aware)** | Every transaction mapped to a category and a Schedule C/A/SE/1 tax line. |
-| 2 | **Duplicate Detection** | Likely double-entered transactions (transfer legs excluded). |
-| 3 | **Cost-Cutting** | Recurring/subscription spend where a cut is plausible, with the saving quantified. |
-| 4 | **Uncategorized** | Transactions with no category, including carryover from before the window. |
-| 5 | **Stale Uncleared** | Uncleared transactions older than the staleness window. |
-| 6 | **Budget Health** | Overspent categories, funding gaps, Ready-to-Assign, goal progress. |
-| 7 | **Unusual / Large** | Outliers for their category or payee. |
-| 8 | **Reconciliation Status** | Cleared-vs-reconciled drift per account. |
-| 9 | **Financial Health Score** | Six auditable 1–10 sub-scores rolled into one overall score. |
-| 10 | **Forecast** | Projected period-end balances and near-term cash flow. |
-| 11 | **Recommended Actions** | The prioritized action list, highest-impact first. |
-| 12 | **Tax Summary (YTD)** | Schedule C P&L, itemized-vs-standard, medical AGI threshold, SE tax, quarterly estimates. |
-
-The tax-aware sections are driven entirely by a **data-driven, shareable tax profile** — never hard-coded owner detail. For the full methodology, see [`docs/methodology.md`](docs/methodology.md); for the tax model and profile schema, see [`docs/tax-mapping.md`](docs/tax-mapping.md) and [`assets/tax/README.md`](assets/tax/README.md).
+The tax-aware sections are driven entirely by a **data-driven, shareable tax profile** — never hard-coded owner detail. The section-by-section table — what each analysis surfaces, which tier runs it, and how it diverges from the prototype — is [`docs/methodology.md`](docs/methodology.md); for the tax model and profile schema, see [`docs/tax-mapping.md`](docs/tax-mapping.md) and [`assets/tax/README.md`](assets/tax/README.md).
 
 ## The read / propose / approve loop
 
@@ -182,6 +178,12 @@ security find-generic-password -s "ynab-mcp" -a "access-token" -w
 
 This path is deliberately outside the installed plugin tree, so **plugin updates never clobber it** — re-installing or upgrading `workbench-ynab` leaves your config and tax profile untouched. The config never holds the token (that's Keychain-only), and it is never committed.
 
+**Generated reports & data are unencrypted, plaintext financial records.** Every review run writes files to your local disk — the HTML report (default `~/Documents/Claude/Reports/`) plus the audit log, monitor state, and estimated-tax tracker under the data directory above. Together they hold your **complete transaction history, balances, payees, and tax detail in cleartext**. The plugin creates them owner-only (mode `0600`, directories `0700`) at write time, but does **not** encrypt them. Two things to know:
+
+- **⚠️ `~/Documents` may sync to iCloud Drive.** With macOS Desktop & Documents syncing enabled, your financial reports can be silently uploaded to iCloud. Keep them on local, disk-encrypted storage (enable **FileVault**) and don't point `.report.output_dir` at a shared or cloud-synced folder unless you intend those records to travel there.
+- **Prune old reports.** Reports accumulate one file per run. [`bin/ynab-prune.sh`](bin/ynab-prune.sh) removes reports older than a retention threshold (default 30 days, dry-run by default). See the [**Generated Artifacts**](SECURITY.md#generated-artifacts) section of `SECURITY.md` for the full artifact inventory, locations, and retention policy.
+- **Removing the plugin leaves all of this behind.** Uninstalling `workbench-ynab` does not remove the scheduled tasks, the Keychain token, the `settings.json` pre-approvals, or the data directory. Run `/workbench-ynab:uninstall` **before** you remove the plugin — it tears down each one, asks before touching your financial records, and keeps them by default. If the plugin is already gone, follow the by-hand checklist in [`docs/uninstall.md`](docs/uninstall.md). Either way, **revoke the token at YNAB** — deleting the Keychain entry does not revoke server-side access.
+
 ## Commands
 
 Every command is namespaced under `/workbench-ynab:`. The plugin is mid-build; the **Ships in** column marks the sprint each command lands in (see [`docs/ROADMAP.md`](docs/ROADMAP.md)).
@@ -196,18 +198,21 @@ Every command is namespaced under `/workbench-ynab:`. The plugin is mid-build; t
 | `/workbench-ynab:ynab-annual-review` | Run the annual review ad-hoc — plans via the orchestrator, then forces the annual tier only. | Sprint 3 |
 | `/workbench-ynab:ynab-apply` | Review a proposed change-set and, on explicit approval, apply the ledger-only writes (dry-run by default). | Sprint 4 |
 | `/workbench-ynab:ynab-migrate` | Retire the legacy hand-run prototype: the old Desktop connector, its token, and the prototype scheduled tasks/directories. | Sprint 5 |
-| `/workbench-ynab:ynab-monitor` | Run one proactive between-run monitoring pass: advance the monitor state store from fresh YNAB data, exit silently when nothing changed. Scaffold only — no alerts/detectors yet. | Sprint 6 (v-Next) |
+| `/workbench-ynab:ynab-prune` | Prune old generated reports under the retention policy — previews by default, deletes only with `--apply`. Keeps unencrypted financial history from accumulating unbounded. | Sprint 5 |
+| `/workbench-ynab:uninstall` | Tear down every piece of system state setup created — the two scheduled tasks, the Keychain token, the `settings.json` pre-approvals, and (only on explicit confirmation) the plaintext data directory. Idempotent. By-hand equivalent: [`docs/uninstall.md`](docs/uninstall.md). | Sprint 5 |
+| `/workbench-ynab:ynab-monitor` | Run one proactive between-run monitoring pass: advance the monitor state store from fresh YNAB data, run the four alert detectors (overdrawn, large/unusual transaction, budget overrun, bill due), dispatch any new finding, and exit silently when nothing is alert-worthy. | Sprint 6 (v-Next) |
+| `/workbench-ynab:ynab-portfolio` | Run the cross-budget portfolio rollup: one consolidated report across every configured budget — combined net worth, aggregate income vs spending, cross-budget Ready-to-Assign, a unified health score, and a single YTD tax picture across the business-tagged budgets. Read-only. See [`docs/portfolio-rollup.md`](docs/portfolio-rollup.md). | Sprint 6 (v-Next) |
 
 ## Versioning
 
-**The plugin and its vendored YNAB MCP bundle are pinned together in git.** The bundle is [`@dizzlkheinz/ynab-mcpb`](https://www.npmjs.com/package/@dizzlkheinz/ynab-mcpb), **version-frozen at `0.26.10`** and vendored as a self-contained `vendor/ynab-mcp/index.cjs` — no `npx`-on-demand, no floating dependency. The pinned version, tarball hash, and provenance are recorded in [`vendor/ynab-mcp/vendored.json`](vendor/ynab-mcp/vendored.json); the bundle is only ever updated via the re-vendor script (`bin/revendor.sh`), never by hand. See [`docs/vendoring.md`](docs/vendoring.md) for how to update the bundle, verify the result, and the version-marker format.
+**The plugin and its vendored YNAB MCP bundle are pinned together in git.** The bundle is [`@dizzlkheinz/ynab-mcpb`](https://www.npmjs.com/package/@dizzlkheinz/ynab-mcpb), **version-frozen at `0.27.1`** and vendored as a self-contained `vendor/ynab-mcp/index.cjs` — no `npx`-on-demand, no floating dependency. The pinned version, tarball hash, and provenance are recorded in [`vendor/ynab-mcp/vendored.json`](vendor/ynab-mcp/vendored.json); the bundle is only ever updated via the re-vendor script (`bin/revendor.sh`), never by hand. See [`docs/vendoring.md`](docs/vendoring.md) for how to update the bundle, verify the result, and the version-marker format.
 
 Pinning both versions in git means a given `workbench-ynab` commit always runs against the exact MCP bundle it was tested with — boot is offline, frozen, and reproducible.
 
 Two version numbers live in this repo. They track different things, are deliberately **independent**, and are **never co-bumped**.
 
-- **The plugin's own version** lives in [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json) (currently `0.1.0`). This is the **only** version release automation bumps — the release workflow's sole bump target is `.claude-plugin/plugin.json`, and no other manifest, JSON, or config file in the repo carries a release version. It starts at `0.1.0` and is cut to `1.0.0` at first release.
-- **The vendored YNAB MCP version** is recorded in [`vendor/ynab-mcp/vendored.json`](vendor/ynab-mcp/vendored.json) (`@dizzlkheinz/ynab-mcpb@0.26.10`). It is **frozen, provenance-only** — a record of exactly which upstream bundle is checked into git, not a number this plugin releases against. Release automation **never** touches it; it changes only when the bundle is deliberately re-vendored.
+- **The plugin's own version** lives in [`.claude-plugin/plugin.json`](.claude-plugin/plugin.json) (currently `0.1.1`). This is the **only** version release automation bumps — the release workflow's sole bump target is `.claude-plugin/plugin.json`, and no other manifest, JSON, or config file in the repo carries a release version. It starts at `0.1.0` and is cut to `1.0.0` at first release.
+- **The vendored YNAB MCP version** is recorded in [`vendor/ynab-mcp/vendored.json`](vendor/ynab-mcp/vendored.json) (`@dizzlkheinz/ynab-mcpb@0.27.1`). It is **frozen, provenance-only** — a record of exactly which upstream bundle is checked into git, not a number this plugin releases against. Release automation **never** touches it; it changes only when the bundle is deliberately re-vendored.
 
 The two schemes do not move together: bumping the plugin version leaves the vendored bundle version untouched, and re-vendoring the bundle leaves the plugin version untouched.
 

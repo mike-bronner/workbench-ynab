@@ -11,9 +11,16 @@ the plugin never touches the user's settings. The vendored YNAB MCP **cannot**
 read this file; only the plugin's **skills and commands** do, through the shared
 loader `bin/config.sh` (see [`config-loader.md`](config-loader.md)).
 
-A machine-readable JSON Schema (draft-07) is provided for editor/tooling
-validation at [`assets/config.schema.json`](../assets/config.schema.json), and a
-complete, redacted example is at
+> **[`assets/config.schema.json`](../assets/config.schema.json) is the source of
+> truth for field-by-field detail.** Every field's type, requiredness, default,
+> constraints, and semantics live in that draft-07 schema's own `description`
+> entries, where editors, validators, and tooling read them directly. This
+> document is the human-readable companion: the design rules, an index of the
+> top-level keys, worked examples, and the narrative a JSON Schema has no slot
+> for. If the two ever diverge, **the schema wins** and this document must be
+> corrected to match it — do not re-explain a field here.
+
+A complete, redacted example config is at
 [`assets/config.example.json`](../assets/config.example.json).
 
 ## Design rule: generic, not hardcoded
@@ -35,29 +42,35 @@ loader, the JSON Schema, or any default.
 
 ## Top-level keys
 
+An index only — one line per key. For each key's fields, types, defaults, and
+constraints, read that key's `description` in
+[`assets/config.schema.json`](../assets/config.schema.json).
+
 | Key | Type | Required | Summary |
 |---|---|---|---|
 | `schema_version` | integer | **required** | Config schema version, for forward migration. |
+| `timezone` | string | **required** | IANA timezone — the single source of truth for all date math (window, carryover, month/quarter boundaries, tax year). |
+| `tax_year` | integer | optional | Pins the active tax year, overriding calendar-year derivation from the review date. Four digits. |
 | `budgets` | array | **required** | The YNAB budgets the plugin operates on (replaces the v1 singular `budget`). |
 | `default_budget` | string | optional | `label` of the entry used when a caller needs a single budget. |
 | `business` | object | optional | Side-business config (accounts, category group, expense categories). |
 | `tax_profile` | object | **required** | Data-driven, generic tax parameters. |
 | `mapping_rules` | array | optional | Payee/category → tax-line rules, expressed as data. |
 | `persona` | object | **required** | The financial-review persona (configurable name). |
-| `report` | object | **required** | Report output directory + template path. |
+| `report` | object | **required** | Report output directory, template path, and retention. |
 | `schedules` | object | optional | Scheduled-task cadences for background tasks (the unified `ynab-review` task and the `ynab-monitor` poll). |
 | `alerts` | object | optional | Alert rules + delivery channel for proactive monitoring (M6). |
+| `apply` | object | optional | Overrides for the `/workbench-ynab:ynab-apply` approval command (M4-5). |
 | `classification` | object | optional | Confidence-band thresholds for the human-review routing policy (issue #19). |
+
+## Worked examples
+
+One snippet per key, in the order above. These are illustrative instances, not
+the contract — the contract is the schema.
 
 ---
 
 ### `schema_version` *(integer, required)*
-
-A monotonically increasing integer. Increment it when a breaking change to this
-shape ships; `/workbench-ynab:setup` and downstream migration can then detect and
-upgrade an older file. Current version: **`2`** (the multi-budget shape, issue
-#84 — version 1 had a singular `budget` object; see the
-[migration note](#migrating-a-v1-config-singular-budget) below).
 
 ```json
 "schema_version": 2
@@ -65,30 +78,19 @@ upgrade an older file. Current version: **`2`** (the multi-budget shape, issue
 
 ---
 
+### `timezone` *(string, required)*
+
+```json
+"timezone": "America/Phoenix"
+```
+
+The illustrative value `America/Phoenix` appears **only** as an instance value in
+[`assets/config.example.json`](../assets/config.example.json) — never as a baked-in
+default in the loader or schema (per the generic-not-hardcoded rule above).
+
+---
+
 ### `budgets` *(array, required)*
-
-The YNAB budgets this plugin operates on. **Replaces the schema-v1 singular
-`budget` object**: config declares which budget(s) to target, and every skill
-resolves its budget set from this array instead of assuming one budget. At
-least one entry is required.
-
-> **Scope note.** Per-budget overrides are **resolved by skills** as each skill
-> is built (the review, monitor, and tax-tracker issues own their own budget
-> iteration) — this config layer delivers the contract only: the shape, the
-> loader helpers ([`config-loader.md`](config-loader.md)), and the migration.
-
-Each entry:
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `budget_id` | string | one of id/name | YNAB budget id (UUID). Preferred when known — ids are rename-proof. |
-| `budget_name` | string | one of id/name | Human-readable budget name as shown in YNAB; resolved to an id at runtime. |
-| `label` | string | **required** | Human display string, unique across the array. The lookup key for `_cfg_budget_field` and `default_budget`. |
-| `role` | string | **required** | Role/tag, e.g. `personal`, `business`, `archive`. Free-form; skills may group or filter by it. |
-| `business_category_group` | string | optional | Per-budget override: YNAB category group holding this budget's business expense categories. |
-| `tax_profile_path` | string | optional | Per-budget override: path to a tax-profile file linked to this budget (`~`/env-var expansion at use time), so Schedule C activity attributes to the correct budget. |
-| `monitoring_enabled` | boolean | optional (default `true`) | Per-budget override: whether the monitoring poll covers this budget. |
-| `write_back_enabled` | boolean | optional (default `true`) | Per-budget override: whether the write-back path may target this budget. The mandatory human approval gate applies regardless. |
 
 ```json
 "budgets": [
@@ -104,13 +106,6 @@ Each entry:
 ---
 
 ### `default_budget` *(string, optional)*
-
-The `label` of the `budgets` entry to use when a caller needs a single budget
-and does not specify one — the fallback that keeps single-budget users working
-without naming a budget everywhere. When absent, the **first** `budgets` entry
-is the default. A value matching no entry's `label` resolves to **nothing**
-(the loader emits empty; a typo surfaces loudly rather than silently picking a
-different budget).
 
 ```json
 "default_budget": "Personal"
@@ -134,17 +129,6 @@ to the v2 shape.
 
 ### `business` *(object, optional)*
 
-Side-business configuration. Omit the whole key if the user has no business.
-Replaces the prototype's hardcoded business name, business checking account, and
-expense categories.
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `name` | string | optional | Business display name (report headings, Schedule C context). |
-| `accounts` | string[] | optional | Names of YNAB accounts that belong to the business. |
-| `category_group` | string | optional | Name of the YNAB category group holding business expense categories. |
-| `expense_categories` | string[] | optional | YNAB categories treated as deductible business expenses. |
-
 ```json
 "business": {
   "name": "<YOUR_BUSINESS_NAME>",
@@ -157,19 +141,6 @@ expense categories.
 ---
 
 ### `tax_profile` *(object, required)*
-
-Generic, data-driven tax parameters. Holds **only** filing status, **public** IRS
-amounts/rates, due dates, and which schedules apply. It contains **no** personal
-income figures, account ids, or names.
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `filing_status` | string (enum) | **required** | One of `single`, `married_filing_jointly`, `married_filing_separately`, `head_of_household`, `qualifying_surviving_spouse`. |
-| `standard_deduction` | number | optional | Standard deduction for the filing status and tax year. A **public IRS figure** — set it to the current-year amount; the example ships `0.0` as a placeholder. |
-| `medical_agi_threshold_pct` | number (0–1) | optional | Fraction of AGI above which unreimbursed medical expenses deduct on Schedule A (e.g. `0.075` = 7.5%). Public IRS rule. |
-| `se_tax_rate` | number (0–1) | optional | Self-employment tax rate on net SE earnings (e.g. `0.153` = 15.3%). Public IRS rule. |
-| `quarterly_due_dates` | string[] | optional | Estimated-tax due dates as `MM-DD` strings (year-agnostic; the active year is resolved at runtime). |
-| `schedules` | string[] (enum) | **required** | Which schedules apply: any of `C`, `A`, `SE`, `1`. Non-empty. |
 
 ```json
 "tax_profile": {
@@ -190,22 +161,6 @@ income figures, account ids, or names.
 
 ### `mapping_rules` *(array, optional)*
 
-Payee/category → tax-line rules expressed as **data, not code**. Each rule matches
-transactions and assigns a schedule and a human-readable tax line. The full
-matching engine and heuristics are owned by the Sprint 2 classifier (issue #23);
-this envelope defines the array shape the loader exposes.
-
-Each element:
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `match` | object | **required** | Match criteria; all present keys must match. |
-| `match.payee_contains` | string | optional | Case-insensitive substring matched against the payee. |
-| `match.category` | string | optional | Exact YNAB category name to match. |
-| `match.category_group` | string | optional | Exact YNAB category group name to match. |
-| `schedule` | string (enum) | optional | Schedule the matched transactions map onto (`C`/`A`/`SE`/`1`). |
-| `tax_line` | string | optional | Tax line / roll-up label for matched transactions. |
-
 ```json
 "mapping_rules": [
   { "match": { "category_group": "<YOUR_BUSINESS_CATEGORY_GROUP>" },
@@ -219,15 +174,6 @@ Each element:
 
 ### `persona` *(object, required)*
 
-The financial-review persona. The **name is a config field, not a constant** — the
-default voice is shipped by the persona skill (issue #36), and the user may rename
-it here.
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `name` | string | optional | Display name of the review persona. When omitted, the persona skill applies its shipped default name. Validated at config-load time (issue #28): **≤ 64 characters, no control characters** — setup fails loudly on a violation (`bin/persona.sh validate-name`). |
-| `voice_overrides` | string \| null | optional | Free-text voice/tone notes layered on top of the shipped voice, **≤ 500 characters** (longer values are truncated with a logged warning). `null` to use the shipped voice. **Style only** — rendered into the model context as delimited DATA (`bin/persona.sh voice`); it can never authorize, expand, or alter a YNAB write (issue #28). |
-
 ```json
 "persona": { "name": "<PERSONA_NAME>", "voice_overrides": null }
 ```
@@ -236,60 +182,31 @@ it here.
 
 ### `report` *(object, required)*
 
-Report output configuration.
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `output_dir` | string | optional | Directory where generated HTML reports are written. Supports `~` and env-var expansion at use time. When absent or empty, the writer applies the shipped default `~/Documents/Claude/Reports` (see below). |
-| `template_path` | string \| null | optional | Path to the frozen HTML report template. When `null`, the plugin's bundled template under `assets/` is used (frozen in Sprint 3, issue #42). |
-
 ```json
-"report": { "output_dir": "~/Documents/Claude/Reports", "template_path": null }
+"report": { "output_dir": "~/Documents/Claude/Reports", "template_path": null, "retention_days": 30 }
 ```
 
-`output_dir` lives **outside the repo** (this whole `config.json` does — see the
-data-dir path above) and therefore **survives plugin updates**: it is the single,
-update-stable source of truth for where reports are saved. The report writer
-([`bin/report-writer.sh`](report-writer.md)) reads it through `bin/config.sh` with
-the `// empty` idiom and falls back to `~/Documents/Claude/Reports` when it is
-absent or empty.
+The report writer ([`bin/report-writer.sh`](report-writer.md)) reads `output_dir`
+through `bin/config.sh`; [`bin/ynab-prune.sh`](../SECURITY.md#generated-artifacts)
+sweeps the same directory under `retention_days`.
 
 ---
 
 ### `schedules` *(object, optional)*
 
-Cadences for the plugin's background scheduled tasks. The **setup step** (or a
-`/workbench-ynab:setup` re-run) reads this block and deploys or syncs each task
-via the scheduled-tasks MCP — cadence is **config-driven, never hardcoded** in a
-skill or in the task deployment. Omit the whole block to accept the defaults.
+Omit the whole block to accept the defaults.
 
 #### `schedules.review` *(object, optional)*
-
-The unified review (Sprint 3). **ONE** scheduled task (`ynab-review`) whose cron
-fires `/workbench-ynab:ynab-review`; the read-only orchestrator decides which
-tiers run that day (weekly, monthly, quarterly-tax, annual). It is **not** four
-per-tier tasks — a single cadence covers them all, exactly like bujo's one
-`bujo-ritual` task.
-
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `cron` | string | optional | `"0 7 * * 1"` | Cron expression for the unified review. Defaults to Monday 07:00 (the proven weekly cadence) when the block or field is absent. The orchestrator routes tiers, so this one cadence covers weekly/monthly/quarterly-tax/annual. |
-| `enabled` | boolean | optional | `true` | Whether the `ynab-review` scheduled task is deployed. Set `false` and re-run setup to remove/disable the task; `ynab-monitor` is unaffected. |
 
 ```json
 "schedules": { "review": { "cron": "0 7 * * 1", "enabled": true } }
 ```
 
+One cadence covers every tier — the read-only orchestrator routes weekly,
+monthly, quarterly-tax and annual out of a single `ynab-review` task, exactly
+like bujo's one `bujo-ritual` task.
+
 #### `schedules.monitor` *(object, optional)*
-
-The proactive between-run monitoring poll (M6). It runs more frequently than the
-weekly review and is a **distinct** scheduled task (`ynab-monitor`), so it never
-disturbs the weekly-review task (`ynab-review`).
-
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `cron` | string | optional | `"0 8 * * *"` | Cron expression for the monitoring poll. Defaults to daily at 08:00 when the block or field is absent. |
-| `enabled` | boolean | optional | `true` | Whether the `ynab-monitor` scheduled task is deployed. Set `false` and re-run setup to remove/disable the task; `ynab-review` is unaffected. |
 
 ```json
 "schedules": { "monitor": { "cron": "0 8 * * *", "enabled": true } }
@@ -298,29 +215,6 @@ disturbs the weekly-review task (`ynab-review`).
 ---
 
 ### `alerts` *(object, optional)*
-
-Alert rules and the delivery channel for proactive between-run monitoring (M6).
-Thresholds are user-tunable data read **exclusively by the monitoring skill** —
-never injected into the YNAB MCP launcher environment. Dollar amounts are
-entered in **whole dollars** and converted to YNAB milliunits at load time
-(`loadAlertsConfig()` in [`lib/monitor/alerts.mjs`](../lib/monitor/alerts.mjs) —
-**not** `bin/config.sh`). Omit the whole block to accept the defaults —
-monitoring works with no configuration. Invalid values fall back per field.
-
-The full contract — field semantics, the structured finding shape, the
-`dedupe_key` format, channel values, and the alert log — lives in
-[`docs/alerts-config.md`](alerts-config.md).
-
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `enabled` | boolean | optional | `true` | Master switch for alert dispatch. |
-| `large_transaction_amount` | number | optional | `500` | Single-transaction alert threshold, in **whole dollars**. |
-| `unusual_multiplier` | number | optional | `3` | Multiple of a category's typical spend that counts as unusual. |
-| `budget_overrun_pct` | number | optional | `100` | Percentage of budgeted amount at/beyond which a category is overrun. |
-| `bill_due_lookahead_days` | integer | optional | `3` | Days ahead an upcoming scheduled bill is flagged. |
-| `overdrawn` | boolean | optional | `true` | Whether a negative account balance is alert-worthy. |
-| `channel` | string (enum) | optional | `"macos-notification"` | Delivery channel: `macos-notification` or `log-only`. Every dispatch also appends to the audit log. |
-| `tax` | object | optional | — | Quarterly estimated-tax reminders (M6-5). See [`alerts.tax`](#alertstax-object-optional) below. |
 
 ```json
 "alerts": {
@@ -335,49 +229,32 @@ The full contract — field semantics, the structured finding shape, the
 }
 ```
 
+Read by `loadAlertsConfig()` in [`lib/monitor/alerts.mjs`](../lib/monitor/alerts.mjs)
+— **not** `bin/config.sh`. The full contract (field semantics, the structured
+finding shape, the `dedupe_key` format, channel values, and the alert log) lives
+in [`docs/alerts-config.md`](alerts-config.md).
+
 #### `alerts.tax` *(object, optional)*
 
-Quarterly estimated-tax **payment reminders** (M6-5, issue #83). Nudge the user
-ahead of each estimated-tax due date so a deadline never slips. The reminder is a
-thin layer over the M6-4 tracker (for the remaining-due figure and
-payment-suppression) and the M6-2 dispatch channel (delivery). Omit the whole
-block to accept the defaults — reminders are on out of the box. Due dates come
-from `tax_profile.quarterly_due_dates` / the tax profile — never hardcoded.
-
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `lead_time_days` | integer ≥ 0 | optional | `7` | Calendar days before a due date the lead-time reminder starts firing. `0` reminds only on the due date itself. |
-| `reminders_enabled` | boolean | optional | `true` | Master switch for estimated-tax reminders. `false` silences them without touching any other alert. |
-
-Both take effect on the **next orchestrator/review run** — no code change. The
-reminder fires within `lead_time_days` of a quarter's due date (🟡 attention) and
-escalates to 🔴 on the due date when no payment is recorded, then stays silent
-once a payment for that quarter lands in the tracker. It runs inside the unified
-`ynab-review` scheduled task (`schedules.review`), so it adds **no** extra cron
-entry. Full contract: [`alerts-config.md`](alerts-config.md).
+Quarterly estimated-tax **payment reminders** (M6-5, issue #83). Both fields take
+effect on the **next orchestrator/review run** — no code change. The reminder
+fires within `lead_time_days` of a quarter's due date (🟡 attention) and escalates
+to 🔴 on the due date when no payment is recorded, then stays silent once a payment
+for that quarter lands in the tracker. It runs inside the unified `ynab-review`
+scheduled task (`schedules.review`), so it adds **no** extra cron entry. Due dates
+come from `tax_profile.quarterly_due_dates` — never hardcoded. Full contract:
+[`alerts-config.md`](alerts-config.md).
 
 ---
 
 ### `classification` *(object, optional)*
 
-Confidence-band thresholds for the classification → human-review routing policy
-(issue #19; the full consumer contract lives in
-[`docs/confidence-contract.md`](confidence-contract.md)). Read by
-`loadThresholds()` in [`lib/tax/confidence.mjs`](../lib/tax/confidence.mjs) —
-**not** by `bin/config.sh`. Confidence governs **proposal composition only**
-(whether an op is pre-filled in the apply proposal); the human approval gate is
-mandatory and independent of confidence. Omit the whole block to accept the
-conservative shipped defaults. Invalid values — or a contradictory pair
-(`mediumThreshold ≥ highThreshold`) — fall back to the defaults.
-
-| Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `highThreshold` | number (0, 1] | optional | `0.85` | `confidence ≥ highThreshold` → band `high`: eligible for a pre-filled proposal op (still human-gated). |
-| `mediumThreshold` | number (0, 1] | optional | `0.6` | `mediumThreshold ≤ confidence < highThreshold` → band `medium`: "review suggested" only, never pre-filled. Must be `< highThreshold`. |
-
 ```json
 "classification": { "highThreshold": 0.85, "mediumThreshold": 0.6 }
 ```
+
+The full consumer contract lives in
+[`docs/confidence-contract.md`](confidence-contract.md).
 
 ---
 

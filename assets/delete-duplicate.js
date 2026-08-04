@@ -52,6 +52,7 @@
  */
 
 const { ALLOWED_TOOLS } = require('./write-safety-guardrail');
+const { resolveUniqueTool } = require('./resolve-tool');
 const { throwOnErrorResult } = require('./write-error');
 const { isTransferLeg } = require('./transaction-shape');
 
@@ -65,20 +66,20 @@ const OP_TYPE = 'delete_duplicate';
  * could route irreversible deletes to the wrong tool without a whisper — on the
  * one path where that must never happen. Fail-closed: zero or multiple matches
  * throw instead of resolving.
+ *
+ * The assertion itself lives in the shared `resolveUniqueTool` (issue #216) so
+ * every write path resolves under one contract; this stays a named wrapper because
+ * it is the delete path's documented tool-resolution seam (skills/delete-duplicate.md)
+ * and it pins the destructive-path diagnostics onto the shared message.
  * @param {readonly string[]} allowedTools the guardrail's exported allow-list.
  * @returns {string} the one matching tool name.
  * @throws {Error} when the suffix matches no tool or more than one.
  */
 function resolveDeleteTool(allowedTools) {
-  const matches = (Array.isArray(allowedTools) ? allowedTools : [])
-    .filter((t) => typeof t === 'string' && t.endsWith('_delete_transaction'));
-  if (matches.length !== 1) {
-    throw new Error(
-      `delete-duplicate: expected exactly ONE *_delete_transaction tool on the guardrail allow-list, found ${matches.length}`
-      + `${matches.length > 0 ? ` (${matches.join(', ')})` : ''} — refusing to resolve the destructive delete tool (fail-closed).`,
-    );
-  }
-  return matches[0];
+  return resolveUniqueTool(allowedTools, '_delete_transaction', {
+    context: 'delete-duplicate',
+    subject: 'the destructive delete tool',
+  });
 }
 
 /**

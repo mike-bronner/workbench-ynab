@@ -174,6 +174,10 @@ assert_absent  "disclaimer: never a SLOT injection point"             "SLOT:disc
 assert_present "scalar slot: {{tier}}"        "{{tier}}"
 assert_present "scalar slot: {{report_date}}" "{{report_date}}"
 assert_present "scalar slot: {{output_path}}" "{{output_path}}"
+# The active tax year is a slot value (issue #17), rendered inside the report
+# header so the reader always sees which year the figures apply to. A literal year
+# in the header would be exactly the hardcoding the tax-year rule exists to remove.
+assert_present "scalar slot: {{tax_year}}"    "{{tax_year}}"
 
 # ---- self-contained: no external assets (AC) ---------------------------------
 assert_absent "no external stylesheet link" "rel=\"stylesheet\""

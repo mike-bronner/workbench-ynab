@@ -60,6 +60,25 @@ const LEDGER_ONLY_OP_TYPES = Object.freeze([
 /**
  * The namespaced tool allow-list. EXACTLY these tools may be invoked at apply
  * time. Adding a tool requires editing only this constant.
+ *
+ * AUTHORITATIVE INVENTORY — `ALLOWED_TOOLS` ∪ `DENIED_TOOLS` is the single
+ * source of truth for which YNAB verbs mutate. Every mirror of it is pinned
+ * against these two array literals, each test parsing them at runtime through
+ * `tests/lib/mutating-inventory.sh` and failing on any divergence:
+ *
+ *   - `scripts/check-readonly.sh`'s `WRITE_VERBS` deny-list, by
+ *     `tests/check-readonly.test.sh` (#254);
+ *   - `docs/write-back-safety.md`'s per-verb verdict table, by
+ *     `tests/unit/docs-set.test.sh` (#257);
+ *   - `skills/write-safety-guardrail.md`'s §2/§3 bullet lists, by
+ *     `tests/unit/write-safety-guardrail-doc.test.sh` (#257);
+ *   - `vendor/ynab-mcp/index.cjs`, by
+ *     `tests/unit/tool-name-ssot-coverage.test.sh` (#257) — every verb named
+ *     here must be a tool the vendored bundle really registers.
+ *
+ * Adding or removing a verb here therefore requires the same change to every
+ * mirror, or the build breaks — deliberately, so no surface that documents or
+ * guards the write boundary can fall behind it.
  * @type {readonly string[]}
  */
 const ALLOWED_TOOLS = Object.freeze([
@@ -76,6 +95,14 @@ const ALLOWED_TOOLS = Object.freeze([
  * state) and may NEVER run. The deny-list is belt-and-suspenders to the
  * fail-closed allow-list: even if the allow-list were widened by mistake, these
  * stay explicitly forbidden.
+ *
+ * The three scheduled-transaction mutations arrived with the 0.27.1 re-vendor
+ * (#157), which was done to obtain the scheduled-transactions READ. A scheduled
+ * transaction becomes a real ledger entry on its due date, so creating, editing,
+ * or deleting one is money movement on a delay — it belongs here. The allow-list
+ * is fail-closed and would already block them; naming them keeps
+ * `ALLOWED_TOOLS ∪ DENIED_TOOLS` a true inventory of the bundle's mutating verbs,
+ * which is what every mirror listed above is pinned against.
  * @type {readonly string[]}
  */
 const DENIED_TOOLS = Object.freeze([
@@ -84,6 +111,9 @@ const DENIED_TOOLS = Object.freeze([
   'mcp__plugin_workbench-ynab_ynab__ynab_create_receipt_split_transaction',
   'mcp__plugin_workbench-ynab_ynab__ynab_create_account',
   'mcp__plugin_workbench-ynab_ynab__ynab_set_default_budget',
+  'mcp__plugin_workbench-ynab_ynab__ynab_create_scheduled_transaction',
+  'mcp__plugin_workbench-ynab_ynab__ynab_update_scheduled_transaction',
+  'mcp__plugin_workbench-ynab_ynab__ynab_delete_scheduled_transaction',
 ]);
 
 /**

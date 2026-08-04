@@ -22,6 +22,10 @@
                          never a hardcoded value)
        {{output_path}} — the save path/filename, decided by the report writer (M2-9);
                          it is a slot value, NEVER hardcoded in this file
+       {{tax_year}}    — the active tax year label, e.g. "Tax Year 2025" (issue #17).
+                         Sourced from the engine's resolveTaxYear, never from a budget
+                         name; during the January changeover it names BOTH years.
+                         Empty for a tier that reports no tax figures.
 
   Self-contained on purpose: all CSS is inline, no external stylesheets, scripts,
   or image references — the report stays portable and emailable.
@@ -251,6 +255,9 @@
   <header class="report-header">
     <h1>{{tier}} YNAB Review</h1>
     <p class="meta">{{report_date}}</p>
+    <!-- Which tax year the figures below apply to (issue #17). Empty for a tier
+         with no tax section; during the January changeover it names both years. -->
+    <p class="meta">{{tax_year}}</p>
   </header>
 
   <!-- Not-tax-advice disclaimer — HARDCODED (never a slot) so fragment-stitching can

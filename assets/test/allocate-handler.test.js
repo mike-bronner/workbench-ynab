@@ -52,6 +52,39 @@ test('toolMapEntry registers allocate → the namespaced update_category tool', 
   assert.ok(ALLOWED_TOOLS.includes(allocate.applyToolName()));
 });
 
+// --- fail-closed tool resolution (issue #216) --------------------------------
+// applyToolName resolves through the shared `resolveUniqueTool`, which asserts the
+// suffix matches EXACTLY ONE allow-list entry. The regression these pin: the old
+// `ALLOWED_TOOLS.find((t) => t.endsWith(APPLY_TOOL_SUFFIX))` took the FIRST match
+// and its `if (!tool)` guard could only ever catch the ZERO-match case — a future
+// allow-list entry sharing `_update_category` would have been resolved by array
+// order, silently sending budget writes to the wrong tool. Hostile allow-lists are
+// passed in explicitly; names use a fake `mcp__x__` prefix so this file still holds
+// no concrete namespaced tool name (issue #87 guard).
+
+const FAKE_UPDATE_CATEGORY = 'mcp__x__ynab_update_category';
+
+test('(#216) applyToolName resolves an exactly-one match, regardless of allow-list position', () => {
+  for (const list of [[FAKE_UPDATE_CATEGORY, 'mcp__x__ynab_get_month'], ['mcp__x__ynab_get_month', FAKE_UPDATE_CATEGORY]]) {
+    assert.equal(allocate.applyToolName(list), FAKE_UPDATE_CATEGORY);
+  }
+});
+
+test('(#216) applyToolName fails closed on ZERO matches — never resolves undefined', () => {
+  assert.throws(
+    () => allocate.applyToolName(['mcp__x__ynab_get_month']),
+    /allocate handler: expected exactly ONE \*_update_category tool.*found 0.*refusing to resolve the budget-allocation update tool \(fail-closed\)/,
+  );
+  assert.throws(() => allocate.applyToolName([]), /found 0/);
+});
+
+test('(#216) applyToolName fails closed on MULTIPLE matches and names every colliding tool', () => {
+  assert.throws(
+    () => allocate.applyToolName([FAKE_UPDATE_CATEGORY, 'mcp__x__ynab_bulk_update_category']),
+    /expected exactly ONE \*_update_category tool.*found 2 \(mcp__x__ynab_update_category, mcp__x__ynab_bulk_update_category\)/,
+  );
+});
+
 // --- (1) valid op dispatches the correct API call with correct milliunits ----
 
 test('(1) buildApplyArgs maps a valid op to flat update_category args with raw milliunits', () => {

@@ -11,7 +11,7 @@ This plugin **productizes that prototype**: a formalized persona, a reusable tax
 | Decision | Choice |
 |---|---|
 | Scope (v1) | Read-only review **+ approval-gated write-back** (categorize/allocate/dedup/reconcile). **Never moves real money** — ledger-only. |
-| MCP strategy | **Vendor** `@dizzlkheinz/ynab-mcpb@0.26.10` (its self-contained ~1.46 MB `dist/bundle/index.cjs`), run via `node`, version frozen in git. No `npx`-on-demand. |
+| MCP strategy | **Vendor** `@dizzlkheinz/ynab-mcpb@0.27.1` (its self-contained ~1.46 MB `dist/bundle/index.cjs`), run via `node`, version frozen in git. No `npx`-on-demand. |
 | Tax logic | **Generic & shareable** — data-driven tax profile + mapping engine; any user's situation is one config instance. |
 | Distribution | Public repo; listed in the `claude-workbench` marketplace at release. |
 | Pipeline | Issues are PBIs on the project board governed by The Index. |

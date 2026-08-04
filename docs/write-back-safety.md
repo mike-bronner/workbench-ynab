@@ -100,7 +100,10 @@ proposal to any write ([`assets/changeset-contract.md`](../assets/changeset-cont
    scheduled task is read-only or dry-run-only.
 5. **Audit** — every apply (dry-run included) is appended to the audit log for
    a durable, replayable record ([`docs/audit-log.md`](./audit-log.md)), which
-   also makes re-runs idempotent: already-applied operations are skipped.
+   also makes re-runs idempotent: already-applied operations are skipped. How a
+   crashed, partially-applied batch resumes without re-applying — the idempotency
+   key, the recovery procedures, and live-state verification as the tie-breaker —
+   is designed in [`docs/write-back-idempotency.md`](./write-back-idempotency.md).
 
 **Destructive operations get a second gate.** A `delete_duplicate` is always
 tagged `risk: "destructive"` and requires its own stronger confirmation beyond
@@ -127,6 +130,9 @@ allow/deny classification is enforced by `ALLOWED_TOOLS` / `DENIED_TOOLS` in
 | `mcp__plugin_workbench-ynab_ynab__ynab_create_receipt_split_transaction` | — nothing | ⛔ denied (money movement) |
 | `mcp__plugin_workbench-ynab_ynab__ynab_create_account` | — nothing | ⛔ denied (account mutation) |
 | `mcp__plugin_workbench-ynab_ynab__ynab_set_default_budget` | — nothing | ⛔ denied (budget mutation) |
+| `mcp__plugin_workbench-ynab_ynab__ynab_create_scheduled_transaction` | — nothing | ⛔ denied (deferred money movement) |
+| `mcp__plugin_workbench-ynab_ynab__ynab_update_scheduled_transaction` | — nothing | ⛔ denied (deferred money movement) |
+| `mcp__plugin_workbench-ynab_ynab__ynab_delete_scheduled_transaction` | — nothing | ⛔ denied (deferred money movement) |
 
 > **Intentional divergence from the issue #71 wording, called out here:** the
 > design brief listed the two create tools among "write tools used." They are
@@ -134,8 +140,11 @@ allow/deny classification is enforced by `ALLOWED_TOOLS` / `DENIED_TOOLS` in
 > — they can fabricate money-shaped records, so the guardrail **deny-lists** them
 > (`denied_tool_money_movement`) and they appear in no pre-approval list.
 > Documenting them as "used" would be wrong; documenting them as denied is the
-> truth the code enforces. The three rows below the pair — `ynab_create_receipt_split_transaction`,
-> `ynab_create_account`, and `ynab_set_default_budget` — are the remaining
+> truth the code enforces. The six rows below the pair — `ynab_create_receipt_split_transaction`,
+> `ynab_create_account`, `ynab_set_default_budget`, and the three
+> scheduled-transaction mutations the 0.27.1 re-vendor added (**#157** — a
+> scheduled transaction becomes a real ledger entry on its due date, so these are
+> money movement on a delay) — are the remaining
 > `DENIED_TOOLS` entries the guardrail blocks, listed so this write-surface
 > reference matches
 > [`assets/write-safety-guardrail.js`](../assets/write-safety-guardrail.js)'s

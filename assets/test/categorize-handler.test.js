@@ -132,6 +132,58 @@ test('categorizeToolMap / categorizeBulkToolMap register the tools, resolved fro
   }
 });
 
+// --- fail-closed tool resolution (issue #216) --------------------------------
+// resolveTools() resolves BOTH write tools through the shared `resolveUniqueTool`,
+// which asserts each suffix matches EXACTLY ONE allow-list entry. The regression
+// these pin: the old `ALLOWED_TOOLS.find((t) => t.endsWith(...))` took the FIRST
+// match, so an allow-list entry sharing a suffix would silently receive a write, and
+// its `if (!single || !bulk)` guard could only ever catch the zero-match case.
+// Hostile allow-lists are passed in explicitly; names use a fake `mcp__x__` prefix so
+// this file still holds no concrete namespaced tool name (issue #87 guard).
+
+const FAKE_SINGLE = 'mcp__x__ynab_update_transaction';
+const FAKE_BULK = 'mcp__x__ynab_update_transactions';
+
+test('(#216) resolveTools resolves exactly-one match for BOTH suffixes, in either allow-list order', () => {
+  // The nesting-suffix case: `_update_transaction` is a substring of
+  // `_update_transactions`, so a substring match would see the singular suffix hit
+  // both tools. Matching is anchored (`endsWith`), so each resolves its own tool —
+  // and never by array order, which is why both orders are asserted.
+  for (const list of [[FAKE_SINGLE, FAKE_BULK], [FAKE_BULK, FAKE_SINGLE]]) {
+    assert.deepEqual(resolveTools(list), { single: FAKE_SINGLE, bulk: FAKE_BULK });
+  }
+  // And against the real guardrail allow-list (the production default).
+  assert.deepEqual(resolveTools(), { single: SINGLE_TOOL, bulk: BULK_TOOL });
+});
+
+test('(#216) resolveTools fails closed on ZERO matches for either suffix — never resolves undefined', () => {
+  // Bulk present, singular missing.
+  assert.throws(
+    () => resolveTools([FAKE_BULK]),
+    /categorize handler: expected exactly ONE \*_update_transaction tool.*found 0.*refusing to resolve the single-transaction update tool \(fail-closed\)/,
+  );
+  // Singular present, bulk missing.
+  assert.throws(
+    () => resolveTools([FAKE_SINGLE]),
+    /expected exactly ONE \*_update_transactions tool.*found 0.*refusing to resolve the bulk update-transactions tool \(fail-closed\)/,
+  );
+  assert.throws(() => resolveTools([]), /found 0/);
+});
+
+test('(#216) resolveTools fails closed on MULTIPLE matches for either suffix — a collision never picks the first', () => {
+  // A future allow-list entry sharing the singular suffix. Under `.find()` this
+  // resolved whichever sorted first and a single-transaction write went to it silently.
+  assert.throws(
+    () => resolveTools([FAKE_SINGLE, 'mcp__x__ynab_bulk_update_transaction', FAKE_BULK]),
+    /expected exactly ONE \*_update_transaction tool.*found 2 \(mcp__x__ynab_update_transaction, mcp__x__ynab_bulk_update_transaction\)/,
+  );
+  // The same collision on the bulk suffix.
+  assert.throws(
+    () => resolveTools([FAKE_SINGLE, FAKE_BULK, 'mcp__x__ynab_batch_update_transactions']),
+    /expected exactly ONE \*_update_transactions tool.*found 2 \(mcp__x__ynab_update_transactions, mcp__x__ynab_batch_update_transactions\)/,
+  );
+});
+
 test('categorizeBulkFits: ≥2 ops each forming an { id, category_id } entry → bulk; else per-op', () => {
   const a = op({ id: 'op-1', transaction_id: 't-a' });
   const b = op({ id: 'op-2', transaction_id: 't-b' });

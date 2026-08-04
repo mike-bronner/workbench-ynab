@@ -107,32 +107,69 @@ test('parseCivilDate rejects years 0000-0099, which JS Date remaps into 1900-199
 // parser was module-private, so every new date seam re-derived the shape-only
 // regex and silently dropped the calendar check (PR #261 did exactly that while
 // fixing a related bug). Promoting the parser only helps if nothing drifts back,
-// so this test IS the AC's "repo-wide check", executable and permanent: any new
-// hand-rolled YYYY-MM-DD parser under lib/ fails the suite and points the author
-// at parseCivilDate.
+// so this test IS the AC's "repo-wide check", executable and permanent.
+//
+// WHAT IT ASSERTS, precisely: a module that matches a civil date by regex must
+// also HAVE the calendar check — either by importing the shared parser, or by
+// doing the Date.UTC round-trip itself. A regex with neither is a shape-only
+// re-derivation, which is the whole defect: it accepts '2025-02-30' and answers
+// plausibly but wrongly.
+//
+// Why not ban the regex outright: a bare shape match is legitimate when the
+// calendar check follows it. taxYear.mjs uses one to tell a civil date from an
+// INSTANT before handing the civil branch to epochDay, and its instant regex
+// necessarily contains the date shape. assets/ is CommonJS with a documented
+// no-dependencies contract, so it cannot import the ESM parser and carries the
+// round-trip inline instead (duplicate-candidates.js). Banning the pattern would
+// have forced a carve-out list, and a file exempted by NAME can hide a real
+// re-derivation; "must own the calendar check" cannot be satisfied by accident.
+//
+// Known limit: the detector reads whole files, so a module that legitimately
+// routes one seam through the parser could still hand-roll a second one and pass.
+// The per-seam rejection tests above and in estimated-tax.test.mjs are what pin
+// those; this guard catches the new module that reaches for a regex first.
 
-test('no module under lib/ hand-rolls a YYYY-MM-DD parser — civilDate.mjs is the only one', () => {
-  const libDir = join(ROOT, 'lib');
-  const sources = readdirSync(libDir, { recursive: true, encoding: 'utf8' })
-    .filter((rel) => rel.endsWith('.mjs'))
-    .map((rel) => ({ rel: join('lib', rel), path: join(libDir, rel) }))
-    // The shared parser is the ONE place the pattern is allowed to live.
+test('no module hand-rolls a shape-only YYYY-MM-DD check — every date regex owns the calendar check', () => {
+  // Widened past lib/ on Holmes's #263 note: the class is not lib-specific, and
+  // the first site found outside it (assets/duplicate-candidates.js) proved it.
+  const sources = ['lib', 'assets', 'scripts']
+    .flatMap((dir) => {
+      let entries = [];
+      try {
+        entries = readdirSync(join(ROOT, dir), { recursive: true, encoding: 'utf8' });
+      } catch {
+        return []; // the tree may not exist; the fixture-size check below is the net
+      }
+      return entries
+        .filter((rel) => rel.endsWith('.mjs') || rel.endsWith('.js'))
+        .map((rel) => ({ rel: join(dir, rel), path: join(ROOT, dir, rel) }));
+    })
+    // The shared parser is the ONE place the pattern is unconditionally allowed.
     .filter(({ rel }) => rel !== join('lib', 'tax', 'civilDate.mjs'));
 
-  // Guard against the fixture silently emptying out (a moved lib/, a changed
+  // Guard against the fixture silently emptying out (a moved tree, a changed
   // extension) and reporting green having inspected nothing.
-  assert.ok(sources.length >= 5, `expected to scan several lib modules, scanned ${sources.length}`);
+  assert.ok(sources.length >= 20, `expected to scan the whole source tree, scanned ${sources.length}`);
 
   // A 4-digit year group followed by a '-' and a 2-digit group: the signature of
   // a civil-date regex, in any of the spellings a re-derivation tends to use.
   const civilDateRegex = /\\d\{4\}\)?-\(?\\d\{2\}/;
+  // The calendar check, in its two permitted forms: import the shared parser, or
+  // round-trip through Date.UTC here (the round-trip's tell is reading the parts
+  // back off the resulting Date).
+  const importsSharedParser = /from ['"][^'"]*civilDate\.mjs['"]/;
+  const roundTripsItself = /getUTCFullYear\(\)/;
+
   const offenders = sources
-    .filter(({ path }) => civilDateRegex.test(readFileSync(path, 'utf8')))
+    .filter(({ path }) => {
+      const src = readFileSync(path, 'utf8');
+      return civilDateRegex.test(src) && !importsSharedParser.test(src) && !roundTripsItself.test(src);
+    })
     .map(({ rel }) => rel);
 
   assert.deepEqual(
     offenders,
     [],
-    `${offenders.join(', ')} hand-rolls a YYYY-MM-DD regex. Import parseCivilDate from lib/tax/civilDate.mjs instead — a shape-only check accepts impossible dates like '2025-02-30' and answers plausibly but wrongly (#263).`,
+    `${offenders.join(', ')} matches a YYYY-MM-DD date by regex with no calendar check. Import parseCivilDate from lib/tax/civilDate.mjs — a shape-only check accepts impossible dates like '2025-02-30' and answers plausibly but wrongly (#263).`,
   );
 });

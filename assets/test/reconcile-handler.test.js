@@ -235,6 +235,97 @@ test('(AC4) mark_cleared with no before.cleared baseline fails closed — skippe
   assert.equal(apply.calls.length, 0); // never overwrites a transaction with no baseline to compare
 });
 
+test('(AC4) reconcile_account with no before baseline fails closed — skipped-stale, never applied', async () => {
+  const op = reconcileOp();
+  op.before = {}; // schema-valid (reconcileOp.before has no required) but no baseline to drift against
+  const apply = spy();
+  // Live state is wide open — every field differs from the fixture's snapshot. With
+  // no baseline, `isStale`'s subset comparison has zero keys to walk and reads
+  // not-stale, so the guard is the only thing producing the stale verdict here.
+  //
+  // What this case does and does not prove. Revert the guard and this test still
+  // reddens, but via `blocked` / `balance_mismatch`, NOT via a dispatch to
+  // `applyOp`: this fixture's live `cleared_balance` (999000) does not equal the
+  // op's asserted `after.reconciled_balance` (1200000), so `processReconcileAccount`'s
+  // balance guard returns first and `applyOp` is never reached. Only the `status`
+  // and `reason` assertions below discriminate the mutation; `apply.calls.length`
+  // stays 0 on both the correct and the buggy path, so it is a contract assertion
+  // here, not mutation evidence. The `an empty object` row in the table below
+  // covers the same `{}` shape against a MATCHING live fixture, which is where a
+  // fail-open `{}` really does reach `applyOp` and move money.
+  const res = await processReconcileOp(op, {
+    activeBudgetId: BUDGET,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: spy(() => ({ cleared_balance: 999000, reconciled_balance: 111000, cleared: 'uncleared' })),
+    applyOp: apply,
+  });
+  assert.equal(res.status, STATUS.SKIPPED_STALE);
+  assert.equal(res.detail.reason, 'stale');
+  assert.equal(apply.calls.length, 0); // never reconciles an account with no baseline to compare
+});
+
+// Every `before` shape that carries no comparable baseline. Unlike the standalone
+// case above, these rows run against a live fixture that MATCHES the op's asserted
+// balance, so the balance guard cannot pre-empt the verdict and a fail-open branch
+// really does reach `applyOp`.
+//
+// Exactly TWO of this table's 8 rows discriminate the new baseline guard:
+// `an empty object` and `a populated non-plain object`. Reverting the guard to the
+// bare `isStale(op.before, live)` reddens those two (both with `applied` — the op
+// dispatches and moves money) plus the `{}` case above the table (which reddens
+// with `blocked`, for the different reason documented there), and nothing else.
+//
+// The other 6 rows pin the branch's end-to-end contract, which `isStale`'s own
+// null/non-object/array rejection (`assets/apply-executor.js`) already satisfies:
+// they stay green with or without the guard. They are AC coverage and regression
+// cover, not proof of the guard. Do not read them as mutation-discriminating.
+for (const [label, before] of [
+  ['absent', undefined],
+  ['null', null],
+  ['an empty array', []],
+  ['a populated array', ['cleared_balance']],
+  ['a scalar string', 'cleared_balance'],
+  ['a number', 1200000],
+  ['an empty object', {}],
+  ['a populated non-plain object', Object.assign(new Date(), { cleared_balance: 1200000 })],
+]) {
+  test(`(AC4) reconcile_account fails closed when before is ${label}`, async () => {
+    const op = reconcileOp();
+    op.before = before;
+    const apply = spy();
+    const res = await processReconcileOp(op, {
+      activeBudgetId: BUDGET,
+      dryRun: false,
+      toolMap: TOOL_MAP,
+      // Live state that MATCHES the fixture's real snapshot, so nothing but the
+      // baseline guard itself can produce the stale verdict.
+      readLiveState: spy(() => ({ cleared_balance: 1200000, reconciled_balance: 1145010, cleared: 'cleared' })),
+      applyOp: apply,
+    });
+    assert.equal(res.status, STATUS.SKIPPED_STALE);
+    assert.equal(res.detail.reason, 'stale');
+    assert.equal(apply.calls.length, 0);
+  });
+}
+
+test('(AC4) reconcile_account with a populated before baseline still applies when live matches', async () => {
+  // Positive control for the guard above: a real baseline must NOT be read as
+  // baseline-free, or the fail-closed tests would pass against a branch that always
+  // returns stale.
+  const op = reconcileOp();
+  const apply = spy(() => ({ ok: true }));
+  const res = await processReconcileOp(op, {
+    activeBudgetId: BUDGET,
+    dryRun: false,
+    toolMap: TOOL_MAP,
+    readLiveState: spy(() => ({ cleared_balance: 1200000, reconciled_balance: 1145010, cleared: 'cleared' })),
+    applyOp: apply,
+  });
+  assert.equal(res.status, STATUS.APPLIED);
+  assert.equal(apply.calls.length, 1);
+});
+
 test('(AC4) reconcile_account is skipped-stale when the account cleared balance drifted; dry-run surfaces it', async () => {
   const op = reconcileOp();
   const apply = spy();

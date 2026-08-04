@@ -1,23 +1,18 @@
 # YNAB tool names — single source of truth
 
 > **This file is the single source of truth for concrete YNAB tool names.**
-> Concrete names may appear in only three allowlisted files: this one, the
-> human-readable contract
-> [`docs/mcp-capability-map.md`](../../docs/mcp-capability-map.md), and the
-> orchestrator agent's `tools:` frontmatter
-> ([`agents/ynab-orchestrator.md`](../../agents/ynab-orchestrator.md)) — which
-> Claude Code requires to hold literal names and which wires the subset of the
-> read tools below that the planner currently needs. Every other skill,
-> command, hook, and the pre-approval globs reference or are generated from this
-> file. A namespace change is an edit here (plus the derivation rule in the
-> capability map, and any changed suffix the orchestrator wires mirrored into
-> it). The guard
-> [`bin/check-tool-name-sources.sh`](../../bin/check-tool-name-sources.sh)
-> enforces that nothing outside the allowlist copies a name.
+> Every other skill, command, hook, and the pre-approval globs reference or are
+> generated from this file, so a namespace or suffix change starts as an edit
+> here (see *Maintenance* below for the rest of the sequence).
 
-Read [`docs/mcp-capability-map.md`](../../docs/mcp-capability-map.md) for the
-*why*, the namespace derivation rule, the swap procedure, and the runtime
-gotchas. This file is the *what*: the names themselves.
+This file is the **what** — the names themselves. The **why** lives once, in
+[`docs/mcp-capability-map.md`](../../docs/mcp-capability-map.md): the namespace
+derivation rule, the allowlist of files permitted to hold a concrete name (and
+the reason each one is on it, including the orchestrator's `tools:` frontmatter
+and this file), the guard
+[`bin/check-tool-name-sources.sh`](../../bin/check-tool-name-sources.sh) that
+enforces it, the consumer map, the swap procedure, and the runtime gotchas.
+Don't restate any of that here.
 
 ## Prefix
 
@@ -37,11 +32,21 @@ mcp__plugin_workbench-ynab_ynab__ynab_list_accounts
 mcp__plugin_workbench-ynab_ynab__ynab_list_categories
 mcp__plugin_workbench-ynab_ynab__ynab_list_transactions
 mcp__plugin_workbench-ynab_ynab__ynab_list_payees
+mcp__plugin_workbench-ynab_ynab__ynab_list_scheduled_transactions
 mcp__plugin_workbench-ynab_ynab__ynab_get_month
 mcp__plugin_workbench-ynab_ynab__ynab_export_transactions
 mcp__plugin_workbench-ynab_ynab__ynab_get_transaction
 mcp__plugin_workbench-ynab_ynab__ynab_compare_transactions
+mcp__plugin_workbench-ynab_ynab__ynab_get_account
+mcp__plugin_workbench-ynab_ynab__ynab_get_category
 ```
+
+`ynab_list_scheduled_transactions` is the read the fetch-once cache uses for the
+`scheduled_transactions` resource (**#157**). The 0.26.10 bundle registered no
+such tool; the 0.27.1 re-vendor added it, which is what made scheduled
+transactions a real cached resource — see
+[`docs/ynab-read-path.md`](../../docs/ynab-read-path.md) §1. It is read-only and
+matched by the `ynab_list_*` pre-approval glob below.
 
 `ynab_get_transaction` and `ynab_compare_transactions` are reads added for the
 Sprint 4 delete-duplicate write path (M4-8): the apply executor re-reads the
@@ -51,6 +56,21 @@ delete, and the dry-run preview may corroborate the duplicate pairing with
 tool ids in the vendored bundle. They are **not** wired into the read-only
 orchestrator's `tools:` list (the agent carries only the planner's five reads);
 they are invoked from the approval-gated apply path, not the orchestrator.
+
+`ynab_get_account` and `ynab_get_category` are the two single-record reads the
+apply executor's `readLiveState` seam resolves for drift detection: `get_account`
+for the `reconcile` op type's `reconcile_account` sub-action (account
+`reconciled_balance` / `cleared_balance` — see
+[`skills/reconcile-write-path.md`](../reconcile-write-path.md)) and
+`get_category` for `allocate` (that category's `budgeted` for the given month).
+Both were verified as registered tool ids in the vendored bundle, and both were
+absent from this file until **#247** (that gap, and the mechanical guard now
+closing it, are explained in the capability map's *Registered but not adopted*
+section). Like
+`get_transaction` / `compare_transactions`, both are read-only, both are **not**
+wired into the read-only orchestrator's `tools:` list (it stays the planner's
+five reads — no planner feature needs a single-account or single-category read),
+and both run from the approval-gated apply path.
 
 ## Write tools (ledger-only — gated, approved in Sprint 4)
 
@@ -107,13 +127,18 @@ mcp__plugin_workbench-ynab_ynab__ynab_reconcile_account
 - `mcp__plugin_workbench-ynab_ynab__ynab_create_transaction` and
   `mcp__plugin_workbench-ynab_ynab__ynab_create_transactions` — no M4 write path
   creates transactions, so they are not pre-approved either.
+- The three **scheduled-transaction mutations** the 0.27.1 re-vendor added
+  (`create` / `update` / `delete`). No write path uses them, and they are money-
+  adjacent (a scheduled transaction becomes a real one on its due date), so they
+  sit in the guardrail's `DENIED_TOOLS` rather than any allow-list. The read-phase
+  globs cannot reach them: `ynab_list_*` and `ynab_get_*` match only the two new
+  *reads*, `ynab_list_scheduled_transactions` and `ynab_get_scheduled_transaction`.
 
-The human-approval gate for a write **batch** is the `/ynab-apply` command
-(**M4-5**) plus the write-safety guardrail — *not* a per-call Claude Code
-dialog. Pre-approving these four tools removes the now-*redundant* per-call
-prompt; it does not remove the approval gate. See
-[`docs/mcp-capability-map.md`](../../docs/mcp-capability-map.md) for the exact
-`~/.claude/settings.json` snippet and the permission notes.
+Pre-approval is **not** the human-approval gate and never replaces it. Why that
+is so, why the delete verb is withheld, why the namespaced prefix is mandatory,
+and the exact `~/.claude/settings.json` snippet all live once in the capability
+map's *Permission notes*:
+[`docs/mcp-capability-map.md`](../../docs/mcp-capability-map.md).
 
 ## Family glob (schema loading — NOT pre-approval)
 
@@ -133,10 +158,17 @@ phase-split set above, so the delete verb is never blanket-approved.
 The read-only orchestrator agent's `tools:` allow-list is a **subset** of the
 **read tools** above: the planner currently wires the five reads it needs
 (`list_budgets`, `list_accounts`, `list_categories`, `list_transactions`,
-`get_month`). The remaining two read tools — `list_payees` and
-`export_transactions` — are in the canonical read set above but are not
-wired into the agent; they widen into the orchestrator only if a future planner
-feature needs them. The orchestrator never holds write tools — write paths run from the
+`get_month`). The other seven read tools — `list_payees`,
+`export_transactions`, `list_scheduled_transactions`, `get_transaction`,
+`compare_transactions`, `get_account` and `get_category` — are in the canonical
+read set above but are not wired into the agent. `list_payees` and
+`export_transactions` widen into the orchestrator only if a future planner
+feature needs them. The other five have no place in a read-only planner at all:
+`list_scheduled_transactions` feeds the read path's fetch-once forecast cache
+(the review skills consume it, not the planner), and `get_transaction`,
+`compare_transactions`, `get_account` and `get_category` are drift reads on the
+approval-gated apply path.
+The orchestrator never holds write tools — write paths run from the
 approval-gated `/ynab-apply` command (Sprint 4), not the orchestrator.
 
 ## Port wrappers must throw on failure — check `result.isError`
@@ -154,13 +186,16 @@ classify it into `error_class` / `applied_state`.
 
 ## Maintenance
 
-- Change a tool name (or swap the MCP): edit the lists above **and** the
-  derivation rule in the capability map, mirror any changed suffix that the
-  orchestrator wires into its `tools:` frontmatter (it carries the five reads
-  above, not `list_payees` / `export_transactions` until Sprint 3), then run
-  `bin/check-tool-name-sources.sh`.
+- Change a tool name (or swap the MCP): edit the lists above first, then work
+  the capability map's *Swap procedure* for everything else it entails (the
+  derivation rule, the orchestrator's `tools:` frontmatter, the guard run, the
+  verification steps).
 - Add a logical operation: add it to the capability map table first, then add
-  its concrete name here.
+  its concrete name here. The two lists must stay identical as sets —
+  `tests/unit/tool-name-ssot-coverage.test.sh` fails when they diverge.
+- Re-vendor the MCP: every tool the new bundle registers must end up either in
+  the capability map table (and therefore here) or in that map's *Registered but
+  not adopted* inventory. The same test asserts that partition.
 - Never paste a `mcp__plugin_workbench-ynab_ynab__ynab_*` name into another
   skill or config file — reference this file instead. The guard script will
   fail the build otherwise.

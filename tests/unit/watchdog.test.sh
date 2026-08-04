@@ -8,6 +8,10 @@
 # ends with `run_tests`. scripts/test.sh auto-discovers it via the `*.test.sh`
 # glob.
 #
+# bash-3.2-lane: the watchdog's process-group kill is job-control behaviour, and
+# job control differs across bash majors — the TIMEOUT path must be proven on
+# macOS's bash 3.2, not only on the ubuntu runner's bash 5.x (issue #188).
+#
 # The headline test is test_timeout_reaps_command_substitution_grandchild: it
 # pins the ACTUAL bug — a killed watchdog used to strand the grandchild doing the
 # expensive work. Because all four call sites (persona-loader's render_tmpl_timed
@@ -22,26 +26,21 @@ REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 source "$REPO_ROOT/tests/lib/assert.sh"
 # shellcheck source=/dev/null
 source "$REPO_ROOT/tests/lib/watchdog.sh"
+# The ticking payload + the "no descendant survived" assertion, shared with the
+# four per-call-site orphan tests (issue #251) so all five use ONE fixture.
+# shellcheck source=/dev/null
+source "$REPO_ROOT/tests/lib/orphan-probe.sh"
 
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
 # ---- fixtures ---------------------------------------------------------------
 
-# A payload shaped like the real call sites: the expensive, non-terminating work
-# runs inside a NESTED COMMAND SUBSTITUTION, so it is a grandchild of the
-# subshell watchdog_run backgrounds. It ticks a marker file so liveness is
-# observable from the parent after the kill — a dead tree stops appending.
-grandchild_ticker() {
-  local marker="$1" spin
-  spin="$( while :; do printf 'tick\n' >>"$marker"; sleep 0.2; done )"
-  printf '%s' "$spin"
-}
-
-# tick_count <marker> — lines currently in the marker file (0 when absent).
-tick_count() {
-  [ -f "$1" ] && wc -l <"$1" | tr -d ' ' || printf '0'
-}
+# The grandchild ticker lives in tests/lib/orphan-probe.sh as
+# orphan_probe_tick_forever: a payload shaped like the real call sites, whose
+# expensive non-terminating work runs inside a NESTED COMMAND SUBSTITUTION so it
+# is a grandchild of the subshell watchdog_run backgrounds. It ticks a marker
+# file so liveness stays observable from the parent after the kill.
 
 # Pass-path payloads. Defined at top level (like the fixtures above) rather than
 # inside their test_* functions so shellcheck can see they are real definitions;
@@ -63,18 +62,15 @@ test_timeout_reaps_command_substitution_grandchild() {
   local marker="$SANDBOX/grandchild-ticks" rc=0
   : >"$marker"
 
-  watchdog_run 1 grandchild_ticker "$marker" >/dev/null 2>&1 || rc=$?
+  watchdog_run 1 orphan_probe_tick_forever "$marker" >/dev/null 2>&1 || rc=$?
   assert_eq "124" "$rc" "an overrunning command must report the 124 timeout contract"
 
-  # Sample across a window several ticks wide (the ticker fires every 0.2 s), so
-  # a survivor is caught rather than raced past.
-  local before after
-  before="$(tick_count "$marker")"
-  sleep 2
-  after="$(tick_count "$marker")"
-
-  assert_eq "$before" "$after" \
-    "no descendant may survive the watchdog — the marker kept growing ($before → $after), so the grandchild was stranded"
+  # orphan_probe_no_survivors samples across a window several ticks wide (the
+  # ticker fires every 0.2 s) so a survivor is caught rather than raced past —
+  # and fails closed if the marker never ticked at all, since a flat 0 → 0 count
+  # would otherwise "pass" while proving nothing.
+  orphan_probe_no_survivors "$marker" \
+    || fail "no descendant may survive the watchdog — the grandchild was stranded"
 }
 
 # NOTE ON COVERAGE: the group kill depends on `set -m` giving the job its own

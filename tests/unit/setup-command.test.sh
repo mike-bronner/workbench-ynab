@@ -63,14 +63,24 @@ extract_step1a_block() {
        s && /^```bash$/{f=1; next} f && /^```$/{exit} f{print}' "$CMD"
 }
 
-# run_step1a <floor-gate-rc> — execute the extracted block with CLAUDE_PLUGIN_ROOT
-# pointing at a sandbox whose bin/node-floor.sh stub exits <floor-gate-rc>
-# (printing the real gate's actionable STDERR line when non-zero), and with
-# stubbed node/jq/security first on PATH. Captures S1_OUT / S1_ERR / S1_RC.
+# run_step1a <floor-gate-rc> [core-present] — execute the extracted block with
+# CLAUDE_PLUGIN_ROOT pointing at a sandbox whose bin/node-floor.sh stub exits
+# <floor-gate-rc> (printing the real gate's actionable STDERR line when
+# non-zero), and with stubbed node/jq/security first on PATH.
+#
+# HOME is redirected into the sandbox too, so the workbench-core prereq check
+# (issue #230) reads a *stubbed* plugins cache rather than the developer's real
+# one — without that the outcome would depend on whether the machine running
+# the suite happens to have workbench-core installed. [core-present] defaults
+# to 1 (cache dir created); pass 0 to simulate a clean profile missing it.
+# Captures S1_OUT / S1_ERR / S1_RC.
 run_step1a() {
-  local gate_rc="$1" sb block
+  local gate_rc="$1" core_present="${2:-1}" sb block
   sb="$(mktemp -d)"
-  mkdir -p "$sb/root/bin" "$sb/root/vendor/ynab-mcp" "$sb/stubs"
+  mkdir -p "$sb/root/bin" "$sb/root/vendor/ynab-mcp" "$sb/stubs" "$sb/home"
+  if [ "$core_present" -eq 1 ]; then
+    mkdir -p "$sb/home/.claude/plugins/cache/claude-workbench/workbench-core"
+  fi
   printf '18\n' > "$sb/root/vendor/ynab-mcp/NODE_VERSION"
   if [ "$gate_rc" -eq 0 ]; then
     printf '#!/usr/bin/env bash\nexit 0\n' > "$sb/root/bin/node-floor.sh"
@@ -84,7 +94,7 @@ run_step1a() {
   chmod +x "$sb/root/bin/node-floor.sh" "$sb/stubs/node" "$sb/stubs/jq" "$sb/stubs/security"
   block="$(extract_step1a_block)"
   set +e
-  S1_OUT="$(CLAUDE_PLUGIN_ROOT="$sb/root" PATH="$sb/stubs:$PATH" \
+  S1_OUT="$(CLAUDE_PLUGIN_ROOT="$sb/root" HOME="$sb/home" PATH="$sb/stubs:$PATH" \
     bash -c "$block" 2>"$sb/err")"
   S1_RC=$?
   set -e
@@ -103,6 +113,9 @@ test_step1a_block_extracts() {
   # shellcheck disable=SC2016
   assert_contains "$block" 'vendor/ynab-mcp/NODE_VERSION' \
     "the extracted Step 1a block reads the canonical floor marker"
+  # shellcheck disable=SC2016
+  assert_contains "$block" 'cache/*/workbench-core' \
+    "the extracted Step 1a block detects workbench-core via the plugins cache"
 }
 
 # AC 5 enforcement: with a below-floor node (gate stub exits 1) the block must
@@ -116,19 +129,54 @@ test_step1a_gate_blocks_below_floor_node() {
   assert_eq 1 "$S1_RC" "Step 1a must exit non-zero when the floor gate fails"
   assert_contains "$S1_ERR" "workbench-ynab requires Node >=" \
     "the gate's actionable message must reach stderr"
-  assert_eq "✅ node, jq, security all present" "$S1_OUT" \
-    "stdout must end at the on-PATH ✅ line — the failed gate adds no bytes"
+  assert_eq "✅ node, jq, security, workbench-core all present" "$S1_OUT" \
+    "stdout must end at the prereq ✅ line — the failed gate adds no bytes"
 }
 
 # With the gate passing, the block completes and reports both ✅ lines.
 test_step1a_gate_passes_at_floor() {
   run_step1a 0
   assert_eq 0 "$S1_RC" "Step 1a must exit 0 when the floor gate passes"
-  assert_contains "$S1_OUT" "✅ node, jq, security all present" \
-    "the on-PATH check reports success"
+  assert_contains "$S1_OUT" "✅ node, jq, security, workbench-core all present" \
+    "the prereq check reports success"
   assert_contains "$S1_OUT" "meets the Node >= 18 floor" \
     "the version check reports the floor met (marker value + node stub)"
   assert_eq "" "$S1_ERR" "no stderr on the happy path"
+}
+
+# --- Step 1a workbench-core prereq gate (issue #230) --------------------------
+# The README lists FOUR prerequisites but Step 1a asserted only the three CLI
+# tools, so a clean profile missing workbench-core cleared setup and degraded
+# later (persona name falls back to Hobbes; shared memory/session features
+# unavailable). Run the block against a sandbox HOME with NO workbench-core in
+# the plugins cache: it must hard-stop, name the missing prereq, and print
+# actionable install guidance. Deleting the check from the command makes this
+# exit 0 and the test fail.
+test_step1a_hard_stops_on_missing_workbench_core() {
+  run_step1a 0 0
+  assert_eq 1 "$S1_RC" "Step 1a must exit non-zero when workbench-core is absent"
+  # Scope the needle to the report line itself — a bare "workbench-core" match
+  # would also be satisfied by the guidance line alone.
+  assert_contains "$S1_OUT" "❌ Missing prerequisites: workbench-core" \
+    "the miss is reported and names workbench-core"
+  assert_contains "$S1_OUT" "claude plugin install workbench-core@claude-workbench" \
+    "actionable install guidance is printed for workbench-core"
+  # The hard stop must precede the Node-floor gate's ✅ line — proving setup
+  # never falls through to Step 1b's probe, Step 2's token prompt, or a config
+  # write with a prerequisite missing.
+  case "$S1_OUT" in
+    *"meets the Node >= "*) fail "Step 1a fell through to the Node-floor gate despite a missing prereq" ;;
+  esac
+}
+
+# The gate discriminates: the SAME sandbox with workbench-core present must
+# pass. Without this, a check that always failed would look correct above.
+test_step1a_passes_when_workbench_core_present() {
+  run_step1a 0 1
+  assert_eq 0 "$S1_RC" "Step 1a must exit 0 when workbench-core is installed"
+  case "$S1_OUT" in
+    *"Missing prerequisites"*) fail "workbench-core present but still reported missing" ;;
+  esac
 }
 
 # It sources tool names from the SSoT rather than inlining them.
@@ -204,6 +252,173 @@ test_step4_token_guard_is_aggregate_and_pre_publish() {
   # shellcheck disable=SC2016
   assert_contains "$body" 'rm -f "$CONFIG_FILE.tmp"' \
     "Step 4 guard drops the staged .tmp on a hit, before any mv into place"
+}
+
+# --- Step 13 timezone collection: extract-and-RUN (issue #31) -----------------
+# The walk's timezone step embeds two bash snippets — the $SYS_TZ machine-zone
+# resolver and the _is_valid_timezone re-ask gate. Grepping for the phrases is
+# hollow (they also live in prose), so mirror the extract_step1a_block
+# convention: pull each fenced block by a needle unique to it and execute it
+# against the REAL bin/config.sh, so the collection is proven end-to-end —
+# including that the gate rejects a non-zone artifact like Factory.
+
+# Print the first ```bash fenced block whose body contains <needle>. Fences may
+# be indented (these snippets sit under a Markdown bullet), so the anchors allow
+# leading whitespace; bash ignores the retained per-line indent when the block
+# is executed.
+extract_fenced_block_containing() {
+  local needle="$1"
+  awk -v needle="$needle" '
+    /^[[:space:]]*```bash[[:space:]]*$/ { inb=1; buf=""; next }
+    inb && /^[[:space:]]*```[[:space:]]*$/ { inb=0; if (index(buf, needle)) printf "%s", buf; next }
+    inb { buf = buf $0 "\n" }
+  ' "$CMD"
+}
+
+# run_sys_tz <readlink-output> — execute the $SYS_TZ resolver with `readlink`
+# stubbed to emit <readlink-output>, CLAUDE_PLUGIN_ROOT pointing at the repo so
+# the block sources the real loader. Captures the resolved SYS_TZ in SYSTZ_OUT.
+run_sys_tz() {
+  local rl="$1" block sb
+  # The needle is literal command source text — never expanded here.
+  # shellcheck disable=SC2016
+  block="$(extract_fenced_block_containing 'readlink /etc/localtime')"
+  [ -n "$block" ] || { fail "could not extract the Step 13 SYS_TZ block"; return; }
+  sb="$(mktemp -d)"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" %q\n' "$rl" > "$sb/readlink"
+  chmod +x "$sb/readlink"
+  # The trailing printf is literal source written INTO run.sh — $SYS_TZ must
+  # expand there (after the block sets it), not here.
+  # shellcheck disable=SC2016
+  { printf '%s\n' "$block"; printf 'printf "%%s\\n" "$SYS_TZ"\n'; } > "$sb/run.sh"
+  SYSTZ_OUT="$(CLAUDE_PLUGIN_ROOT="$REPO_ROOT" PATH="$sb:$PATH" bash "$sb/run.sh" 2>/dev/null)"
+  rm -rf "$sb"
+}
+
+# run_tz_validate <COLLECTED_TZ> — execute the re-ask validation snippet against
+# the real loader with COLLECTED_TZ set. Captures its output (the ❌ line, if
+# any) in TZV_OUT.
+run_tz_validate() {
+  local tz="$1" block sb
+  # The needle is literal command source text — never expanded here.
+  # shellcheck disable=SC2016
+  block="$(extract_fenced_block_containing '_is_valid_timezone "$COLLECTED_TZ"')"
+  [ -n "$block" ] || { fail "could not extract the Step 13 validation block"; return; }
+  sb="$(mktemp -d)"
+  {
+    printf 'source "%s/bin/config.sh"\n' "$REPO_ROOT"
+    printf 'COLLECTED_TZ=%q\n' "$tz"
+    printf '%s\n' "$block"
+  } > "$sb/run.sh"
+  TZV_OUT="$(bash "$sb/run.sh" 2>&1)"
+  rm -rf "$sb"
+}
+
+# The extraction finds the right blocks (needles scoped to the BLOCK body).
+test_step13_blocks_extract() {
+  # shellcheck disable=SC2016
+  assert_contains "$(extract_fenced_block_containing 'readlink /etc/localtime')" \
+    'SYS_TZ=' "the SYS_TZ resolver block extracts"
+  # shellcheck disable=SC2016
+  assert_contains "$(extract_fenced_block_containing '_is_valid_timezone "$COLLECTED_TZ"')" \
+    "not a valid IANA timezone" "the validation re-ask block extracts"
+}
+
+# SYS_TZ resolves the machine's zone from /etc/localtime when it is a real zone.
+test_step13_sys_tz_resolves_machine_zone() {
+  run_sys_tz "/var/db/timezone/zoneinfo/America/New_York"
+  assert_eq "America/New_York" "$SYSTZ_OUT" \
+    "SYS_TZ resolves the machine's zone from the /etc/localtime link"
+}
+
+# SYS_TZ falls back to UTC (never empty, never "system local") when the link
+# resolves to nothing.
+test_step13_sys_tz_falls_back_to_utc() {
+  run_sys_tz ""
+  assert_eq "UTC" "$SYSTZ_OUT" \
+    "SYS_TZ falls back to UTC when /etc/localtime yields no zone"
+}
+
+# A machine link pointing at the Factory pseudo-zone must NOT become the default:
+# the shared _is_valid_timezone gate (issue #31 fix) rejects it, so SYS_TZ falls
+# back to UTC — the setup path inherits the fix.
+test_step13_sys_tz_rejects_nonzone_default() {
+  run_sys_tz "/usr/share/zoneinfo/Factory"
+  assert_eq "UTC" "$SYSTZ_OUT" \
+    "a link to the Factory pseudo-zone falls back to UTC, never Factory"
+}
+
+# The re-ask gate rejects a non-zone artifact (Factory) — proving an invalid
+# value is surfaced and never silently written.
+test_step13_validation_rejects_nonzone_factory() {
+  run_tz_validate "Factory"
+  assert_contains "$TZV_OUT" "not a valid IANA timezone" \
+    "the re-ask gate rejects the Factory pseudo-zone"
+}
+
+# A real IANA zone passes the re-ask gate silently (no ❌ emitted).
+test_step13_validation_accepts_real_zone() {
+  run_tz_validate "America/Phoenix"
+  assert_eq "" "$TZV_OUT" "a real IANA zone passes the re-ask gate silently"
+}
+
+# The human-facing invariants: the walk table row and the never-write-invalid
+# rule (deleting them regresses this).
+test_step13_documents_required_timezone_invariant() {
+  local body; body="$(cat "$CMD")"
+  assert_contains "$body" "Timezone (IANA)" "the walk table carries the timezone row"
+  # The rule wraps across a line break in the prose ("never write an invalid or\n
+  # empty `.timezone`"), so match the leading, single-line fragment.
+  assert_contains "$body" "never write an invalid or" \
+    "the walk forbids writing an invalid/empty .timezone"
+}
+
+# --- setup is the REPAIR path: it must survive a corrupt config (issue #290) ---
+#
+# bin/persona.sh now exits non-zero on a config file that is present but does not
+# parse. Setup calls it to pre-fill the persona prompt — and setup is the one
+# command that FIXES a corrupt config, so that call must degrade to "no default
+# to offer" rather than abort the run.
+#
+# The assertion is scoped to the fenced block that makes the call, not a
+# whole-file grep: `PERSONA_DEFAULT` also appears in the surrounding prose and in
+# the field-walk table, so an unscoped check would pass even if the `||` guard
+# were deleted from the actual command line.
+test_persona_default_call_tolerates_an_unparseable_config() {
+  local block
+  # The needle is literal command source text — never expanded here.
+  # shellcheck disable=SC2016
+  block="$(extract_fenced_block_containing 'bin/persona.sh" name')"
+  [ -n "$block" ] || { fail "could not extract the Step 3 PERSONA_DEFAULT block"; return; }
+  # shellcheck disable=SC2016
+  assert_contains "$block" '|| PERSONA_DEFAULT=""' \
+    "the PERSONA_DEFAULT call carries the || fallback, so an unparseable config cannot abort setup"
+
+  # Behavioural half: run the extracted block against the REAL bin/persona.sh
+  # with a config that does not parse, and confirm it survives with an empty
+  # default rather than a guessed name.
+  #
+  # HONEST SCOPE — verified by mutation, not assumed. Deleting the `||` guard
+  # does NOT redden this half: the block runs without `set -e`, so the failed
+  # substitution leaves PERSONA_DEFAULT empty and the script continues to exit 0
+  # either way. The source-text assertion above is the one that pins the guard.
+  # What this half independently proves is that persona.sh is genuinely reachable
+  # and non-zero-exiting here (so the guard is answering a real failure, not a
+  # hypothetical), and it is the assertion that would catch setup's block gaining
+  # a `set -e`/`set -o errexit` — the change that WOULD make the missing guard
+  # abort the run.
+  local sb rc=0 out
+  sb="$(mktemp -d)"
+  printf '{ "persona": { "name": "Calvin"\n' > "$sb/bad.json"
+  # The trailing printf is literal source written INTO run.sh — $PERSONA_DEFAULT
+  # must expand there (after the block sets it), not here.
+  # shellcheck disable=SC2016
+  { printf 'set -u\n'; printf '%s\n' "$block"; printf 'printf "[%%s]\\n" "$PERSONA_DEFAULT"\n'; } > "$sb/run.sh"
+  out="$( CLAUDE_PLUGIN_ROOT="$REPO_ROOT" YNAB_CONFIG_FILE="$sb/bad.json" \
+            WORKBENCH_CORE_CONFIG_FILE="$sb/absent.json" bash "$sb/run.sh" 2>/dev/null )" || rc=$?
+  assert_eq "0" "$rc" "the extracted PERSONA_DEFAULT block survives an unparseable config"
+  assert_eq "[]" "$out" "it degrades to an empty persona default rather than a guessed name"
+  rm -rf "$sb"
 }
 
 run_tests

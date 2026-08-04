@@ -47,11 +47,17 @@ bi_assert() {
 # BEFORE the Claude harness adds its `mcp__plugin_workbench-ynab_ynab__` prefix.
 # Newline-separated (one per line) so coverage checks never depend on shell
 # word-splitting / the ambient IFS.
+#
+# `ynab_list_scheduled_transactions` joined the required set with the 0.27.1
+# re-vendor (#157): the read path now caches scheduled transactions, so a later
+# bundle that dropped the tool would break the forecast/bills read rather than
+# merely shrink an unused surface.
 BI_REQUIRED_TOOLS="ynab_list_budgets
 ynab_list_accounts
 ynab_list_categories
 ynab_list_transactions
 ynab_list_payees
+ynab_list_scheduled_transactions
 ynab_get_month
 ynab_update_transaction
 ynab_update_transactions

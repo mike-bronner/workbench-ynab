@@ -44,9 +44,18 @@
 # Footer template (overridable for tests):
 #   YNAB_FOOTER_TEMPLATE            <repo>/assets/templates/report-footer.html
 #
-# Every read is total: an absent config file, missing jq, malformed JSON, or an
-# absent/null field is swallowed and the next tier takes over, ending at
-# "Hobbes" — no error, exit 0.
+# Every read is total for the THREE LEGITIMATE EMPTIES: an absent config file,
+# missing jq, or an absent/null field is swallowed and the next tier takes over,
+# ending at "Hobbes" — no error, exit 0.
+#
+# A config file that is present but does NOT parse is the one exception, and it
+# FAILS CLOSED (issue #290, extending the #283 contract bin/config.sh already
+# implements): the read stops, names the offending file on stderr, and every
+# renderer + CLI subcommand above exits non-zero WITHOUT rendering. Falling
+# through instead would silently substitute a different name than the one the
+# user configured — the tier-2 agent_name, or "Hobbes" — into the report footer
+# and the dispatch sign-off, with the unreadable config sitting right there and
+# no signal that it was ignored.
 
 set -u
 
@@ -109,14 +118,66 @@ else
   )
 fi
 
-# Read a jq path from a config file, echoing empty on any failure. Mirrors the
-# workbench-core hooks/mcp-memory.sh `_cfg` idiom: guard the file, guard jq,
-# swallow parse errors, let `// empty` collapse a missing/null field to empty so
-# the caller's fallback takes over.
+# _config_parses <file>
+#   Return 0 iff <file> holds parseable JSON. A pure predicate — prints nothing,
+#   so callers branch on its status. Assumes the file exists and jq is on PATH;
+#   _cfg checks both first.
+#
+#   `jq -e 'type'`, not `jq empty` or `jq -e .`, for the same two reasons
+#   bin/config.sh's twin documents: `jq empty` accepts a ZERO-BYTE file (a
+#   truncated write would read back as "no fields set", the failure this guard
+#   exists to stop), and `jq -e .` keys the status on the VALUE, so a file whose
+#   whole content is `false` or `null` — both valid JSON — would report a parse
+#   failure it did not have. `type` always emits a non-empty string.
+#
+#   Deliberately a SECOND implementation rather than a call into bin/config.sh:
+#   that loader's guard is hardwired to the single global $YNAB_CONFIG_FILE,
+#   while persona.sh reads TWO different files (this plugin's config and the
+#   workbench-core config), so the file must be a parameter here. Sourcing
+#   bin/config.sh is not an option either — its `_cfg` takes one argument to
+#   this one's two, so sourcing it would clobber this file's own reader.
+_config_parses() {
+  jq -e 'type' "$1" >/dev/null 2>&1
+}
+
+# _config_json_error <file>
+#   Print the invalid-JSON message to stderr. One emitter shared by every read
+#   below, so the wording cannot drift between the two config files. The
+#   "is not valid JSON and could not be parsed" phrasing matches bin/config.sh's
+#   `_config_json_error` verbatim, so a user who hits the fault through either
+#   loader reads the same diagnosis. The repair line is file-agnostic because
+#   the offending file may be the workbench-core config, for which
+#   /workbench-ynab:setup is the wrong repair.
+_config_json_error() {
+  printf 'persona.sh: config at %s is not valid JSON and could not be parsed.\n' "$1" >&2
+  printf 'persona.sh: repair the file, or re-run the owning plugin'"'"'s setup to recreate it — refusing to guess a persona name.\n' >&2
+}
+
+# _cfg <file> <jq-path>
+#   Echo the value at <jq-path> in <file>, or nothing when the file is missing,
+#   jq is unavailable, or the field is absent/null. Mirrors the workbench-core
+#   hooks/mcp-memory.sh idiom (`jq -r '<path> // empty'`) for those three
+#   legitimate empties, which stay silent successes — empty stdout, return 0,
+#   nothing on stderr.
+#
+#   FAILS CLOSED on a config file that is present but does NOT parse (issue
+#   #290, extending #283's contract from bin/config.sh to this independent
+#   implementation): stderr names the file, stdout is empty, return is non-zero.
+#   Because the three legitimate empties all return 0, a non-zero return means
+#   exactly one thing — the file is there and is not JSON.
+#
+#   Previously this swallowed jq's parse failure, so a corrupt config collapsed
+#   into the same empty output an absent key produces and the caller's next
+#   precedence tier took over with ZERO signal: a user whose persona.name was
+#   set would silently be rendered as their workbench-core agent_name, or as
+#   "Hobbes", with the config they wrote sitting right there unreadable. Callers
+#   propagate the status: `value="$(_cfg "$f" '.k')" || return 1`.
 _cfg() {
   local file="$1" path="$2"
-  [ -f "$file" ] && command -v jq >/dev/null 2>&1 \
-    && jq -r "$path // empty" "$file" 2>/dev/null
+  [ -f "$file" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  _config_parses "$file" || { _config_json_error "$file"; return 1; }
+  jq -r "$path // empty" "$file" 2>/dev/null
 }
 
 # Echo the first existing workbench-core config candidate, or nothing.
@@ -148,8 +209,18 @@ _trim() {
 # a degenerate value whose first (max + 1) * 4 bytes are PURE whitespace has
 # trimmed to empty by the time the caller looks, so it falls through / renders
 # nothing instead of excavating content buried past the gate.
+#
+# Propagates _cfg's fail-closed status (issue #290). The read is CAPTURED into a
+# local first rather than nested directly in the _byte_bound_utf8 argument,
+# because a command substitution discards the inner command's status — the outer
+# call would see only the (always-zero) status of the byte gate and reinstate the
+# fail-open one level up. Splitting the `local` declaration from the assignment
+# is deliberate for the same reason: `local x="$(cmd)"` returns `local`'s own
+# status, always 0. Same two traps bin/config.sh's budget helpers document.
 _gated_cfg() {
-  _byte_bound_utf8 "$(_cfg "$1" "$2")" $(( ($3 + 1) * 4 ))
+  local raw
+  raw="$(_cfg "$1" "$2")" || return 1
+  _byte_bound_utf8 "$raw" $(( ($3 + 1) * 4 ))
 }
 
 # Render <template> by substituting each {{placeholder}} with its paired value in
@@ -278,20 +349,35 @@ _checked_name() {
   printf '%s' "$s"
 }
 
+# persona_name — echo the resolved name, or FAIL CLOSED on a config file that
+# does not parse (issue #290). A tier whose file is absent, whose field is unset,
+# or whose value the read-time validator rejects still falls through exactly as
+# before; only "the file is there and is not JSON" stops the resolution, and it
+# stops it at the tier that hit it — a corrupt ynab config never silently
+# resolves to the workbench-core agent_name or to "Hobbes". Callers propagate:
+# `name="$(persona_name)" || return 1`.
 persona_name() {
-  local name core
+  local name core raw
   # Both tiers read via _gated_cfg: the raw config value is byte-gated BEFORE
   # _trim scans it (cost invariant above). A name whose content survives inside
   # the first (64 + 1) * 4 bytes — i.e. every non-degenerate name, however much
   # trailing whitespace pads it — resolves exactly as before; one drowned past
   # the gate in leading whitespace trims to empty and falls through silently,
   # the established failure mode for an absent name.
+  #
+  # Each read is CAPTURED before it is trimmed/validated, so the fail-closed
+  # status survives: `_checked_name "$(_trim "$(_gated_cfg …)")"` would bury
+  # _gated_cfg's status inside two command substitutions and discard it.
   # 1. ynab plugin's explicit persona.name
-  name="$(_checked_name "$(_trim "$(_gated_cfg "$YNAB_CONFIG_FILE" '.persona.name' "$PERSONA_NAME_MAX_LEN")")" 'persona.name')"
+  raw="$(_gated_cfg "$YNAB_CONFIG_FILE" '.persona.name' "$PERSONA_NAME_MAX_LEN")" || return 1
+  name="$(_checked_name "$(_trim "$raw")" 'persona.name')"
   # 2. the requesting agent's own name from workbench-core
   if [ -z "$name" ]; then
     core="$(_core_config)"
-    [ -n "$core" ] && name="$(_checked_name "$(_trim "$(_gated_cfg "$core" '.agent_name' "$PERSONA_NAME_MAX_LEN")")" 'agent_name')"
+    if [ -n "$core" ]; then
+      raw="$(_gated_cfg "$core" '.agent_name' "$PERSONA_NAME_MAX_LEN")" || return 1
+      name="$(_checked_name "$(_trim "$raw")" 'agent_name')"
+    fi
   fi
   # 3. shipped standalone default
   printf '%s\n' "${name:-$DEFAULT_PERSONA_NAME}"
@@ -344,14 +430,19 @@ persona_name() {
 # assets/apply-executor.js) reads no persona config whatsoever — enforced by
 # tests/unit/persona-write-gate-isolation.test.sh.
 render_voice() {
-  local v
+  local v raw
   # Bound FIRST (step 2a), at the read itself: the O(1) byte gate in _gated_cfg
   # runs before _trim AND before _char_len / _truncate_utf8 — the trim's
   # whitespace-strip and the continuation-byte scans are each super-linear on
   # their match-dense input class (the round-3 DoS, and the escalation ruling's
   # whitespace variant). A sliced over-cap value still exceeds the character
   # cap, so the truncation warning below still fires.
-  v="$(_trim "$(_gated_cfg "$YNAB_CONFIG_FILE" '.persona.voice_overrides' "$VOICE_OVERRIDES_MAX_LEN")")"
+  # Captured before the trim so _gated_cfg's fail-closed status survives (issue
+  # #290): a corrupt config must stop the render, not read as "voice_overrides
+  # unset" and emit nothing — the two are indistinguishable at the call site,
+  # and "no block" is exactly what an unconfigured host produces.
+  raw="$(_gated_cfg "$YNAB_CONFIG_FILE" '.persona.voice_overrides' "$VOICE_OVERRIDES_MAX_LEN")" || return 1
+  v="$(_trim "$raw")"
   [ -z "$v" ] && return 0
   # Step 2b: every strip below runs on at most ~2 KB of already-gated value.
   if [ "$(_char_len "$v")" -gt "$VOICE_OVERRIDES_MAX_LEN" ]; then
@@ -392,7 +483,9 @@ render_footer() {
   # 256 bytes is generous for any date display string; the O(1) gate keeps a
   # hostile argv from pegging the CPU in the escape.
   when="$(_byte_bound_utf8 "$when" 256)"
-  name="$(persona_name)"
+  # Propagate persona_name's fail-closed status (issue #290) — a corrupt config
+  # must not render a footer stamped with the "Hobbes" fallback.
+  name="$(persona_name)" || return 1
   if [ -f "$FOOTER_TEMPLATE" ]; then
     template="$(cat "$FOOTER_TEMPLATE")"
   else
@@ -413,27 +506,45 @@ render_footer() {
 }
 
 render_signoff() {
-  printf '— %s, your financial assistant\n' "$(persona_name)"
+  # Resolved into a local FIRST, not inline in the printf: a command
+  # substitution inside an argument list discards its status, so a corrupt
+  # config would print "— Hobbes, your financial assistant" and exit 0
+  # (issue #290).
+  local name
+  name="$(persona_name)" || return 1
+  printf '— %s, your financial assistant\n' "$name"
 }
 
 # Dispatch the CLI only when executed directly. When another script sources this
 # file to unit-test the helpers (e.g. _render_template / html_escape), the guard
 # is false so the CLI never runs — the same pattern as tests/unit/audit-log.test.sh
 # sourcing bin/audit-log.sh.
+#
+# Every renderer arm below is `|| exit 1`: a config that does not parse fails
+# closed all the way out to the process exit status (issue #290), so a caller
+# doing `PERSONA_NAME="$(bash bin/persona.sh name)" || exit 1` actually stops
+# instead of stamping the report with the "Hobbes" fallback. The arms are
+# explicit rather than relying on the case statement's status falling through to
+# the script's exit code, so the contract survives a future edit that appends a
+# command after the case.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   case "${1:-name}" in
-    name)      persona_name ;;
+    name)      persona_name || exit 1 ;;
     # The HTML-escaped name, for the report chrome's `SLOT:footer-persona` block
     # slot (see skills/review/ynab-review.md §8). Routes through the SAME shared,
     # audited `html_escape` (bin/html-escape.sh) the footer uses, so the review
     # skill injects it verbatim rather than hand-escaping the raw name a second
-    # time (#126 review follow-up).
-    html-name) printf '%s\n' "$(html_escape "$(persona_name)")" ;;
-    footer)    shift; render_footer "$@" ;;
-    signoff)   render_signoff ;;
+    # time (#126 review follow-up). The name is resolved into a variable first so
+    # persona_name's fail-closed status is not swallowed by the substitution.
+    html-name)
+      name="$(persona_name)" || exit 1
+      printf '%s\n' "$(html_escape "$name")"
+      ;;
+    footer)    shift; render_footer "$@" || exit 1 ;;
+    signoff)   render_signoff || exit 1 ;;
     # The voice_overrides model-context block (issue #28): DATA wrapped in a
     # fixed, delimited, framed element — or nothing at all when unconfigured.
-    voice)     render_voice ;;
+    voice)     render_voice || exit 1 ;;
     # Loud config-load-time validation of a persona.name candidate (issue #28
     # AC 6): /workbench-ynab:setup calls this BEFORE writing config.json and
     # fails setup on non-zero. `--` guards against a candidate name that itself

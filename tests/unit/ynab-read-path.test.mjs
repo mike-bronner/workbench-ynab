@@ -16,6 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -162,7 +163,7 @@ test('withRateLimitRetry is bounded: it gives up after exactly maxRetries (no un
 // A faithful paginated source matching the REAL vendored bundle's structured
 // list response: rows keyed by the resource name, a `limit` page size (default
 // 50), `has_more` true while rows remain, and `next_offset = offset + limit`.
-// This is the shape `@dizzlkheinz/ynab-mcpb@0.26.10` actually produces — NOT a
+// This is the shape `@dizzlkheinz/ynab-mcpb@0.27.1` actually produces — NOT a
 // synthetic cursor shape — so tests built on it prove the default adapter can
 // paginate the real bundle (see docs/ynab-read-path.md §1).
 function bundlePaginatedCall(resource, allRows, pageSize = 50) {
@@ -308,6 +309,172 @@ test('createReadCache stats().resources counts an in-flight pull before it settl
   assert.equal(cache.stats().resources, 1, 'settling does not add a second entry');
 });
 
+// --- scheduled transactions: the resource added by the 0.27.1 re-vendor (#157) --
+//
+// A faithful stand-in for the REAL `ynab_list_scheduled_transactions` handler in
+// @dizzlkheinz/ynab-mcpb@0.27.1, transcribed from the bundle:
+//
+//   const all  = fetched.filter(r => !r.deleted);
+//   const s    = params.offset ?? 0;
+//   const d    = params.limit  ?? 100;          // NB: 100, not the 50 the other list tools use
+//   const page = all.slice(s, s + d);
+//   { scheduled_transactions: page, total_count, returned_count, offset: s,
+//     has_more:    s + page.length < all.length,
+//     next_offset: s + page.length < all.length ? s + page.length : null,   // NULL, not absent
+//     cached, used_delta }
+//
+// Two things differ from the five original list tools and are pinned below: the
+// page size defaults to 100, and the last page carries `next_offset: null`
+// instead of omitting the field.
+function scheduledTransactionsCall(allRows, { pageSize } = {}) {
+  return async (_resource, params) => {
+    const offset = params.offset ?? 0;
+    const limit = params.limit ?? pageSize ?? 100;
+    const page = allRows.slice(offset, offset + limit);
+    const hasMore = offset + page.length < allRows.length;
+    return {
+      scheduled_transactions: page,
+      total_count: allRows.length,
+      returned_count: page.length,
+      offset,
+      has_more: hasMore,
+      next_offset: hasMore ? offset + page.length : null,
+      cached: false,
+      used_delta: false,
+    };
+  };
+}
+
+test('scheduled_transactions is a cacheable list resource', () => {
+  // #157 / AC #2: the resource is in the fetch-once set, so a forecast/bills
+  // section reads it from the same cache as every other resource instead of
+  // opening a second access path.
+  assert.ok(
+    CACHEABLE_RESOURCES.includes('scheduled_transactions'),
+    'scheduled_transactions must be cacheable — it has a list tool as of 0.27.1',
+  );
+});
+
+test('collectAllPages walks the REAL scheduled-transactions shape: 100/page, null-terminated', async () => {
+  // 250 rows at the tool's own 100-row default ⇒ exactly three pages
+  // (100 + 100 + 50). Two failure modes are discriminated at once:
+  //   * following DEFAULT_PAGE_SIZE (50) instead of the response's own
+  //     `next_offset` would step 0,50,100,150,200 — five pages with rows 50-99
+  //     and 100-149 duplicated, so both `pages` and `items` go wrong;
+  //   * stopping at page 1 would truncate to the first 100 rows.
+  const rows = Array.from({ length: 250 }, (_, i) => ({ id: `st${i}` }));
+  const { items, pages } = await collectAllPages(
+    scheduledTransactionsCall(rows),
+    'scheduled_transactions',
+  );
+  assert.equal(pages, 3, '250 rows at the tool default of 100/page ⇒ three calls, not five');
+  assert.equal(items.length, 250, 'every row fetched — never truncated to the first page');
+  assert.deepEqual(items, rows, 'pages concatenated in order, with no duplicated rows');
+});
+
+test('collectAllPages terminates on the scheduled-transactions null next_offset', async () => {
+  // The single-page case is where the `null` terminator is load-bearing: the five
+  // original list tools OMIT next_offset on the last page, this one sets it to
+  // null. A walk that keyed on "next_offset is present" rather than `has_more`
+  // would re-issue the call forever here.
+  const rows = [{ id: 'st0' }, { id: 'st1' }];
+  const call = scheduledTransactionsCall(rows);
+  let calls = 0;
+  const counted = (resource, params) => { calls += 1; return call(resource, params); };
+  const { items, pages } = await collectAllPages(counted, 'scheduled_transactions');
+  assert.deepEqual(items, rows);
+  assert.equal(pages, 1);
+  assert.equal(calls, 1, 'one page, one call — the null next_offset ends the walk');
+});
+
+test('createReadCache fetches scheduled_transactions once per run across repeated gets', async () => {
+  // AC #3: fetch-once through the SAME cache as every other resource — no
+  // per-section re-fetch, no second access path.
+  const rows = Array.from({ length: 150 }, (_, i) => ({ id: `st${i}` }));
+  let calls = 0;
+  const inner = scheduledTransactionsCall(rows);
+  const cache = createReadCache((resource, params) => { calls += 1; return inner(resource, params); });
+
+  const first = await cache.get('scheduled_transactions');
+  assert.deepEqual(first.items, rows, 'the full 150-row set lands in the cache');
+  assert.equal(first.pages, 2, '150 rows at 100/page ⇒ two pages');
+  assert.equal(first.partial, false);
+  assert.equal(calls, 2, 'one call per page on the first pull');
+
+  const second = await cache.get('scheduled_transactions');
+  assert.equal(second, first, 'the same frozen entry is returned, not a re-fetch');
+  assert.equal(calls, 2, 'a later get touches the MCP zero more times');
+  assert.equal(cache.stats().calls, 2);
+});
+
+test('createReadCache degrades scheduled_transactions to a labelled partial on 429 exhaustion', async () => {
+  // AC #4: the new source inherits the #35 429/backoff contract — no second,
+  // un-gated retry surface. Page 1 lands, page 2 never clears the limit: the
+  // collected rows survive, flagged partial and annotated.
+  const { sleep } = recordingSleep();
+  const rows = Array.from({ length: 150 }, (_, i) => ({ id: `st${i}` }));
+  const inner = scheduledTransactionsCall(rows);
+  let calls = 0;
+  const call = async (resource, params) => {
+    calls += 1;
+    if ((params.offset ?? 0) === 0) return inner(resource, params);
+    throw httpRateLimit();
+  };
+  const cache = createReadCache(call, { sleep, maxRetries: 2 });
+
+  const r = await cache.get('scheduled_transactions');
+  assert.equal(r.partial, true, 'flagged partial, not a silent complete pull');
+  assert.equal(r.items.length, 100, 'page-1 rows survive into the cache');
+  assert.deepEqual(r.items, rows.slice(0, 100));
+  assert.equal(cache.annotationFor('scheduled_transactions'), ANNOTATION);
+  assert.deepEqual(cache.partials(), ['scheduled_transactions']);
+  assert.equal(calls, 4, '1 success + (maxRetries + 1) exhausted attempts on page 2');
+});
+
+test('the scheduledTransactionsCall fixture matches the VENDORED bundle output schema', async () => {
+  // Anchors the fixture above to reality. Without this, every scheduled-
+  // transactions test is circular: it would only prove the driver walks a shape
+  // this file invented. Read the frozen bundle and assert the real registered
+  // output schema for `ynab_list_scheduled_transactions` — so a re-vendor that
+  // changes the rows key, the continuation fields, or the null terminator fails
+  // here instead of silently leaving the fixture (and the driver's default
+  // adapters) modelling a shape upstream no longer produces.
+  const bundle = await readFile(
+    join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'vendor', 'ynab-mcp', 'index.cjs'),
+    'utf8',
+  );
+  // `scheduled_transactions:c.array(` appears exactly once in the bundle — the
+  // list tool's output schema. Minified symbol names change on every re-vendor,
+  // so anchor on that field, then read the enclosing object literal's window.
+  const anchor = bundle.indexOf('scheduled_transactions:c.array(');
+  assert.notEqual(anchor, -1, 'the bundle must register a scheduled-transactions list output schema');
+  assert.equal(
+    bundle.indexOf('scheduled_transactions:c.array(', anchor + 1),
+    -1,
+    'anchor must stay unique, or the window below could read a different schema',
+  );
+  const schema = bundle.slice(anchor, anchor + 300);
+
+  assert.ok(schema.includes('has_more:c.boolean()'), 'has_more is the walk-terminating flag');
+  assert.ok(
+    schema.includes('next_offset:c.number().int().nullable()'),
+    'next_offset is NULLABLE here — the fixture terminates with null, not an absent field',
+  );
+  assert.ok(schema.includes('offset:c.number().int()'), 'offset-based continuation, not a cursor');
+  assert.ok(
+    !schema.includes('server_knowledge'),
+    'no server_knowledge echoed — the delta hook stays undefined, docs §3 unchanged',
+  );
+
+  // The 100-row page default the fixture and DEFAULT_PAGE_SIZE note both rely on
+  // comes from the tool's INPUT schema, which is the only other place `limit`
+  // could drift on a re-vendor.
+  assert.ok(
+    /limit:c\.number\(\)\.int\(\)\.positive\(\)\.max\(500\)\.default\(100\)/.test(bundle),
+    'the list tool still defaults limit to 100 (max 500)',
+  );
+});
+
 test('ANNOTATION is pinned to the verbatim acceptance-criteria literal', () => {
   // The degraded-partial tests assert annotationFor(...) === ANNOTATION, but
   // both sides come from the module under test — a typo edited into the
@@ -429,10 +596,10 @@ test('rate-limit defaults are self-contained and distinct from boot patience', (
   assert.ok(Object.isFrozen(RATE_LIMIT_DEFAULTS) && Object.isFrozen(PAGINATION_DEFAULTS));
   // Callers can override the read path's budget without touching any global.
   assert.equal(retryDelayMs(1, new Error('x'), { baseDelayMs: 500 }), 500);
-  // Scheduled transactions are deliberately absent: the bundle has no list tool
-  // for them and v1 defers them (docs §1).
+  // Scheduled transactions joined the set with the 0.27.1 re-vendor (#157),
+  // which registers a real list tool for them (docs §1).
   assert.deepEqual(CACHEABLE_RESOURCES, [
-    'transactions', 'categories', 'accounts', 'payees',
+    'transactions', 'categories', 'accounts', 'payees', 'scheduled_transactions',
   ]);
 });
 

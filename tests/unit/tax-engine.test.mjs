@@ -3,14 +3,15 @@
 //
 // Runs under the built-in node:test runner with NO node_modules present (only
 // node: built-ins and repo-local files), per docs/testing.md. This is the
-// composition-level contract test the issue asks for: it exercises ALL FOUR
-// exported functions end-to-end against an anonymized fixture profile (the
+// composition-level contract test the issue asks for: it exercises the four
+// profile-taking exports end-to-end against an anonymized fixture profile (the
 // bundled US defaults — no PII) plus fixture transactions, and confirms the
 // return shapes match the documented @typedefs. The underlying tax math is
 // already unit-tested in load-profile / classify-transaction / estimated-tax;
 // here we assert the FACADE's contract, not re-test the primitives.
 //
-// Covers the issue AC: exactly four named exports and no more (AC #1); each
+// Covers the issue AC: exactly six named exports and no more (AC #1 here, plus the
+// two the active-tax-year rule added in #17 — see tests/unit/tax-year.test.mjs); each
 // export delegates and returns the documented shape (AC #2–#6, #10); batch
 // preserves order and shape (AC #4); computeTaxSummary composes the five
 // Section-12 fragments with profile-supplied rates (AC #5); and the facade
@@ -48,12 +49,20 @@ function loadFixtureProfile() {
 const GITHUB_TXN = { payee_name: 'GitHub', amount: -9000, date: '2025-04-02' };
 const RENT_INCOME_TXN = { payee_name: 'Freelance Client', category_group_name: 'Business Income', amount: 500000, date: '2025-04-10' };
 
-// --- AC #1: exactly four named exports, no additional surface ----------------
+// --- AC #1: exactly six named exports, no additional surface -----------------
 
-test('AC#1 exports exactly the four named functions and nothing else', () => {
+test('AC#1 exports exactly the six named functions and nothing else', () => {
   assert.deepEqual(
     Object.keys(engine).sort(),
-    ['classifyBatch', 'classifyTransaction', 'computeTaxSummary', 'loadEffectiveProfile'],
+    [
+      'classifyBatch',
+      'classifyTransaction',
+      'computeTaxSummary',
+      'loadEffectiveProfile',
+      // The active-tax-year rule joined the facade in issue #17.
+      'resolveTaxYear',
+      'resolveYearBoundary',
+    ],
   );
   for (const fn of Object.values(engine)) assert.equal(typeof fn, 'function');
 });
@@ -133,7 +142,7 @@ test('AC#5 computeTaxSummary composes P&L, Schedule A, medical, SE tax, and next
   const profile = loadFixtureProfile();
   const ytdData = {
     asOfDate: '2025-05-01',
-    taxYear: 2025,
+    timezone: 'America/Phoenix',
     filingStatus: 'single',
     scheduleCLines: [
       { taxLineId: 'schedC.1', label: 'Gross receipts', category: 'income', amount: 42000 },
@@ -195,13 +204,28 @@ test('AC#5 computeTaxSummary composes P&L, Schedule A, medical, SE tax, and next
   assert.equal(summary.nextQuarterlyPayment.dueDate, '2025-06-15'); // Q2 due date
   assert.equal(summary.nextQuarterlyPayment.estimatedAmount, expectedQuarterly);
 
-  // Meta echoes the resolved year/status/anchor.
-  assert.deepEqual(summary.meta, { taxYear: 2025, filingStatus: 'single', asOfDate: '2025-05-01' });
+  // Meta carries the RESOLVED year (no taxYear was passed in — the engine derived
+  // 2025 from asOfDate + timezone via resolveTaxYear), plus the status/anchor.
+  assert.deepEqual(summary.meta, {
+    taxYear: 2025,
+    filingStatus: 'single',
+    asOfDate: '2025-05-01',
+    // The report-header label rides in meta since issue #17, so the template never
+    // has to re-derive a year from anything.
+    taxYearLabel: 'Tax Year 2025',
+  });
 });
 
 test('AC#5 computeTaxSummary tolerates empty ytdData without throwing', () => {
+  // "Empty" means empty of YTD *figures* — the required anchors (taxYear,
+  // filingStatus, asOfDate) are still supplied, because the engine refuses to
+  // guess any of them (#240). The zero-figure tolerances are what this pins.
   const profile = loadFixtureProfile();
-  const summary = computeTaxSummary(profile, { taxYear: 2025, filingStatus: 'single' });
+  const summary = computeTaxSummary(profile, {
+    timezone: 'America/Phoenix',
+    filingStatus: 'single',
+    asOfDate: '2025-05-01',
+  });
   assert.equal(summary.scheduleC.grossIncome, 0);
   assert.equal(summary.scheduleC.netProfit, 0);
   assert.equal(summary.medical.exceedsThreshold, false); // 0 medical, 0 threshold
@@ -210,34 +234,198 @@ test('AC#5 computeTaxSummary tolerates empty ytdData without throwing', () => {
 
 // --- Facade-authored branches: the parts computeTaxSummary owns (not delegated) --
 
-test('computeTaxSummary throws — never emits a NaN due date — when taxYear is unresolved', () => {
-  // The defaults-only first-run profile carries no taxYear/filingStatus. Following
-  // the module's OWN "HOW M2 CALLS THIS" example (no taxYear in ytdData) must FAIL
-  // LOUD rather than sort 'undefined'/'NaN' date strings into a 'NaN-01-15' due
-  // date that slips silently into the M2 report. This pins the headline #1 fix.
+test('computeTaxSummary throws — never emits a NaN due date — when filingStatus is unresolved', () => {
+  // The defaults-only first-run profile carries no filingStatus. Following the
+  // module's OWN "HOW M2 CALLS THIS" example without one must FAIL LOUD rather than
+  // sort 'undefined'/'NaN' date strings into a 'NaN-01-15' due date that slips
+  // silently into the M2 report. This pins the headline #1 fix.
   const profile = loadFixtureProfile();
   assert.throws(
     () =>
       computeTaxSummary(profile, {
         asOfDate: '2025-05-01',
+        timezone: 'America/Phoenix',
         scheduleCLines: [{ taxLineId: 'schedC.1', category: 'income', amount: 42000 }],
         itemizedDeductionsTotal: 21000,
         medicalExpenses: 9000,
         agi: 120000,
       }),
-    /resolvable taxYear/,
+    /resolvable filingStatus/,
   );
+});
+
+// --- (#17) the active tax year is DERIVED here, never supplied ---------------
+
+test('(#17) computeTaxSummary derives the tax year from asOfDate + timezone, not from profile.taxYear', () => {
+  // The heart of the fix, and it only discriminates against a profile that HAS a
+  // stored year — the bundled defaults carry none, so a defaults-only fixture would
+  // pass with the old `?? p.taxYear` code still in place. Write a user profile
+  // pinning taxYear 2025 (the stale-config shape this rule exists to survive) and
+  // assert the loader actually resolved it, so the test cannot quietly go vacuous.
+  const stalePath = join(TMP, 'stale-year-profile.json');
+  writeFileSync(stalePath, JSON.stringify({ schemaVersion: '1', filingStatus: 'single', taxYear: 2025 }));
+  const profile = loadEffectiveProfile({ dataDir: TMP, profilePath: stalePath });
+  assert.equal(profile.ok, true, `stale-year fixture must load: ${JSON.stringify(profile.error)}`);
+  assert.equal(profile.profile.taxYear, 2025, 'fixture must carry a DIFFERENT stored year for this to discriminate');
+
+  // A review anchored in 2027 must report 2027. Reading profile.taxYear — the
+  // pre-#17 behaviour — would answer 2025 here and label two-year-stale figures as
+  // current, with nothing in the output to show for it.
+  const summary = computeTaxSummary(profile, {
+    filingStatus: 'single',
+    asOfDate: '2027-05-01',
+    timezone: 'America/Phoenix',
+  });
+  assert.equal(summary.meta.taxYear, 2027);
+  assert.equal(summary.meta.taxYearLabel, 'Tax Year 2027');
+  // …and the derived year drives the downstream schedule, not just the label.
+  assert.equal(summary.nextQuarterlyPayment.dueDate, '2027-06-15');
+});
+
+test('(#17) computeTaxSummary refuses a SUPPLIED ytdData.taxYear instead of silently ignoring it', () => {
+  // A caller still on the pre-#17 path is told, not quietly corrected: ignoring the
+  // field would produce a summary for a different year than the caller asked for,
+  // and accepting it would restore the staleness bug outright.
+  const profile = loadFixtureProfile();
+  assert.throws(
+    () =>
+      computeTaxSummary(profile, {
+        taxYear: 2025,
+        filingStatus: 'single',
+        asOfDate: '2027-05-01',
+        timezone: 'America/Phoenix',
+      }),
+    /no longer accepts ytdData\.taxYear/,
+  );
+  // Including when it AGREES with the derived year — the refusal is about the input
+  // channel, not about the value, so it cannot be dodged by passing a correct year.
+  assert.throws(
+    () =>
+      computeTaxSummary(profile, {
+        taxYear: 2027,
+        filingStatus: 'single',
+        asOfDate: '2027-05-01',
+        timezone: 'America/Phoenix',
+      }),
+    /no longer accepts ytdData\.taxYear/,
+  );
+});
+
+test('(#17) computeTaxSummary fails closed without a timezone rather than resolving off the host zone', () => {
+  const profile = loadFixtureProfile();
+  for (const tz of [undefined, '', 'Factory', 'America/Nowhere']) {
+    assert.throws(
+      () => computeTaxSummary(profile, { filingStatus: 'single', asOfDate: '2025-05-01', timezone: tz }),
+      /resolveTaxYear (requires an IANA timezone|rejected timezone)/,
+      `expected a fail-closed throw for timezone=${JSON.stringify(tz)}`,
+    );
+  }
+});
+
+test('(#17) ytdData.taxYearOverride pins the year end to end — config.tax_year reaches the header', () => {
+  // AC #6's seam, exercised through the facade rather than only through
+  // resolveTaxYear directly: the override has to survive computeTaxSummary and land
+  // in meta.taxYear AND meta.taxYearLabel, or the user's config.tax_year would be
+  // honoured by the library and dropped by the report.
+  const profile = loadFixtureProfile();
+  const summary = computeTaxSummary(profile, {
+    filingStatus: 'single',
+    asOfDate: '2027-05-01',
+    timezone: 'America/Phoenix',
+    taxYearOverride: 2024,
+  });
+  assert.equal(summary.meta.taxYear, 2024);
+  assert.equal(summary.meta.taxYearLabel, 'Tax Year 2024');
+  assert.equal(summary.nextQuarterlyPayment, null, 'a 2027 anchor leaves no 2024 due date ahead of it');
+});
+
+test('(#240) computeTaxSummary throws — never reads the host clock — when asOfDate is omitted', () => {
+  // The anchor USED to default to todayISO() (`new Date()`, UTC), so a caller that
+  // forgot asOfDate silently got a summary anchored on the host clock — the
+  // near-midnight / wrong-tax-year bug the review date path exists to kill. Omitting
+  // it must now FAIL LOUD, naming the missing field.
+  const profile = loadFixtureProfile();
+  assert.throws(
+    () =>
+      computeTaxSummary(profile, {
+        timezone: 'America/Phoenix',
+        filingStatus: 'single',
+        scheduleCLines: [{ taxLineId: 'schedC.1', category: 'income', amount: 42000 }],
+      }),
+    /ytdData\.asOfDate/,
+  );
+});
+
+test('(#240) computeTaxSummary throws on a malformed or impossible asOfDate rather than mis-comparing it', () => {
+  // The due-date search is a LEXICOGRAPHIC compare (`d.date >= asOfDate`), so a
+  // bad anchor does not error on its own — it silently selects the wrong (or no)
+  // next quarterly payment. Two classes must fail closed, not one:
+  //   * wrong SHAPE ('5/1/2025', a Date, a number, or a full ISO timestamp whose
+  //     'YYYY-MM-DD' prefix is real) — not comparable with the profile's bare
+  //     'YYYY-MM-DD' due dates, which is why the exact shape is pinned separately
+  //     from the calendar check;
+  //   * IMPOSSIBLE-but-well-shaped ('2025-13-45', '2025-02-30', '0000-00-00',
+  //     '2025-02-29' in a non-leap year) — these compare happily, which is worse.
+  //     A shape-only guard let '2025-13-45' through, and because '1' > '0' in the
+  //     month position it sorts after every real 2025 due date: the search skipped
+  //     Q1–Q3 and returned Q4 (2026-01-15) with no error. Caught by epochDay()
+  //     (lib/tax/civilDate.mjs), which round-trips through Date.UTC.
+  const profile = loadFixtureProfile();
+  for (const asOfDate of [
+    '5/1/2025',
+    '2025-5-1',
+    '',
+    20250501,
+    new Date('2025-05-01'),
+    null,
+    '2025-05-01T00:00:00Z',
+    '2025-13-45',
+    '2025-02-30',
+    '0000-00-00',
+    '2025-02-29',
+    '2025-04-31',
+  ]) {
+    assert.throws(
+      () => computeTaxSummary(profile, { timezone: 'America/Phoenix', filingStatus: 'single', asOfDate }),
+      /ytdData\.asOfDate/,
+      `expected a fail-closed throw for asOfDate=${JSON.stringify(asOfDate)}`,
+    );
+  }
+});
+
+test('(#240) computeTaxSummary accepts an explicit asOfDate and anchors on it, not on today', () => {
+  // The positive half of the contract: a well-formed anchor still drives the
+  // due-date search, and the summary echoes exactly what the caller passed — no
+  // host-clock substitution anywhere on the path.
+  const profile = loadFixtureProfile();
+  const summary = computeTaxSummary(profile, {
+    timezone: 'America/Phoenix',
+    filingStatus: 'single',
+    asOfDate: '2025-01-01',
+    // Jan 1 sits inside the year-changeover window (#17) — tax year 2024's Q4 is not
+    // due until 2025-01-15 — so the prior year's close-out figures are required.
+    priorYearClose: { asOfDate: '2024-12-31' },
+  });
+  assert.equal(summary.meta.asOfDate, '2025-01-01');
+  assert.equal(summary.nextQuarterlyPayment.quarter, 1); // Q1 is still upcoming on Jan 1
 });
 
 test('computeTaxSummary yields nextQuarterlyPayment=null when no due date remains', () => {
   const profile = loadFixtureProfile();
-  // Q4 2025 falls due 2026-01-15; an anchor past it leaves nothing upcoming, so
-  // the null branch (index.mjs) is asserted explicitly, not hit incidentally.
+  // The null branch (index.mjs) asserted explicitly, not hit incidentally.
+  //
+  // Since #17 the year is DERIVED from the anchor, so an anchor inside its own year
+  // always has a due date ahead of it (tax year N runs Apr 15 N → Jan 15 N+1). The
+  // only way the schedule can be fully behind the anchor is a config.tax_year
+  // override pinning an EARLIER year than the review — a real user shape: closing
+  // out last year's books in the spring, after every one of its due dates has passed.
   const summary = computeTaxSummary(profile, {
-    taxYear: 2025,
+    timezone: 'America/Phoenix',
     filingStatus: 'single',
-    asOfDate: '2026-02-01',
+    asOfDate: '2026-06-01',
+    taxYearOverride: 2024,   // 2024's last due date was 2025-01-15 — all behind us
   });
+  assert.equal(summary.meta.taxYear, 2024, 'the override must be what moved the schedule');
   assert.equal(summary.nextQuarterlyPayment, null);
 });
 
@@ -248,8 +436,9 @@ test('scheduleA breaks the itemized==standard tie toward standard (> not >=)', (
   // would flip. Expected values are PINNED, not re-derived from the production
   // comparison, so a `>` vs `>=` regression is actually caught.
   const summary = computeTaxSummary(profile, {
-    taxYear: 2025,
+    timezone: 'America/Phoenix',
     filingStatus: 'single',
+    asOfDate: '2025-05-01',
     itemizedDeductionsTotal: std,
   });
   assert.equal(summary.scheduleA.recommendation, 'standard');
@@ -271,7 +460,7 @@ test('nextQuarterly uses the incremental liability when priorCumulative is suppl
     meta: { taxYear: 2025, filingStatus: 'single', asOfDate: '2025-04-15' },
   });
   const summary = computeTaxSummary(profile, {
-    taxYear: 2025,
+    timezone: 'America/Phoenix',
     filingStatus: 'single',
     asOfDate: '2025-05-01',
     scheduleCLines: [
@@ -308,7 +497,12 @@ test('a failed profile load is refused consistently across classify/batch/summar
   // TypeError. The docstring tells M2 to check `.ok`; reaching here is a caller bug.
   assert.throws(() => classifyTransaction(GITHUB_TXN, bad), /failed profile load/);
   assert.throws(() => classifyBatch([GITHUB_TXN], bad), /failed profile load/);
-  assert.throws(() => computeTaxSummary(bad, { taxYear: 2025, filingStatus: 'single' }), /failed profile load/);
+  assert.throws(
+    // asOfDate supplied so the refusal provably comes from the failed profile load,
+    // not from the #240 anchor guard further down.
+    () => computeTaxSummary(bad, { timezone: 'America/Phoenix', filingStatus: 'single', asOfDate: '2025-05-01' }),
+    /failed profile load/,
+  );
 });
 
 test('(#225) the facade re-throw carries no offending property name across the boundary', () => {
@@ -348,8 +542,9 @@ test('AC#11 exercising the whole facade writes zero bytes to stdout', () => {
     classifyTransaction(GITHUB_TXN, profile);
     classifyBatch([GITHUB_TXN, RENT_INCOME_TXN], profile);
     computeTaxSummary(profile, {
-      taxYear: 2025,
+      timezone: 'America/Phoenix',
       filingStatus: 'single',
+      asOfDate: '2025-05-01',
       scheduleCLines: [{ taxLineId: 'schedC.1', category: 'income', amount: 1000 }],
       agi: 50000,
       medicalExpenses: 5000,

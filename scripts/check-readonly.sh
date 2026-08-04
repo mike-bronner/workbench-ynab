@@ -12,12 +12,18 @@
 #
 # WHAT IT CHECKS (two invariants)
 #
-#   1. NO WRITE VERB IS CALLABLE from an M2 read-only surface. The ten YNAB
-#      write tools are:
+#   1. NO WRITE VERB IS CALLABLE from an M2 read-only surface. The thirteen YNAB
+#      write tools are (this list is pinned against the money gate's
+#      authoritative inventory — see the WRITE_VERBS definition below):
 #        ynab_update_transaction   ynab_update_transactions  ynab_update_category
 #        ynab_create_transaction   ynab_create_transactions
 #        ynab_create_receipt_split_transaction               ynab_delete_transaction
 #        ynab_reconcile_account    ynab_create_account       ynab_set_default_budget
+#        ynab_create_scheduled_transaction  ynab_update_scheduled_transaction
+#        ynab_delete_scheduled_transaction
+#      The last three arrived with the 0.27.1 re-vendor (#157) — the bundle bump
+#      taken for the scheduled-transactions READ also registered three
+#      scheduled-transaction MUTATIONS, which this gate must know about.
 #
 #      A write tool is only ever CALLABLE in its fully-namespaced form,
 #      `mcp__plugin_workbench-ynab_ynab__<verb>` — that is the only string Claude
@@ -62,7 +68,15 @@ NS_PREFIX='mcp__plugin_workbench-ynab_ynab__'
 # The ten M2-forbidden write verbs, as an ERE alternation. Longer names precede
 # their prefixes so the alternation reads naturally; grep -E matches on presence
 # either way (the gate only needs to DETECT a hit, not bound its extent).
-WRITE_VERBS='ynab_update_transactions|ynab_update_transaction|ynab_update_category|ynab_create_transactions|ynab_create_receipt_split_transaction|ynab_create_transaction|ynab_create_account|ynab_delete_transaction|ynab_reconcile_account|ynab_set_default_budget'
+#
+# PINNED — do not edit this list on its own. tests/check-readonly.test.sh
+# cross-checks it against the authoritative mutating-tool inventory in
+# assets/write-safety-guardrail.js (ALLOWED_TOOLS ∪ DENIED_TOOLS, namespace
+# prefix stripped) and fails on ANY divergence. Two independently-maintained
+# copies of one invariant is how a guard quietly stops guarding: a verb dropped
+# here would silently widen M2's write surface across every scanned file. Add a
+# write tool to the money gate and this list must grow with it, and vice versa.
+WRITE_VERBS='ynab_update_transactions|ynab_update_transaction|ynab_update_category|ynab_create_transactions|ynab_create_receipt_split_transaction|ynab_create_transaction|ynab_create_account|ynab_delete_transaction|ynab_reconcile_account|ynab_set_default_budget|ynab_create_scheduled_transaction|ynab_update_scheduled_transaction|ynab_delete_scheduled_transaction'
 
 # The callable-write pattern: the namespace prefix immediately followed by a
 # forbidden verb. This is what a real invocation looks like; bare deny-prose
@@ -84,6 +98,7 @@ enumerated=(
   "commands/ynab-monthly-review.md"
   "commands/ynab-quarterly-tax-review.md"
   "commands/ynab-annual-review.md"
+  "commands/ynab-portfolio.md"       # the cross-budget rollup (M6-7) — read-only too
 )
 
 surfaces=()
@@ -122,8 +137,27 @@ fi
 
 status=0
 
+# Both invariant scans below pin LC_ALL=C (issue #270). Under a UTF-8 locale grep
+# decodes input as UTF-8, and an invalid UTF-8 byte on a line hides that line from
+# the scan. One stray 0x80 ahead of a callable write verb therefore leaves
+# write_hits/bare_hits EMPTY, the `[ -n … ]` tests below both fall through, and
+# this gate prints "✓ no callable write verb" on a real read-only-boundary
+# violation. A guard that cannot decode its input must fail closed, not green.
+#
+# Unlike the repo's other scanning greps, BOTH platforms are affected here, by two
+# different mechanisms — measured, not assumed:
+#   * BSD grep 2.6.0-FreeBSD (macOS lane): no match at all, exit 1.
+#   * GNU grep 3.12 (ubuntu lanes): the improperly-encoded file is classified
+#     BINARY, so the hit never reaches stdout in usable form — `-nE` diverts a
+#     "binary file matches" note to stderr, which `2>/dev/null` discards, and
+#     `-nF` exits 0 with empty stdout. Either way the capture is empty.
+# bin/check-tool-name-sources.sh escapes the GNU half only because it passes
+# --binary-files=text; these scans carry no such flag, so the pin is load-bearing
+# on every runner. Same pin the repo already applies in bin/secret-scan.sh,
+# bin/html-escape.sh and bin/persona.sh.
+#
 # ── Invariant 1: no callable write verb ────────────────────────────────────────
-write_hits="$(grep -nE "$CALLABLE_WRITE_RE" "${surfaces[@]}" 2>/dev/null || true)"
+write_hits="$(LC_ALL=C grep -nE "$CALLABLE_WRITE_RE" "${surfaces[@]}" 2>/dev/null || true)"
 if [ -n "$write_hits" ]; then
   {
     echo "✖ read-only guardrail: a YNAB WRITE tool is callable from an M2 read-only surface:"
@@ -136,7 +170,7 @@ if [ -n "$write_hits" ]; then
 fi
 
 # ── Invariant 2: every YNAB tool reference is namespaced ────────────────────────
-bare_hits="$(grep -nF "$BARE_NS" "${surfaces[@]}" 2>/dev/null || true)"
+bare_hits="$(LC_ALL=C grep -nF "$BARE_NS" "${surfaces[@]}" 2>/dev/null || true)"
 if [ -n "$bare_hits" ]; then
   {
     echo "✖ read-only guardrail: a bare, non-resolving '${BARE_NS}' reference was found:"

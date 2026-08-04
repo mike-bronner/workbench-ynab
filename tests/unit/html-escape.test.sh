@@ -11,6 +11,10 @@
 # `scripts/test.sh tests/unit/html-escape.test.sh`, or directly with
 # `bash tests/unit/html-escape.test.sh`.
 #
+# bash-3.2-lane: bin/html-escape.sh declares itself bash 3.2 compatible and is
+# the escaper behind the dual-bash guarantee (issue #126 AC-3); escape_timed also
+# drives the watchdog's job-control timeout path (issue #251).
+#
 # The module is BOTH sourced (for html_escape / escape_ynab_string) and executed
 # as a CLI (the review skill's per-value filter), so both surfaces are exercised.
 set -euo pipefail
@@ -23,6 +27,9 @@ source "$REPO_ROOT/tests/lib/assert.sh"
 # timeout, so no command-substitution grandchild is stranded (issue #188).
 # shellcheck source=/dev/null
 source "$REPO_ROOT/tests/lib/watchdog.sh"
+# Shared fixture for the per-call-site no-orphan regression test below (#251).
+# shellcheck source=/dev/null
+source "$REPO_ROOT/tests/lib/orphan-probe.sh"
 
 MODULE="$REPO_ROOT/bin/html-escape.sh"
 # Source the module for direct function access. The CLI block inside it is guarded
@@ -218,6 +225,48 @@ escape_timed() {
   cat "$out_file"
   rm -f "$out_file"
   return "$rc"
+}
+
+# ---- #251: the no-orphan guarantee, pinned at THIS call site ----------------
+
+# escape_timed's TIMEOUT branch (rc == 124) is never reached by any other
+# committed test — every DoS guard in this file asserts bounded-time SUCCESS. So
+# the watchdog's promise that a timeout strands no descendant was verified here
+# only by a point-in-time manual check, which a later commit could invalidate in
+# silence. This drives the real wrapper down that branch and asserts the reap was
+# total.
+#
+# escape_ynab_string is SHADOWED for the duration of this test: the real escaper
+# is correctly bounded and can no longer be made to hang, and inducing a hang
+# would mean regressing production code. What is under test is this call site's
+# topology — `watchdog_run <secs> <bare shell function> <arg>` behind
+# escape_timed's own wrapper — not the escaper's algorithm; that topology is
+# what a future process-group escape would break. run_tests runs every test_* in
+# its own subshell, so the shadow cannot leak to another test. See
+# tests/lib/orphan-probe.sh for the full real-vs-stand-in rationale.
+#
+# Mutation-checked: reverting tests/lib/watchdog.sh's group kill to a bare
+# `kill -9 "$pid"` makes this test fail (the marker keeps growing).
+test_escape_timed_timeout_leaves_no_orphan() {
+  local marker rc=0
+  marker="$(mktemp)"
+  # Bake the path in NOW (%q-quoted): $marker is `local`, so it is already out of
+  # scope when the EXIT trap fires in the enclosing subshell — a deferred
+  # expansion would abort on `set -u` instead of cleaning up.
+  # shellcheck disable=SC2064  # expanding at trap-set time is the point, see above
+  trap "rm -f $(printf '%q' "$marker")" EXIT
+
+  # Reached indirectly, by name, via escape_timed → watchdog_run, so shellcheck
+  # cannot see the call. Both codes are listed on purpose: the shadow trips
+  # SC2329 on shellcheck >= 0.11 and SC2317 on the older release CI runs.
+  # shellcheck disable=SC2329,SC2317
+  escape_ynab_string() { orphan_probe_tick_forever "$1"; }
+
+  escape_timed 1 "$marker" >/dev/null 2>&1 || rc=$?
+  assert_eq "124" "$rc" \
+    "an overrunning escape_ynab_string must surface escape_timed's 124 timeout contract"
+  orphan_probe_no_survivors "$marker" \
+    || fail "escape_timed's timeout stranded a descendant — the process-group reap regressed"
 }
 
 # ---- The DoS guard: match-dense invisible-char payload under a watchdog -------

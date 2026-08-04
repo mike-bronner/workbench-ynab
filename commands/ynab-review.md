@@ -46,12 +46,27 @@ source "${CLAUDE_PLUGIN_ROOT}/bin/config.sh"
 _require_config || exit 1
 budget_entry="$(_cfg_default_budget)"        # → budget_name (or budget_id) + label
 report_dir="$(_cfg '.report.output_dir')"    # default: ~/Documents/Claude/Reports
-timezone="$(_cfg '.timezone')"               # fall back to the system timezone when unset
+timezone="$(_cfg_timezone)" || exit 1        # required IANA tz — fail closed, never the host clock
+today="$(_today_in_tz "$timezone")"          # authoritative today (YYYY-MM-DD) in the configured tz
+tax_year="$(_cfg_tax_year)" || exit 1        # OPTIONAL override; empty means derive from the review date
 ```
 
-Compute `today` as an ISO date (`YYYY-MM-DD`) in that timezone (`timezone`
-falls back to the system timezone until the timezone-ownership config field
-lands — note the fallback, don't fail on it).
+`today` is the authoritative review date, computed **in the configured
+timezone** by `_today_in_tz` — the single source both this router and the ad-hoc
+tier commands use, so a scheduled run and an interactive run on the same day
+agree on the window and the tax-year label. `_cfg_timezone` **fails closed**: a
+missing or invalid `.timezone` stops the run with a descriptive error rather
+than silently defaulting to the system timezone, which would misplace
+near-midnight transactions and the wrong tax year. Never compute `today` from
+the host clock.
+
+`tax_year` is the **optional** `config.tax_year` override (issue #17). It is
+empty in the normal case, which means the engine derives the year from the
+review date. `_cfg_tax_year` **fails closed** on a malformed value, so resolve
+it as a hard stop too — a bad year must stop the run, not be silently ignored
+in favour of a different year than the user asked for. This dispatcher is the
+only place the override is read: the orchestrator never reads `config.json`, so
+a value resolved here and not forwarded in Step 1c never reaches a run.
 
 ### 1b. Pre-warm the YNAB MCP (best-effort)
 
@@ -86,10 +101,14 @@ budget_name: <from the default budgets entry>
 today: <YYYY-MM-DD>
 timezone: <tz>
 report_dir: <resolved .report.output_dir>
+tax_year: <resolved $tax_year — omit this line entirely when it is empty>
 ```
 
 Omit `review_scope` — this is the scheduled path; the orchestrator computes
-tier eligibility itself. Wait for the agent to return, then parse
+tier eligibility itself. `tax_year` carries the Step 1a override into
+`plan.tax_year.override`, which the review skill hands to `resolveTaxYear`;
+omitting the line when the user set no override is what makes that field `null`
+and the year derive from the review date. Wait for the agent to return, then parse
 the **last YAML block** in its response — that's the plan. Everything before it is the
 agent's reasoning, for observability only. From the plan you consume:
 
@@ -126,6 +145,12 @@ if (!profile.ok) { process.stderr.write('[tax-reminder] tax profile unavailable 
 
 // This tax year's four quarters PLUS last year's (whose Q4 falls on Jan 15 of
 // this year), so a January run still sees the prior year's Q4 deadline.
+// The argument is the CALENDAR year of `today`, deliberately NOT the resolved
+// tax year: a reminder asks "which due dates land on the calendar soon", so
+// config.tax_year must not be applied here. Pinning tax_year: 2031 would look
+// for 2031/2030 deadlines while the calendar sits in 2026 and silence every
+// reminder. The override belongs to the tax-year rule (Step 1a → 1c), not to
+// this date window.
 const dueDates = resolveCandidateDueDates(profile.getQuarterlyDueDates, Number(today.slice(0, 4)));
 
 let tracker = null;

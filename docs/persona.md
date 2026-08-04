@@ -77,9 +77,10 @@ value wins:
    neither config.
 
 The `agent_name` read is consumed by the loader the same defensive way as the
-`persona.name` read (file guard, `jq` guard, swallowed parse errors,
-`// empty`), so a missing `workbench-core` config simply falls through to
-`Hobbes` with no error.
+`persona.name` read (file guard, `jq` guard, `// empty`), so a missing
+`workbench-core` config simply falls through to `Hobbes` with no error. A
+`workbench-core` config that is **present but unparseable** stops the resolution
+instead — see [Malformed-config behaviour](#malformed-config-behaviour-fail-closed).
 
 **"Non-empty" means non-blank.** Each tier's value is whitespace-trimmed before
 the emptiness check, so a configured-but-blank name (e.g. `"name": "   "`) is
@@ -113,11 +114,67 @@ PERSONA_NAME="$(_cfg "$YNAB_CONFIG" '.persona.name')"          # 1. explicit ove
 PERSONA_NAME="${PERSONA_NAME:-Hobbes}"                         # 3. standalone default
 ```
 
-The fallback is total at every tier — **when a config file is absent, `jq` is
-missing, the JSON is malformed, or the field is absent/null, that tier collapses
-to empty and the next one takes over, ending at `"Hobbes"` with no error.** (The
-bare `jq -r '.persona.name // "Hobbes"'` only covers the missing-field case; it
-errors on a missing file, so the file guard above is part of the contract.)
+The fallback is total at every tier for the **three legitimate empties** —
+**when a config file is absent, `jq` is missing, or the field is absent/null,
+that tier collapses to empty and the next one takes over, ending at `"Hobbes"`
+with no error.** (The bare `jq -r '.persona.name // "Hobbes"'` only covers the
+missing-field case; it errors on a missing file, so the file guard above is part
+of the contract.)
+
+A file that is **present but does not parse** is the one exception, and it does
+**not** collapse — see the next section.
+
+## Malformed-config behaviour: fail closed
+
+A config file that is **present but does not parse** — a hand-edit typo, a
+trailing comma, a truncated write, a zero-byte file — is **not** swallowed into
+the next precedence tier (issue #290, extending the #283 contract
+[`bin/config.sh`](../bin/config.sh) already implements). `bin/persona.sh` stops:
+
+| Surface | On a config file that does not parse |
+|---|---|
+| `_cfg`, `_gated_cfg` | Print the message below to **stderr**, emit **nothing** on stdout, return **non-zero**. |
+| `persona_name`, `render_voice` | Propagate that status — a corrupt tier-1 config never falls through to the `workbench-core` `agent_name` or to `"Hobbes"`. |
+| `render_footer`, `render_signoff` | Propagate it — no footer or sign-off is rendered at all, rather than one stamped with a name the user did not configure. |
+| CLI `name`, `html-name`, `footer`, `signoff`, `voice` | **Exit 1**, printing nothing on stdout. |
+
+```text
+persona.sh: config at <path> is not valid JSON and could not be parsed.
+persona.sh: repair the file, or re-run the owning plugin's setup to recreate it — refusing to guess a persona name.
+```
+
+**Why it matters.** The old behaviour swallowed `jq`'s parse failure, so a
+corrupt config produced the same empty output an absent key does and the next
+tier took over with **zero signal**: a user who had set `persona.name` would see
+their `workbench-core` agent name — or `"Hobbes"` — on the report footer and the
+dispatch sign-off, with the config they wrote sitting right there unreadable.
+`voice` was worse: its legitimate "unset" behaviour is *also* empty output and
+exit 0, so a corrupt config was indistinguishable from an unconfigured host and
+the user's whole `voice_overrides` block silently vanished from the model
+context.
+
+**The failure is scoped to the tier that hits it.** A valid `persona.name` in
+this plugin's config short-circuits tier 2, so a stale or broken `workbench-core`
+config is never read and never fatal.
+
+**The three legitimate empties are unchanged**, which is what makes a non-zero
+return meaningful: absent file, absent `jq`, and absent/null field each still
+produce empty output, a **zero** return, and **nothing** on stderr. So a non-zero
+status means one thing only — the file is there and does not parse.
+
+Callers resolve it as a hard stop:
+
+```bash
+PERSONA_NAME="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/persona.sh" name)" || exit 1
+```
+
+> **A second implementation, deliberately.** `bin/persona.sh` carries its own
+> copy of this guard rather than calling `bin/config.sh`. That loader's helpers
+> are hardwired to the single global `$YNAB_CONFIG_FILE`, while `persona.sh`
+> reads **two** different files, so the file has to be a parameter here; and its
+> `_cfg` takes one argument to this one's two, so sourcing it would clobber this
+> file's own reader. The wording of the message is kept identical so a user who
+> hits the fault through either loader reads the same diagnosis.
 
 > Test overrides: `bin/persona.sh` honors `YNAB_CONFIG_FILE` and
 > `WORKBENCH_CORE_CONFIG_FILE` to point at alternate config paths, and
@@ -290,8 +347,11 @@ bash tests/persona-loader.test.sh
 
 It asserts the full precedence and both renderers: (a) a custom `persona.name`
 is picked up, (b) `workbench-core` `agent_name` is used when `persona.name` is
-unset, (c) `persona.name` wins over `agent_name`, (d) absent/missing/null/
-malformed configs fall back to `"Hobbes"`, and (e) the footer and sign-off
+unset, (c) `persona.name` wins over `agent_name`, (d) absent/missing/null
+configs fall back to `"Hobbes"` while an **unparseable** config **fails closed**
+instead — every subcommand exits non-zero, prints nothing, and names the file
+(issue #290; a valid `persona.name` still short-circuits a broken
+`workbench-core` config), and (e) the footer and sign-off
 substitute the resolved name with no leftover token and no hardcoded `"Hobbes"`.
 It also covers the issue #28 sanitization contract: name validation (length /
 control characters / invisible format characters, loud `validate-name`

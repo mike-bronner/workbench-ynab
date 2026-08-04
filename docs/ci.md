@@ -39,9 +39,9 @@ Workflow hygiene, common to all jobs:
 |---|---|---|---|
 | `lint` | ubuntu | `shellcheck` at **default severity** over every repo-authored `.sh` (`bin/`, `hooks/`, `scripts/`, `tests/` — helpers included), then `jq empty` over every git-tracked `.json` (an empty file list fails closed — the gate never reports success having validated nothing) | A script has a shellcheck finding (any severity fails), a JSON file doesn't parse, or `git ls-files` found no JSON at all |
 | `test` | ubuntu (Node floor + `lts/*` matrix) | First the swap-ready tool-name guard (`bin/check-tool-name-sources.sh`, issues #87/#131), then the M2 read-only guard (`scripts/check-readonly.sh`, issue #39 — no callable YNAB write tool and no bare `mcp__ynab__` namespace on any review surface) as explicit fail-fast steps, then the full bash + Node suite via `scripts/test.sh`, including the offline-boot proof (#14) against `node vendor/ynab-mcp/index.cjs` | A concrete YNAB tool name appeared outside the documented allowlist, a read-only review surface can call a write tool (or uses a bare namespace), or a test failed — the runner prints which file; the offline-boot proof failing usually means a bad re-vendor |
-| `bash-3-2` | macOS | The persona footer-escaping suites (`tests/persona-loader.test.sh`, `tests/unit/html-escape.test.sh`) and the shared watchdog (`tests/unit/watchdog.test.sh`) under the runner's **bash 3.2** | The escaping regressed on macOS's default bash while staying green on bash ≥5 (issue #126 AC-3); the watchdog's process-group kill is job-control behaviour, which differs across bash majors (issue #188) — or the runner image no longer ships bash 3.2 on PATH (the lane fails loudly rather than test the wrong interpreter) |
+| `bash-3-2` | macOS | Every suite carrying the `# bash-3.2-lane:` marker, under the runner's **bash 3.2**: the persona footer-escaping suites (`tests/persona-loader.test.sh`, `tests/unit/html-escape.test.sh`), the shared watchdog (`tests/unit/watchdog.test.sh`), the report writer (`tests/unit/report-writer.test.sh`), the report pruner and path expander (`tests/unit/ynab-prune.test.sh`), the secret-scan guard (`tests/secret-scan.test.sh`), and the `LC_ALL=C` scanning-grep pin (`tests/unit/grep-locale-pin.test.sh`) | The escaping regressed on macOS's default bash while staying green on bash ≥5 (issue #126 AC-3); the watchdog's process-group kill is job-control behaviour, which differs across bash majors (issue #188), and since issue #251 the escaping/report files drive their own call site down that timeout path; a 3.2-only construct or a BSD `find`/`stat`/`grep` branch broke (issues #65, #231) — or a content-scanning grep lost its `LC_ALL=C` pin: an invalid UTF-8 byte defeats every such scan on BSD grep, while GNU grep on the ubuntu lanes only misses the subset it classifies as binary, so four of the six pinned sites are detectable here and nowhere else (issue #270) — or the runner image no longer ships bash 3.2 on PATH (the lane fails loudly rather than test the wrong interpreter) |
 | `assets-tests` | ubuntu | `npm --prefix assets ci && npm --prefix assets test` — the `assets/test/*.test.js` integration suites (apply executor, write-safety guardrail, handlers) against real installed deps | An assets integration test failed, or `package-lock.json` no longer reproduces an install |
-| `docs-links` | ubuntu | `lychee --offline --include-fragments` over `assets/**/*.md`, `docs/**/*.md`, and the root `README.md` — recursive, so nested docs (`assets/tax/README.md`, `assets/persona/*.md`, `docs/decisions/*.md`, …) are covered alongside the top-level files, and the README's links to the docs/ set are checked too | A relative link or `#fragment` cross-reference anywhere in the docs tree or the README points at nothing |
+| `docs-links` | ubuntu | `lychee --offline --include-fragments` over `assets/**/*.md`, `docs/**/*.md`, `skills/**/*.md`, `commands/**/*.md`, and the root `README.md` — recursive, so nested docs (`assets/tax/README.md`, `assets/persona/*.md`, `docs/decisions/*.md`, `skills/review/*.md`, …) are covered alongside the top-level files, and the README's links to the docs/ set are checked too | A relative link or `#fragment` cross-reference anywhere in the docs tree, the agent-facing `skills/`/`commands/` set, or the README points at nothing |
 
 ### Design decisions
 
@@ -54,6 +54,40 @@ uses **stubbing only**: every launcher/boot test provides `YNAB_ACCESS_TOKEN`
 `ubuntu-latest` with no Keychain anywhere. The one macOS job (`bash-3-2`)
 exists for the bash *version*, not for the Keychain — it never touches
 `security(1)` either.
+
+**`bash-3-2` membership is a marker convention, enforced by a test.** The lane
+runs an **explicit, closed file list**, not `scripts/test.sh` auto-discovery:
+the full suite is not known to be 3.2-safe end to end, so blanket discovery
+would drag unrelated false failures onto the macOS runner. But a hand-kept
+enumeration omits every *new* 3.2/BSD-relevant test file by default, which is
+how `bin/ynab-prune.sh`, `bin/path-expand.sh`, and the secret-scan guard stayed
+Linux-only after they landed (issue #231). So membership is declared at the file
+that needs it:
+
+1. The test file carries a `# bash-3.2-lane: <reason>` marker line in its header
+   comment, stating *why* it needs a real bash 3.2 / BSD runner.
+2. The same file is listed in the `bash-3-2` job's `run:` step in
+   `.github/workflows/ci.yml`, and in the table row and local-repro command
+   above.
+3. [`tests/unit/bash-3-2-lane.test.sh`](../tests/unit/bash-3-2-lane.test.sh)
+   fails the build whenever those disagree in either direction — a marked file
+   missing from the lane, or a lane file with no marker.
+
+So writing the marker is what puts a file in the lane: forget step 2 and CI
+tells you, in the PR that adds the file, instead of the file silently never
+running on macOS. Removing a file from the lane means deleting both its marker
+and its list entries — a deliberate act, visible in the diff.
+
+**`secret-scan.yml` stays `ubuntu-latest`; the BSD half runs in `bash-3-2`.**
+`bin/secret-scan.sh`'s rules are grep patterns whose comments claim they hold
+"on GNU and BSD grep alike", so that claim needs BSD execution in CI (issue
+#231). Adding a macOS leg to `secret-scan.yml` would spend a 10x-billed runner
+re-scanning the same tree for the same rules, so instead
+`tests/secret-scan.test.sh` carries the lane marker and drives every rule
+through synthetic fixtures under BSD grep on the macOS runner the repo already
+pays for. What stays ubuntu-only is that workflow's scan of the **real tree** —
+a data check over repo content, not a portability check over grep, and its
+result does not vary by platform.
 
 **Lint scope excludes `vendor/`.** The gate lints code this repo authors.
 `vendor/ynab-mcp/` holds the vendored third-party bundle; its integrity is
@@ -71,9 +105,12 @@ severity flag or ignoring a rule globally.
 (`--offline`), so the job is hermetic and can't flake on someone else's
 server. What it does enforce is exactly what human review kept catching by
 hand: relative links and internal `#fragment` references across the docs set
-must resolve. The globs are recursive (`assets/**/*.md`, `docs/**/*.md` —
-issue #191): `**` matches zero or more path components, so top-level files
-stay covered while nested markdown gates too.
+must resolve. The globs are recursive (`assets/**/*.md`, `docs/**/*.md`,
+`skills/**/*.md`, `commands/**/*.md` — issues #191 and #260): `**` matches zero
+or more path components, so top-level files stay covered while nested markdown
+gates too. `skills/` and `commands/` are in scope because those files are
+agent-facing: an agent following a skill is *instructed* to open the paths it
+names, so a dangling link there is a live defect, not a reading annoyance.
 
 **Third-party actions are pinned to a full commit SHA.** First-party
 `actions/*` actions ride exact major tags, but a major tag is mutable — the
@@ -97,14 +134,17 @@ bash bin/check-tool-name-sources.sh
 bash scripts/check-readonly.sh
 bash scripts/test.sh
 
-# bash-3-2 — on any Mac, /bin/bash IS bash 3.2
-/bin/bash scripts/test.sh tests/persona-loader.test.sh tests/unit/html-escape.test.sh tests/unit/watchdog.test.sh
+# bash-3-2 — on any Mac, /bin/bash IS bash 3.2. scripts/test.sh launches each
+# test file via PATH `bash`, so putting /bin first is what actually pins 3.2 —
+# invoking the runner as `/bin/bash scripts/test.sh` does not (the test files
+# would still run under whatever `bash` your PATH resolves, e.g. Homebrew's 5.x).
+PATH="/bin:$PATH" bash scripts/test.sh tests/persona-loader.test.sh tests/secret-scan.test.sh tests/unit/grep-locale-pin.test.sh tests/unit/html-escape.test.sh tests/unit/report-writer.test.sh tests/unit/watchdog.test.sh tests/unit/ynab-prune.test.sh
 
 # assets-tests
 npm --prefix assets ci && npm --prefix assets test
 
 # docs-links (brew install lychee)
-lychee --offline --include-fragments --no-progress 'assets/**/*.md' 'docs/**/*.md' 'README.md'
+lychee --offline --include-fragments --no-progress 'assets/**/*.md' 'docs/**/*.md' 'README.md' 'skills/**/*.md' 'commands/**/*.md'
 ```
 
 ## Cutting a release
@@ -115,7 +155,10 @@ From the Actions tab, run **Release** with two inputs:
   versions, already-tagged versions, and versions not strictly greater than
   the current `plugin.json` version are all rejected before anything is
   written; versions go forward only.
-- `description` — the one-line commit + release headline.
+- `description` — the one-line commit + release headline. It titles the commit,
+  the annotated tag, and the GitHub Release. It is **also** the release notes'
+  fallback body, used only when the changelog has no entry for this version —
+  see below.
 
 The workflow then, in order:
 
@@ -127,30 +170,99 @@ The workflow then, in order:
    (issue #75; see the README's Versioning section). The vendored bundle's
    version marker is provenance-only and is never touched;
 3. runs the full test suite (`scripts/test.sh`, which includes the
-   offline-boot proof) and the `assets/` integration suite;
+   offline-boot proof). The `assets/` integration suite has already gated the
+   release from its own `assets-tests` job — see below;
 4. commits as `github-actions[bot]`, creates the annotated tag `v<version>`,
    pushes `main` **and** the tag in a single `git push --atomic` — both refs
    land or neither does, because the monotonicity guard makes a same-version
    re-run impossible and a half-pushed release would have no way back — and
-   creates the GitHub release;
+   creates the GitHub release, whose **"What changed" section is the
+   [`CHANGELOG.md`](../CHANGELOG.md) entry for this version** (see below);
 5. triggers `update-marketplace-sha.yml` explicitly via `gh workflow run` —
    releases created with `GITHUB_TOKEN` emit sterile events that do **not**
    auto-trigger `on: release` workflows (GitHub's anti-recursion rule).
 
-The job checks out with **`persist-credentials: false`**. The release runs
-`npm --prefix assets ci` — third-party packages and their install scripts —
-in the same job that holds `contents: write` and `actions: write`, so leaving
-checkout's credential in `.git/config` would put a `main`-push and
-workflow-dispatch capability within reach of any compromised transitive
-dependency of `assets/`. Nothing is persisted; step 4's push supplies the
-token in its URL instead, after every test has already run.
+### Where the release notes come from
+
+The release notes' **What changed** section is the `CHANGELOG.md` entry for the
+version being released. [`scripts/changelog-extract.sh`](../scripts/changelog-extract.sh)
+does the extraction: it takes the version and the changelog path as plain CLI
+arguments and prints the entry on stdout, with no dependency on Actions env
+vars or secrets — so `bash scripts/changelog-extract.sh 0.1.1 CHANGELOG.md`
+reproduces exactly what a release would publish, and
+[`tests/unit/changelog-extract.test.sh`](../tests/unit/changelog-extract.test.sh)
+tests it outside any workflow.
+
+It selects the section whose `## [X.Y.Z]` heading matches the version exactly
+(one leading `v` is stripped first, so `0.1.1` and `v0.1.1` agree, and `0.1.1`
+never matches `## [0.1.10]`), and returns everything down to the next `## [`
+heading or end-of-file, whitespace-trimmed.
+
+The release step branches on the script's exit code, and there are **exactly
+three outcomes**:
+
+| Exit | Meaning | What the release does |
+|---|---|---|
+| `0` | Entry found — including an entry that exists but is deliberately empty. | Publishes the extracted text (empty publishes empty notes). |
+| `3` | No `CHANGELOG.md`, or no heading for this version. | Falls back to the `description` input — the behaviour every release had before the workflow read the changelog. |
+| other | Extraction failed: bad arguments, a non-SemVer version, or a changelog path that is not a readable regular file. | **Fails the release** with an `::error::`. |
+
+The last row is the point of the split. A release is forward-only and
+human-dispatched, so quietly substituting the one-line `description` for notes
+the workflow *could not read* would ship wrong notes and leave nothing to
+notice it by. Only a genuinely missing entry is allowed to fall back.
+
+**Keep `CHANGELOG.md` ahead of the release:** move the `[Unreleased]` items
+into a `## [X.Y.Z] - YYYY-MM-DD` section and merge that to `main` *before*
+dispatching the release at that version. The workflow reads the changelog from
+the commit it is releasing; it never writes one.
+
+### Why the release is two jobs
+
+The `assets/` integration suite runs `npm --prefix assets ci` — third-party
+packages and their install scripts — followed by their module top-level code.
+It therefore lives in its **own `assets-tests` job**, scoped to
+`permissions: contents: read`, which overrides the workflow-level
+`contents: write` + `actions: write`. The `release` job gates on it via
+`needs: assets-tests`, so the suite still blocks the tag; as a job dependency
+that ordering is stronger than the step ordering it replaced, and "no
+`node_modules` on the resolution path while the offline-boot proof runs"
+becomes a separate-VM guarantee rather than a step-ordering one.
+
+Two jobs mean two checkouts of a moving `main`, so `assets-tests` publishes the
+commit it actually tested and `release` re-checks it against its own `HEAD`
+before bumping anything. If `main` advanced in between — or the output is
+missing — the release aborts with an `::error::` rather than tagging a tree the
+assets suite never saw.
+
+Sharing a runner is the exposure, not merely a credential on disk. Actions
+does not reap detached children at step boundaries, so a compromised
+transitive dependency can background a process that outlives its own step and
+read a push token out of another step's `/proc/<pid>/cmdline` **or**
+`/proc/<pid>/environ` — same VM, same UID. Neither `--ignore-scripts`,
+scrubbing the credential, nor moving it from the command line into `env:`
+closes that; only never minting a write-scoped token on that runner does.
+
+The `release` job additionally checks out with **`persist-credentials: false`**,
+so checkout's `contents: write` + `actions: write` token is never written into
+`.git/config`; step 4's push supplies the token in its URL instead, at push
+time. With the untrusted install now on a different runner this is defence in
+depth rather than the sole barrier.
 
 ## The marketplace SHA pin (cross-repo write)
 
 `update-marketplace-sha.yml` clones
 [`mike-bronner/claude-workbench`](https://github.com/mike-bronner/claude-workbench),
 sets `source.sha` for this plugin's entry in `.claude-plugin/marketplace.json`,
-and pushes the commit. It reads the plugin name from
+and pushes the commit. The clone is **unauthenticated**: an embedded
+credential in the clone URL is written into `marketplace/.git/config` as the
+`origin` remote, which would leave `DEVELOPER_SETTINGS_TOKEN` — a long-lived,
+non-expiring PAT with `Contents: write` on the *shared* marketplace repo —
+readable on disk for the rest of the step. It is supplied only in the push
+URL, at push time, mirroring the posture `release.yml` uses for its own push.
+(The marketplace is public, so the anonymous clone and the retry loop's
+`git pull --rebase` both work; were it ever made private, the clone fails
+loudly rather than degrading to a silent skip.) It reads the plugin name from
 `.claude-plugin/plugin.json` (never hardcoded) and resolves the release tag to
 a commit SHA, dereferencing annotated tags.
 

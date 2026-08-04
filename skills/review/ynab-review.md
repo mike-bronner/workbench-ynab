@@ -41,6 +41,22 @@ already did that and handed you a single YAML `plan:` block. Treat it as
 authoritative and **do not recompute it** (same contract as bujo: the
 orchestrator owns the schedule, the protocol owns the analysis).
 
+Every date you use — the lookback window, month/quarter boundaries, the review
+date the tax year is derived from — comes **exclusively** from this plan, whose
+windows the dispatcher computed from the configured `timezone`
+(`config.timezone`, issue #31). **Never call the host clock** (`new Date()`,
+`date`, `now`, the shell's `TZ`) to derive or widen a date: a review run in the
+wrong zone misplaces near-midnight transactions and the wrong tax year. When a
+downstream tax read needs an "as of" date, pass the review window's end date
+(`plan.data_pull.transactions.until_date`) — never a host-clock default.
+
+The **tax-year label is the one thing the plan does not carry.** The plan gives
+you the *inputs* (`plan.tax_year`, below); the tax engine derives the year and
+its header label from them via `resolveTaxYear`, and you pass that label through
+verbatim. There is exactly one producer of that string in the tree — see
+[§12](#12-call--the-tax-summary-and-the-active-tax-year) and
+[docs/tax-year-resolution.md](../../docs/tax-year-resolution.md).
+
 From the plan you consume:
 
 | Plan field | Use |
@@ -48,9 +64,14 @@ From the plan you consume:
 | `plan.review_scope` / `plan.report.tiers` | The tier(s) to run — selects the row of the [tier matrix](#7-tier-matrix). |
 | `plan.budget.{name,id}` | The budget to read. |
 | `plan.data_pull.accounts` | Account ids to fetch (ids, not bodies). |
+| `plan.data_pull.transactions.until_date` | The authoritative "as of" date (window end, in the configured tz) for any downstream tax read — never the host clock. |
 | `plan.data_pull.months` | Month keys in scope. |
 | `plan.data_pull.transactions.{since_date,until_date}` | The lookback window — already sized by the orchestrator. |
 | `plan.report.period` | Human period label for the report header. |
+| `plan.tax_year.review_date` | The review date the active tax year is derived from (same value as `until_date`). Pass as `ytdData.asOfDate`. |
+| `plan.tax_year.timezone` | The configured IANA zone. Pass as `ytdData.timezone`. `null` means the orchestrator had none — render the tax sections unavailable (see §12); never substitute the host zone. |
+| `plan.tax_year.override` | The user's `config.tax_year`, or `null`. Pass through as `ytdData.taxYearOverride` — don't interpret it. |
+| `plan.tax_year.changeover` | `null` on an ordinary review. When present (`{prior_year_window, through}`), the prior tax year is still open and §12 must report both years. |
 | `plan.warnings` | Pre-existing warnings (e.g. `budget_not_found`); surface them, don't silently drop them. |
 
 If the plan is missing or minimal (e.g. the orchestrator recorded a
@@ -119,7 +140,15 @@ out of scope for the read-only phase and absent from any review path.
 ### Fetch discipline
 
 - **Honor the plan's window.** Fetch only `plan.data_pull` accounts/months and
-  the `since_date`/`until_date` window. Don't widen the pull.
+  the `since_date`/`until_date` window. Don't widen the pull. **The January
+  changeover needs no widening**: when `plan.tax_year.changeover` is present, the
+  orchestrator has already unioned `changeover.prior_year_window` into
+  `plan.data_pull`, so the prior tax year's transactions are inside the plan's own
+  window — fetching them *is* honoring the plan. If `changeover` is present but
+  `data_pull` does not reach back to `prior_year_window.since_date`, that is a
+  planning bug: do **not** widen the pull yourself. Add a
+  `changeover_window_missing` note to the dispatch summary and render §12 with the
+  prior-year close-out marked unavailable.
 - **Paginate and handle deltas.** `list_transactions` may page; follow the
   server's pagination until exhausted rather than truncating. Treat a partial
   page as "more to fetch," not "done."
@@ -154,9 +183,35 @@ token + native env — see the [capability map](../../docs/mcp-capability-map.md
 **No hardcoded tax constants anywhere.** Every rate, threshold, standard
 deduction, due date, and Schedule C/A/SE/1 mapping is a read from the tax-profile
 loader. If the loader returns `!ok` (schema/parse/io/depth failure), do **not**
-guess a value — render the tax sections as "tax profile unavailable: <error
-path>" and add a `tax_profile_error` note to the dispatch summary. A wrong tax
-constant corrupts every downstream number; failing loud is correct.
+guess a value — render the tax sections as
+`tax profile unavailable (<error.kind>)` and add a `tax_profile_error` note to the
+dispatch summary. A wrong tax constant corrupts every downstream number; failing
+loud is correct.
+
+**Two surfaces, two different rules — never merge them.** A loader failure is
+reported in two places, and what may be quoted differs by place:
+
+- **The HTML fragment (`SLOT:section-12-tax-summary`) carries `error.kind` and
+  nothing else.** The rendered text is exactly
+  `tax profile unavailable (<error.kind>)` — `error.kind` is one of the fixed enum
+  values `schema` / `io` / `parse` / `depth`, and no other field of `error` goes
+  into that fragment. **Never render `error.message` there.** It embeds the
+  caller-supplied `profilePath` — the per-budget `tax_profile_path` config
+  override, or `$YNAB_TAX_PROFILE_FILE` — through `redact()`
+  ([`../../lib/containment.mjs`](../../lib/containment.mjs)), which masks
+  home-directory spellings **only**: it does not HTML-escape, so `<` and `&`
+  survive it intact (#235). The enum text still goes through the escaper before it
+  fills the slot — see [§8](#trust-boundary--escape-every-ynab-string).
+- **The dispatch summary and the session output — plain text, not markup — may
+  report `error.kind` + `error.message`.** Those surfaces are not HTML and are not
+  written into the report file, so the message's redacted path is acceptable there.
+
+On **both** surfaces, never the `error.errors[]` detail. That per-violation array
+is intentionally raw for programmatic callers, and every entry's `path` / `params`
+embeds the offending JSON property name verbatim, which can itself be
+secret-shaped; a report is human-facing output, so quoting, paraphrasing, or
+summarizing an entry discloses it (#235). Same rule, same reasoning as
+[`../estimated-tax/SKILL.md`](../estimated-tax/SKILL.md) step 1.
 
 ---
 
@@ -266,12 +321,14 @@ Which sections run, and over what window, is set by the [tier matrix](#7-tier-ma
     finding above that the user can act on, highest-impact first (categorize
     these, fund that, dedup these, reconcile that). → `SLOT:section-11-recommendations`.
 12. **Tax Summary YTD.** Year-to-date roll-up by schedule: Schedule C P&L
-    (business net), Schedule A itemizables vs. the standard deduction
-    (`getStandardDeduction`), medical above the AGI threshold
-    (`getThreshold('medicalAgiPercent')`), SE-tax exposure
-    (`getThreshold('seTaxRate')`), and quarterly estimated-tax status against
-    `getQuarterlyDueDates(year)`. **Tier-dependent** (see matrix); empty string
-    for the slot when the tier carries no tax section. → `SLOT:section-12-tax-summary`.
+    (business net), Schedule A itemizables vs. the standard deduction, medical
+    above the AGI threshold, SE-tax exposure, and quarterly estimated-tax status.
+    You do **not** assemble these by hand — aggregate the classified transactions
+    into `ytdData` and call the engine's `computeTaxSummary`, which composes all
+    five fragments and resolves the active tax year. **Tier-dependent** (see
+    matrix); empty string for the slot when the tier carries no tax section. →
+    `SLOT:section-12-tax-summary`. Full call contract:
+    [§12 call](#12-call--the-tax-summary-and-the-active-tax-year).
 
 The remaining template slots are fed by the standard YNAB review content the
 sections above already compute: **income** (`SLOT:section-2-income`) from inflows
@@ -279,6 +336,74 @@ in §1/§10; the four **KPI cards** (`SLOT:kpi-dashboard`: income, spending, net
 cash flow, health score) from §1/§3/§10/§9. Every one of the 14 slots is filled
 (an out-of-scope section is replaced with an **empty string** — the surrounding
 `<section>` stays in the document; see §8).
+
+### §12 call — the tax summary and the active tax year
+
+Section 12's figures **and** the report's tax-year label both come from one call
+to the tax-engine facade
+([`../../lib/tax/index.mjs`](../../lib/tax/index.mjs)). Aggregate the classified
+transactions into `ytdData` yourself; the year is not yours to decide.
+
+```js
+import { computeTaxSummary } from '…/lib/tax/index.mjs';
+
+const summary = computeTaxSummary(profile, {
+  // --- the tax-year inputs, straight from plan.tax_year, unmodified ---------
+  asOfDate:        plan.tax_year.review_date,   // = data_pull.transactions.until_date
+  timezone:        plan.tax_year.timezone,      // config.timezone — never the host zone
+  taxYearOverride: plan.tax_year.override,      // config.tax_year, or null/undefined
+  filingStatus:    profile.filingStatus,
+  // --- the YTD figures you aggregated from the window's transactions --------
+  scheduleCLines, itemizedDeductionsTotal, medicalExpenses, agi,
+  // --- ONLY during the changeover (see below) ------------------------------
+  priorYearClose,
+});
+```
+
+**Never pass a tax year.** `ytdData.taxYear` was removed in issue #17 and now
+throws: a stored year keeps answering last year once the calendar rolls over,
+which is the same staleness bug as reading `Personal 2024` off the budget name.
+The engine derives the year from `asOfDate` + `timezone` via `resolveTaxYear`,
+and returns it as `summary.meta.taxYear`. Use *that* for every year-keyed profile
+accessor in this section — `getStandardDeduction(summary.meta.taxYear, …)`,
+`getQuarterlyDueDates(summary.meta.taxYear)` — not `profile.taxYear`, which
+records only which year the profile's rates were authored for.
+
+**The header label.** `summary.meta.taxYearLabel` is the report header string.
+Pass it verbatim to `--tax-year` (§8). Do not build it, reformat it, or
+substitute a year of your own: exactly one place in the tree produces it, and the
+report writer refuses any other shape.
+
+**The January changeover.** When `plan.tax_year.changeover` is present, the prior
+tax year is still open (its final estimated payment has not come due) and the
+review reports **both** years:
+
+1. Aggregate a **second** `ytdData` from the prior-year transactions — the ones
+   inside `changeover.prior_year_window`, already in the plan's pull — and pass
+   it as `priorYearClose`, carrying its own `asOfDate` (where that year's books
+   were cut, normally the window's `until_date`). Give it no `taxYear`: the
+   engine derives the close-out year from the boundary.
+2. `computeTaxSummary` **throws** if you omit it in this window. That is
+   deliberate — a summary that quietly dropped the close-out would look complete
+   while hiding a whole tax year. Do not catch and continue.
+3. Render both in the §12 fragment: `summary.yearBoundary.priorYearClose` is the
+   prior year's close-out (identical shape), and the summary's own figures are
+   the **new** year's opening state. Label each with its year so the two are never
+   confused, and lead with the prior year — it is the one with a deadline.
+4. The changeover signal reaches the header automatically:
+   `summary.meta.taxYearLabel` already names both years and the date the prior
+   year closes through.
+
+**When the tax year cannot be resolved.** If `plan.tax_year.timezone` is `null`,
+or `computeTaxSummary` throws on the tax-year inputs, treat it exactly like a
+failed profile load (§4): render §12 as `tax year unresolvable (<error kind>)`,
+pass **no** `--tax-year`, and add a `tax_year_error` note to the dispatch summary.
+Never fall back to the host zone, the budget name, or `profile.taxYear` — a
+plausible wrong year is worse than a visible gap. Like §4's failure text, this
+string fills `SLOT:section-12-tax-summary`, so it carries the error **kind** only
+— never a thrown error's `message`, which can quote a caller-supplied path — and
+it goes through `bin/html-escape.sh` before it fills the slot
+([§8](#trust-boundary--escape-every-ynab-string)).
 
 ### Empty-state & degenerate-budget handling
 
@@ -399,22 +524,56 @@ fragment (or an empty string when out of scope; the `<section>` stays):
 `{{report_date}}`, `{{output_path}}` (the save path is decided by the report
 writer, M2-9 — pass it through, don't hardcode it).
 
+The `{{tax_year}}` scalar slot carries the **active tax year**. Whenever the tier
+renders Section 12, pass the engine's `summary.meta.taxYearLabel` verbatim to
+`--tax-year` — it comes from `resolveTaxYear` (via the [§12
+call](#12-call--the-tax-summary-and-the-active-tax-year)) and names both years
+during the January changeover. Never write the year by hand and never read it off
+the budget name: `Personal 2024` is a renameable label, not a tax fact. A tier
+with no tax section — or one whose tax year would not resolve — passes nothing.
+See [docs/tax-year-resolution.md](../../docs/tax-year-resolution.md).
+
 ### Trust boundary — escape every YNAB string
 
-Payee names, memos, category names, and account names are **untrusted external
-data** crossing into HTML output. Route **every** YNAB-sourced string through the
-one shared, audited escaper — [`../../bin/html-escape.sh`](../../bin/html-escape.sh)
-— before injecting it into any fragment:
+Every string that crosses into HTML output is **untrusted external data**. **Four
+sources, one rule, no carve-outs:**
+
+- **Payee names and memos** — untrusted data straight off the wire.
+- **Category and account names** — same wire, same rule.
+- **Formatted amounts** — `formatMoney` embeds the off-the-wire `currency_symbol`
+  and separators verbatim and does **not** pre-escape (§5), so a rendered amount
+  is not a bare number.
+- **The tax-loader failure text** — §4's `tax profile unavailable (<error.kind>)`,
+  and its sibling `tax year unresolvable (<error kind>)` from the
+  [§12 call](#12-call--the-tax-summary-and-the-active-tax-year). Both fill
+  `SLOT:section-12-tax-summary` on a failure path, and both are **config-reachable
+  by construction**: the value that failed to load is named by the per-budget
+  `tax_profile_path` override or `$YNAB_TAX_PROFILE_FILE`, and this repo has
+  already ruled config strings a **trust boundary, not trusted input** (issue #28 /
+  GAP-13, the same ruling that pre-escapes `persona.name`). §4 confines the
+  rendered text to the `error.kind` enum precisely so no caller-supplied path can
+  reach the markup — `redact()` masks home directories, never `<` or `&` — and
+  this escaper is the second, independent layer that holds even if that
+  confinement is ever widened.
+
+Route **every** one of them through the one shared, audited escaper —
+[`../../bin/html-escape.sh`](../../bin/html-escape.sh) — before injecting it into
+any fragment:
 
 ```bash
 # the SAME module bin/persona.sh and bin/report-writer.sh use — no hand-escaping.
 # `--` ends option parsing so a payee literally named `-h`/`--raw` is escaped as
 # DATA, never dispatched as a flag — ALWAYS pass it before the untrusted value.
 safe_payee="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" -- "$raw_payee")"
+safe_tax_error="$(bash "${CLAUDE_PLUGIN_ROOT}/bin/html-escape.sh" -- "$tax_error")"
 ```
 
-It **HTML-escapes** the five dangerous characters (`&` → `&amp;` first, then
-`<` `>` `"` `'`), strips layout-wrecking control characters, and truncates an
+**No string interpolated into a fragment is outside this rule.** The only value
+that skips the escaper is `bash bin/persona.sh html-name`, which is pre-escaped at
+the source.
+
+The escaper **HTML-escapes** the five dangerous characters (`&` → `&amp;` first,
+then `<` `>` `"` `'`), strips layout-wrecking control characters, and truncates an
 over-long value (200 chars + `…`) — so a payee like `Smith & <b>Sons</b>` renders
 as text, never markup, and a multi-kilobyte memo can never blow out the layout. A
 bare number you compute is safe — but a **formatted amount is not a bare number**:
@@ -422,9 +581,10 @@ bare number you compute is safe — but a **formatted amount is not a bare numbe
 (it does not pre-escape, see §5), so pass every rendered amount through the same
 helper too. A hostile `currency_symbol` like `<script>` must render as text, never
 as markup. (The persona loader escapes the name it renders via the same module;
-you own routing the transaction/category/account strings **and the formatted
-amounts** through `bin/html-escape.sh` before they go into slots.) The report
-writer (M2-9) then treats each finished fragment as an **opaque, already-escaped
+you own routing the transaction/category/account strings, **the formatted
+amounts**, and **the tax-loader failure text** through `bin/html-escape.sh` before
+they go into slots.) The report writer (M2-9) then treats each finished fragment
+as an **opaque, already-escaped
 string** — it never re-processes or re-escapes it — so escaping happens exactly
 once, here, at the assembly boundary. Long transaction lists go inside
 `<details><summary>…</summary><div class="details__body">…</div></details>` so

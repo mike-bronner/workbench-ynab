@@ -24,12 +24,14 @@
 #
 # USAGE
 #   source "${CLAUDE_PLUGIN_ROOT}/bin/config.sh"
-#   _require_config || exit 1                 # fail fast if unconfigured
+#   _require_config || exit 1                 # fail fast if unconfigured or unparseable
 #   budgets="$(_cfg_budgets)"                 # full budgets array as JSON
 #   group="$(_cfg_budget_field 'Business' 'business_category_group')"
 #   default_entry="$(_cfg_default_budget)"    # one budgets entry as JSON
 #   persona="$(_cfg '.persona.name')"
 #   persona="${persona:-$DEFAULT_PERSONA}"    # caller applies its own default
+#   timezone="$(_cfg_timezone)" || exit 1     # required IANA tz; fail closed
+#   today="$(_today_in_tz "$timezone")"       # authoritative today in that tz
 #
 # See docs/config-loader.md for the full contract and a worked example per key.
 
@@ -41,21 +43,70 @@
 # at a sandbox fixture); when unset it resolves to the canonical plugin-data path.
 YNAB_CONFIG_FILE="${YNAB_CONFIG_FILE:-$HOME/.claude/plugins/data/workbench-ynab-claude-workbench/config.json}"
 
+# The IANA tz database directory, used by _is_valid_timezone to confirm a zone
+# name resolves to a compiled TZif zone file (not merely any file of that name).
+# Standard on macOS and Linux; honours the conventional $TZDIR override when the
+# OS sets one (also the test seam).
+TZ_DB_DIR="${TZDIR:-/usr/share/zoneinfo}"
+
+# _config_parses
+#   Return 0 iff $YNAB_CONFIG_FILE holds parseable JSON. A pure predicate — it
+#   prints nothing, so callers branch on its status. Assumes the file exists and
+#   jq is on PATH; both are checked by every caller below first.
+#
+#   The check is `jq -e 'type'`, NOT `jq empty` or `jq -e .`, and the difference
+#   is load-bearing at both ends:
+#     * `jq empty` accepts a ZERO-BYTE file (no JSON value is read, so nothing
+#       fails) — a truncated write would read back as "no fields set", the very
+#       failure this guard exists to stop. `-e` reports exit 4 when no result was
+#       ever produced, so an empty or whitespace-only file fails closed.
+#     * `jq -e .` keys the status on the VALUE, so a file whose whole content is
+#       `false` or `null` — both valid JSON — would report a parse failure it did
+#       not have. `type` always emits a non-empty string, so the status reflects
+#       only whether the file parsed.
+_config_parses() {
+  jq -e 'type' "$YNAB_CONFIG_FILE" >/dev/null 2>&1
+}
+
+# _config_json_error
+#   Print the invalid-JSON message to stderr. One emitter shared by every reader
+#   below, so the wording cannot drift between them. Deliberately distinct from
+#   _require_config's "config not found" and "jq is required" text: a corrupt
+#   file is a different repair than a missing file or a missing tool.
+_config_json_error() {
+  echo "workbench-ynab: config at $YNAB_CONFIG_FILE is not valid JSON and could not be parsed." 1>&2
+  echo "workbench-ynab: repair the file, or re-run /workbench-ynab:setup to recreate it." 1>&2
+}
+
 # _cfg '<jq-path>'
 #   Echo the value at the given jq path, or nothing when the file is missing, jq
 #   is unavailable, or the field is absent/null. Same shape as mcp-memory.sh:
 #   `jq -r '<path> // empty'`. Callers apply their own defaults at the call site
 #   with `"${value:-default}"` — this function never bakes defaults in, so no
 #   owner-specific value is ever hardcoded here.
+#
+#   FAILS CLOSED on a config file that does not parse (issue #283). Those three
+#   legitimate empties are all silent successes — empty stdout, return 0, nothing
+#   on stderr — so a non-zero return from _cfg means exactly one thing: the file
+#   is there but is not JSON. Previously an unparseable file collapsed into the
+#   same empty output as an absent key, so EVERY field at once silently reverted
+#   to its caller's default; that is indistinguishable from "unconfigured", and a
+#   key whose whole purpose is to override a default would be dropped with no
+#   signal. Readers that must not proceed on a corrupt file propagate the status:
+#   `value="$(_cfg '.some.key')" || return 1`.
 _cfg() {
-  [ -f "$YNAB_CONFIG_FILE" ] && command -v jq >/dev/null 2>&1 \
-    && jq -r "$1 // empty" "$YNAB_CONFIG_FILE" 2>/dev/null
+  [ -f "$YNAB_CONFIG_FILE" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  _config_parses || { _config_json_error; return 1; }
+  jq -r "$1 // empty" "$YNAB_CONFIG_FILE" 2>/dev/null
 }
 
 # _require_config
 #   Guard for callers that cannot proceed without configuration. Emits a clear,
 #   actionable message to stderr and returns non-zero when the config file is
-#   missing or jq is unavailable. Call it once before reading any fields.
+#   missing, jq is unavailable, or the file does not parse as JSON. Call it once
+#   before reading any fields — the parse check runs here so a corrupt file stops
+#   the caller up front, rather than surfacing once per field read.
 _require_config() {
   if [ ! -f "$YNAB_CONFIG_FILE" ]; then
     echo "workbench-ynab: config not found at $YNAB_CONFIG_FILE" 1>&2
@@ -67,7 +118,166 @@ _require_config() {
     echo "workbench-ynab: install jq (e.g. 'brew install jq'), then re-run /workbench-ynab:setup." 1>&2
     return 1
   fi
+  if ! _config_parses; then
+    _config_json_error
+    return 1
+  fi
   return 0
+}
+
+# _is_valid_timezone TZ
+#   Return 0 iff TZ is a syntactically-safe, real IANA zone; non-zero otherwise.
+#   A pure predicate — it prints nothing, so callers branch on its status.
+#   FAILS CLOSED: an empty value, an absolute path, a ".." traversal, a trailing
+#   slash, any character outside the IANA name set ([A-Za-z0-9_+/-]), a build
+#   artifact that is not a selectable zone, or a name that does not resolve to a
+#   compiled zone file under $TZ_DB_DIR is rejected. Nested zones (e.g.
+#   America/Argentina/Buenos_Aires) are accepted since the file check follows the
+#   real path.
+#
+#   The final gate is NOT a bare `-f` existence check: the zoneinfo tree also
+#   holds housekeeping files (leapseconds, +VERSION, tzdata.zi, *.tab) and TZif
+#   pseudo-zones (Factory, posixrules) that resolve to a UTC-equivalent date, so
+#   a plain existence check would green-light them and leak the exact silent
+#   host-clock-equivalent (issue #31). Instead, the artifact is rejected two
+#   ways: the non-selectable TZif pseudo-zones by name, and everything else by
+#   requiring the file to begin with the "TZif" magic (RFC 8536) — which the
+#   text housekeeping files do not.
+#
+#   Both deny-list checks are CASE-FOLDED and cover the leap-second mirror
+#   subtrees, because the name→file lookup is not a canonical-zone check: a
+#   case-insensitive filesystem (macOS/APFS) resolves `factory`/`FACTORY` to the
+#   real `Factory` TZif file, and hosts that ship the `right/`/`posix/` mirrors
+#   (Debian tzdata-legacy, *BSD, RHEL) expose `right/Factory` etc. — both slip
+#   past an exact-case, basename-only name guard and re-leak the UTC-equivalent
+#   date (issue #31, review round 3). So the mirror subtrees are rejected
+#   wholesale and the pseudo-zone names are matched case-insensitively.
+_is_valid_timezone() {
+  local tz="$1" zonefile lc base_lc
+  [ -n "$tz" ] || return 1
+  case "$tz" in
+    /* | *..* | */) return 1 ;;               # no absolute path, traversal, or trailing slash
+    *[!A-Za-z0-9_/+-]*) return 1 ;;           # only IANA-name characters
+  esac
+  lc="$(printf '%s' "$tz" | tr '[:upper:]' '[:lower:]')"
+  case "$lc" in
+    right/* | posix/*) return 1 ;;            # leap-second / POSIX-TZ mirror duplicates, not canonical zones
+  esac
+  base_lc="${lc##*/}"
+  case "$base_lc" in
+    factory | posixrules) return 1 ;;         # real TZif files, but UTC-mapping build artifacts — never selectable zones (case-folded: a case-insensitive FS resolves `factory` to `Factory`)
+  esac
+  zonefile="$TZ_DB_DIR/$tz"
+  [ -f "$zonefile" ] || return 1              # must resolve to a real file …
+  [ "$(head -c 4 "$zonefile" 2>/dev/null)" = "TZif" ]   # … and it must be a compiled TZif zone, not a housekeeping artifact
+}
+
+# _cfg_timezone
+#   Echo the validated IANA timezone from config, or FAIL CLOSED. This is the
+#   loader's load-time timezone gate (issue #31): a review's date math is
+#   timezone-sensitive, so a missing or bogus zone must stop the run loudly
+#   rather than silently defaulting to the host clock — which would misplace
+#   near-midnight transactions and the wrong tax year.
+#     * missing / empty      → descriptive error to stderr, return 1
+#     * present but invalid   → descriptive error to stderr, return 1
+#     * valid                 → echo it on stdout, return 0
+#   NEVER falls back to the system-local zone. Callers resolve it as a hard
+#   stop: `tz="$(_cfg_timezone)" || exit 1`.
+_cfg_timezone() {
+  local tz
+  # Propagate a config that does not parse verbatim (issue #283): _cfg has already
+  # said why on stderr, and reporting it here as "timezone missing/empty" instead
+  # would name the wrong repair — the zone may well be set, in a file jq cannot read.
+  tz="$(_cfg '.timezone')" || return 1
+  if [ -z "$tz" ]; then
+    echo "workbench-ynab: config.timezone is required but missing/empty in $YNAB_CONFIG_FILE" 1>&2
+    echo "workbench-ynab: set a valid IANA timezone (e.g. America/Phoenix) — run /workbench-ynab:setup." 1>&2
+    return 1
+  fi
+  if ! _is_valid_timezone "$tz"; then
+    echo "workbench-ynab: config.timezone '$tz' is not a valid IANA timezone identifier." 1>&2
+    echo "workbench-ynab: use a zoneinfo name like America/Phoenix or UTC — run /workbench-ynab:setup." 1>&2
+    return 1
+  fi
+  printf '%s\n' "$tz"
+}
+
+# _cfg_tax_year
+#   Echo the OPTIONAL `tax_year` override from config, or nothing when the user
+#   has not set one (issue #17). The tax year is normally DERIVED from the review
+#   date in the configured timezone — this key exists only for setups that do not
+#   follow the calendar year. A budget's display name (e.g. "Personal 2024") is
+#   never a source and is never parsed.
+#     * absent / null         → echo nothing, return 0 (caller derives the year)
+#     * present but malformed → descriptive error to stderr, return 1
+#     * present and valid     → echo the four-digit year, return 0
+#   FAILS CLOSED on a malformed value rather than ignoring it: silently falling
+#   back to the review date would report a different year than the user asked for,
+#   with no signal. Callers resolve it as a hard stop:
+#   `tax_year="$(_cfg_tax_year)" || exit 1`.
+_cfg_tax_year() {
+  local year kind
+  # Decide "is the key set?" from the JSON TYPE, never from the rendered value.
+  # `_cfg` reads through `jq -r '<path> // empty'`, and jq's `//` discards `false`
+  # exactly like `null`/absent, while `-r` renders the empty string `""` as an
+  # empty line — so a value-first `[ -n "$year" ]` guard cannot tell `false` or
+  # `""` (both malformed; must fail closed) from an unset key (derive from the
+  # review date), and would silently ignore them. `type` has no such collapse: it
+  # yields "null" for an absent key and an explicit null alike, a distinct name
+  # for every other value, and empty only when the config file or jq is missing.
+  # A config that does not parse must NOT read as "no override set" (issue #283):
+  # _cfg yields empty for a corrupt file exactly as it does for an unconfigured
+  # host, and the `'' | null` arm below would take that as the default and derive
+  # the year from the review date — silently reporting a different year than the
+  # user configured, which is the precise failure this helper exists to prevent.
+  # Propagating _cfg's status keeps the corrupt-file case out of that arm.
+  kind="$(_cfg '.tax_year | type')" || return 1
+  case "$kind" in
+    '' | null) return 0 ;;
+  esac
+  # The key IS set, so any value that is not a four-digit JSON number is an error.
+  # `tostring` keeps that value visible in the message — a bare `.tax_year` read
+  # would render `false` and `""` as empty text and report a blank offender.
+  # Checking the TYPE as well as the text matters because `jq -r` renders the
+  # string "2031" and the number 2031 identically, and a quoted year is a config
+  # mistake worth reporting, not a value to accept on the strength of how it prints.
+  year="$(_cfg '.tax_year | tostring')"
+  case "$kind:$year" in
+    number:[0-9][0-9][0-9][0-9]) : ;;
+    *)
+      echo "workbench-ynab: config.tax_year '$year' is not a four-digit year in $YNAB_CONFIG_FILE" 1>&2
+      echo "workbench-ynab: remove it to derive the tax year from the review date, or set e.g. 2025." 1>&2
+      return 1
+      ;;
+  esac
+  printf '%s\n' "$year"
+}
+
+# _today_in_tz TZ [EPOCH]
+#   Echo today's ISO-8601 calendar date (YYYY-MM-DD) in IANA zone TZ. This is
+#   the SINGLE source of "today" for every review entry point (the router and
+#   the four ad-hoc tier commands), so a scheduled run and an interactive run
+#   fired at the same instant agree on the review window and the tax-year label
+#   (issue #31). EPOCH (Unix seconds; or the $YNAB_NOW_EPOCH env var) overrides
+#   "now" — the deterministic test seam, mirroring lib/monitor/alerts.mjs's
+#   options.now. TZ is assumed already validated (_cfg_timezone /
+#   _is_valid_timezone); an invalid zone makes `date` fall back to UTC, which
+#   that load-time validation exists to prevent. As a last-resort guard this
+#   helper still refuses an EMPTY zone outright (non-zero, stderr) rather than
+#   letting `date` read the host clock.
+_today_in_tz() {
+  local tz="$1" epoch="${2:-${YNAB_NOW_EPOCH:-}}"
+  # Defense-in-depth: every caller gates via _cfg_timezone/_is_valid_timezone
+  # first, but refuse an empty zone outright so a caller that forgets can never
+  # let `date` silently fall back to the host clock (issue #31).
+  [ -n "$tz" ] || { echo "workbench-ynab: _today_in_tz called with an empty timezone" 1>&2; return 1; }
+  if [ -z "$epoch" ]; then
+    TZ="$tz" date +%Y-%m-%d
+  elif date --version >/dev/null 2>&1; then
+    TZ="$tz" date -d "@$epoch" +%Y-%m-%d       # GNU coreutils (Linux CI)
+  else
+    TZ="$tz" date -r "$epoch" +%Y-%m-%d        # BSD date (macOS)
+  fi
 }
 
 # _migrate_config
@@ -82,15 +292,21 @@ _require_config() {
 #   READ-ONLY: the config file is never rewritten, so a legacy file's
 #   schema_version stays 1 — the migration never auto-bumps it; the user
 #   re-runs /workbench-ynab:setup to upgrade the file itself. Emits nothing
-#   when the file is missing or jq is unavailable, same as _cfg.
+#   when the file is missing or jq is unavailable, same as _cfg — and FAILS
+#   CLOSED on a file that does not parse, same as _cfg (issue #283). This is a
+#   second read path into the same file, not a caller of _cfg, so it carries the
+#   guard itself; without it a corrupt config would read back as "no budgets"
+#   and the helpers below would fall through to their own defaults.
 _migrate_config() {
-  [ -f "$YNAB_CONFIG_FILE" ] && command -v jq >/dev/null 2>&1 \
-    && jq 'if has("budgets") then .
-           else . + { budgets: [
-             { label: (.budget.name // "default"), role: "personal" }
-             + (if .budget.name != null then { budget_name: .budget.name } else {} end)
-             + (if .budget.id   != null then { budget_id:   .budget.id   } else {} end)
-           ] } end' "$YNAB_CONFIG_FILE" 2>/dev/null
+  [ -f "$YNAB_CONFIG_FILE" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  _config_parses || { _config_json_error; return 1; }
+  jq 'if has("budgets") then .
+      else . + { budgets: [
+        { label: (.budget.name // "default"), role: "personal" }
+        + (if .budget.name != null then { budget_name: .budget.name } else {} end)
+        + (if .budget.id   != null then { budget_id:   .budget.id   } else {} end)
+      ] } end' "$YNAB_CONFIG_FILE" 2>/dev/null
 }
 
 # _cfg_budgets
@@ -98,8 +314,19 @@ _migrate_config() {
 #   migration — a v1 file yields its synthesized single-entry array. Emits
 #   nothing when unconfigured. No budget name is hardcoded here or in any
 #   helper below: every value comes from the user's config instance.
+#
+#   Each of the three helpers below CAPTURES _migrate_config's output instead of
+#   piping it, so a corrupt config still fails closed (issue #283). A pipeline
+#   reports only its LAST command's status, so `_migrate_config | jq …` would
+#   hand jq an empty stdin, get an empty result and a zero exit, and swallow the
+#   very failure _migrate_config just reported — reinstating the fail-open one
+#   level up. Splitting the `local` declaration from the assignment is likewise
+#   deliberate: `local x="$(cmd)"` returns `local`'s own status, always 0, which
+#   would discard the failure just as silently.
 _cfg_budgets() {
-  _migrate_config | jq -c '.budgets // empty' 2>/dev/null
+  local migrated
+  migrated="$(_migrate_config)" || return 1
+  printf '%s\n' "$migrated" | jq -c '.budgets // empty' 2>/dev/null
 }
 
 # _cfg_budget_field LABEL FIELD
@@ -111,7 +338,9 @@ _cfg_budgets() {
 #   outright — one value always comes back, never one line per duplicate —
 #   mirroring _cfg_default_budget's `.[0]` collapse below.
 _cfg_budget_field() {
-  _migrate_config | jq -r --arg label "$1" --arg field "$2" \
+  local migrated
+  migrated="$(_migrate_config)" || return 1
+  printf '%s\n' "$migrated" | jq -r --arg label "$1" --arg field "$2" \
     'first(.budgets[]? | select(.label == $label)) | .[$field] | if . == null then empty else . end' 2>/dev/null
 }
 
@@ -122,7 +351,9 @@ _cfg_budget_field() {
 #   matches no entry emits nothing — a config typo surfaces as empty for the
 #   caller to guard, never as a silently different budget.
 _cfg_default_budget() {
-  _migrate_config | jq -c '.default_budget as $d
+  local migrated
+  migrated="$(_migrate_config)" || return 1
+  printf '%s\n' "$migrated" | jq -c '.default_budget as $d
     | (.budgets // [])
     | if $d == null then (.[0] // empty)
       else (map(select(.label == $d)) | .[0] // empty) end' 2>/dev/null

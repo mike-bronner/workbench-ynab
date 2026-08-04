@@ -48,17 +48,42 @@ assert_contains() {
 TAG='⚠️ Estimates only — not tax advice. Consult a qualified professional before filing or paying.'
 PREFIX='mcp__plugin_workbench-ynab_ynab__'   # bare prefix — guard-safe
 
-# doc_section <step-label> — emit the BODY of a "### <step-label> — …" section, up
-# to (not including) the next "### " heading or a "---" rule. Empty when the step
-# is absent, so every section-scoped assertion below goes red the moment its step
-# is deleted or renamed — the discrimination a whole-file grep can't give, since
-# these needles recur across steps. Mirrors docs-set.test.sh's scoped extraction.
+# doc_section <step-label> [doc] — emit the BODY of a "### <step-label> — …"
+# section, up to (not including) its terminator. Reads $REPO_ROOT/$DOC unless a
+# doc path is given; the boundary regression at the foot of this file points it
+# at scratch copies. Empty when the step is absent, so every section-scoped
+# assertion below goes red the moment its step is deleted or renamed — the
+# discrimination a whole-file grep can't give, since these needles recur across
+# steps. Mirrors docs-set.test.sh's scoped extraction.
+#
+# A section closes at a "---" rule, or at the next heading whose level is AT OR
+# ABOVE the wanted heading's own. That depth is read off the wanted heading
+# pattern itself, so the two can never drift apart. Closing only at the next
+# "### " let a shallower "## " heading pass straight through (issue #301) — the
+# same defect fixed for write-safety-guardrail-doc.test.sh's doc_section_verbs in
+# 18ce327. It is live here: the doc's last "### " subsection ("Human-run only —
+# deferred to the release gate") runs straight into "## Gaps found" with no rule
+# between, so that whole section read as part of its body. Deeper headings are
+# real sub-sections and stay inside.
+#
+# Fenced code blocks are held out of that decision, and this is load-bearing, not
+# defensive: Step 6's bash fence opens "# a) config.json carries no token-shaped
+# …" and Step 7's carries "# Expect ≥ 1, …", both a depth-1 heading to a
+# fence-naive regex. Without the fence guard Step 6's body truncates at that
+# comment — 39 lines to 6 — dropping the three needles pinned below it (the
+# cannot-verify branch, the `security find-generic-password` command, and
+# "Keychain-only"); Step 7's truncates 14 lines to 8 the same way.
 doc_section() {
   awk -v h="^### $1 " '
-    $0 ~ h { f = 1; next }
-    f && (/^### / || /^---$/) { exit }
-    f
-  ' "$REPO_ROOT/$DOC"
+    BEGIN   { match(h, /#+/); depth = RLENGTH }
+    /^```/  { fence = !fence; if (f) print; next }
+    fence   { if (f) print; next }
+    $0 ~ h  { f = 1; next }
+    !f      { next }
+    /^---$/ { exit }
+    /^#+ /  { match($0, /^#+/); if (RLENGTH <= depth) exit }
+            { print }
+  ' "${2:-$REPO_ROOT/$DOC}"
 }
 
 # assert_in_section <step-label> <desc> <literal> — the named step's body must
@@ -92,8 +117,9 @@ fi
 # The confirmation line names all four together — a single discriminating needle
 # that goes red if any prereq is dropped from the check.
 assert_contains "prereq step confirms all four prereqs" "node, jq, security, workbench-core all present"
-# workbench-core is the prereq setup itself omits — pin its concrete detection so
-# it can't be quietly weakened to a three-tool check.
+# workbench-core is the prereq setup itself originally omitted (issue #230, since
+# fixed) — pin its concrete detection so it can't be quietly weakened back to a
+# three-tool check.
 assert_contains "prereq step detects workbench-core via the plugins cache" "cache/*/workbench-core"
 # Fail-fast on a miss — mirrors the dev-team setup Step 2 pattern. Pin BOTH the
 # message AND the non-zero exit: the message alone stayed green when `exit 1` was
@@ -109,8 +135,35 @@ fi
 assert_contains "prereq step enforces the pinned Node floor" "meets the Node >= "
 
 # --- both install paths covered (AC #1) ----------------------------------------
-assert_contains "documents the marketplace install path" "workbench-ynab@claude-workbench"
-assert_contains "documents the local-checkout install path" "claude plugin install /absolute/path/to/workbench-ynab"
+# Section-scoped to Step 2. Neither needle recurs elsewhere in the doc today, so a
+# whole-file grep would also go red on deletion — but the Gaps entry now discusses
+# both install commands in prose (the #269 verification record), which is exactly
+# the drift that turns an unscoped pin vacuous. Scoping matches this file's
+# convention for step-specific pins and holds if that prose grows a code sample.
+assert_in_section "Step 2" "documents the marketplace install path" "claude plugin install workbench-ynab@claude-workbench"
+# Needle omits the leading `~` deliberately: shellcheck SC2088 flags a quoted tilde,
+# and it buys no discrimination here — `.claude/skills/workbench-ynab` already pins
+# the skills-dir mechanism, and stays correct if the doc switches to `$HOME/`.
+assert_in_section "Step 2" "documents the local-checkout install path" ".claude/skills/workbench-ynab"
+# The local-checkout path used to read `claude plugin install <path>`, which is not
+# a valid form of the command (issue #269 — `install` resolves a plugin NAME against
+# registered marketplaces and has no bare-path branch). Pin the refuted form out of
+# Step 2. Scoped, NOT whole-file: the Gaps entry quotes the old instruction verbatim
+# as the historical record of what was wrong, so a whole-file grep fails on the
+# correct doc. Step 2 is where a revert would land, which is what this must catch.
+if doc_section "Step 2" | grep -qF -- "claude plugin install /absolute/path"; then
+  no "local-checkout path avoids the refuted bare-path install form"
+else
+  ok "local-checkout path avoids the refuted bare-path install form"
+fi
+# `marketplace add <path>` is the OTHER refuted form (#269): it takes a marketplace
+# manifest, and this repo ships a plugin manifest. Pin it out of Step 2 specifically
+# — the Gaps entry legitimately names it while explaining why it fails.
+if doc_section "Step 2" | grep -qF -- "claude plugin marketplace add /"; then
+  no "local-checkout path avoids the refuted marketplace-add-a-path form"
+else
+  ok "local-checkout path avoids the refuted marketplace-add-a-path form"
+fi
 
 # --- config lands out of repo (AC #6) ------------------------------------------
 # Section-scoped to Step 5: the config path recurs 3× (Step 0 precondition, Step 5
@@ -184,6 +237,124 @@ assert_contains "links the workbench-core follow-up issue" "issues/230"
 # --- cross-references the companion release proofs -----------------------------
 assert_contains "references the human release-gate checklist" "verification-checklist.md"
 assert_contains "references the automated offline-boot proof" "tests/offline-boot.sh"
+
+# --- the section terminator respects heading level (issue #301) -----------------
+# doc_section used to close a "### " section only at the next "### " or "---", so
+# a shallower "## " heading did not end it. The boundary under test is the doc's
+# real, unmodified dormant risk: "### Human-run only — deferred to the release
+# gate" (nested under "## Results") runs straight into "## Gaps found" with no
+# "---" and no intervening "### ". Running both rules over all 13 of the doc's
+# "### " headings, it is the only one whose body differs (58 lines under the old
+# rule, 17 under the new); the other 12 come out byte-identical, because every
+# pinned "### Step N" is followed by another "### " before any "## ". So a case
+# built on a Step label could never redden under the pre-fix rule.
+#
+# Both directions are proved on scratch copies; docs/fresh-install-test.md itself
+# is never written to.
+#   (a) false positive — content planted past the section's real end must not be
+#       attributed to it.
+#   (b) false negative — a needle DELETED from the section's own body must read as
+#       absent even when the same string occurs further down, inside the range the
+#       old terminator swept. That is the drift masking these section-scoped pins
+#       exist to prevent: the doc stops saying something and the pin stays green.
+#
+# Each direction runs the literal pre-fix rule over the SAME mutated copy and
+# asserts it gets the answer wrong, immediately before asserting the fixed rule
+# gets it right — so "reddens under the old rule" is mechanical here, not a claim
+# in a commit message.
+BOUNDARY_LABEL="Human-run only"
+BOUNDARY_NEEDLE="Full-tree token-leak sweep"
+BOUNDARY_DECOY="- boundary-regression decoy planted outside the section under test"
+BOUNDARY_DIR="$(mktemp -d)"
+trap 'rm -rf "$BOUNDARY_DIR"' EXIT
+
+# The original terminator, verbatim — the control each case is measured against.
+doc_section_prefix_rule() {
+  awk -v h="^### $1 " '
+    $0 ~ h { f = 1; next }
+    f && (/^### / || /^---$/) { exit }
+    f
+  ' "${2:-$REPO_ROOT/$DOC}"
+}
+
+# plant_after_boundary <doc> <line> — <doc> with <line> inserted just below the
+# first heading FOLLOWING the boundary section, i.e. into "## Gaps found"'s body.
+# That lands outside the section by heading level but inside the range the old
+# terminator swept, which is precisely the gap under test.
+plant_after_boundary() {
+  awk -v h="^### $BOUNDARY_LABEL " -v line="$2" '
+    { print }
+    $0 ~ h                  { seen = 1; next }
+    seen && /^#+ / && !done { print ""; print line; done = 1 }
+  ' "$1"
+}
+
+# Positive control: the unmutated doc reports the needle inside the section, so a
+# failure below is the mutation and not a broken extraction.
+if doc_section "$BOUNDARY_LABEL" | grep -qF -- "$BOUNDARY_NEEDLE"; then
+  ok "boundary control: the unmutated '$BOUNDARY_LABEL' section reports its own needle"
+else
+  no "boundary control: the unmutated '$BOUNDARY_LABEL' section reports its own needle"
+fi
+
+# (a) false positive -----------------------------------------------------------
+plant_after_boundary "$REPO_ROOT/$DOC" "$BOUNDARY_DECOY" > "$BOUNDARY_DIR/decoy.md"
+# The plant must actually have landed. If the doc ever restructures so no heading
+# follows the boundary section, plant_after_boundary is a no-op and this case
+# would pass by comparing the doc against itself — a green that checked nothing.
+if cmp -s "$REPO_ROOT/$DOC" "$BOUNDARY_DIR/decoy.md"; then
+  no "boundary (a): the decoy plant landed in the scratch copy"
+else
+  ok "boundary (a): the decoy plant landed in the scratch copy"
+fi
+if doc_section_prefix_rule "$BOUNDARY_LABEL" "$BOUNDARY_DIR/decoy.md" | grep -qF -- "$BOUNDARY_DECOY"; then
+  ok "boundary (a): the pre-fix '### '-only rule sweeps the decoy in — this case reddens without the fix"
+else
+  no "boundary (a): the pre-fix '### '-only rule sweeps the decoy in — this case reddens without the fix"
+fi
+if doc_section "$BOUNDARY_LABEL" "$BOUNDARY_DIR/decoy.md" | grep -qF -- "$BOUNDARY_DECOY"; then
+  no "boundary (a): a decoy planted in the next '## ' section stays out of the pinned body"
+else
+  ok "boundary (a): a decoy planted in the next '## ' section stays out of the pinned body"
+fi
+
+# (b) false negative / masking --------------------------------------------------
+grep -vF -- "$BOUNDARY_NEEDLE" "$REPO_ROOT/$DOC" > "$BOUNDARY_DIR/base.md"
+if cmp -s "$REPO_ROOT/$DOC" "$BOUNDARY_DIR/base.md"; then
+  no "boundary (b): the needle deletion landed in the scratch copy"
+else
+  ok "boundary (b): the needle deletion landed in the scratch copy"
+fi
+plant_after_boundary "$BOUNDARY_DIR/base.md" "- $BOUNDARY_NEEDLE — relocated by the boundary regression" \
+  > "$BOUNDARY_DIR/masked.md"
+if cmp -s "$BOUNDARY_DIR/base.md" "$BOUNDARY_DIR/masked.md"; then
+  no "boundary (b): the masking plant landed in the scratch copy"
+else
+  ok "boundary (b): the masking plant landed in the scratch copy"
+fi
+if doc_section_prefix_rule "$BOUNDARY_LABEL" "$BOUNDARY_DIR/masked.md" | grep -qF -- "$BOUNDARY_NEEDLE"; then
+  ok "boundary (b): the pre-fix rule still reports the deleted needle — this case reddens without the fix"
+else
+  no "boundary (b): the pre-fix rule still reports the deleted needle — this case reddens without the fix"
+fi
+if doc_section "$BOUNDARY_LABEL" "$BOUNDARY_DIR/masked.md" | grep -qF -- "$BOUNDARY_NEEDLE"; then
+  no "boundary (b): a needle deleted from the section reads as absent despite a copy further down"
+else
+  ok "boundary (b): a needle deleted from the section reads as absent despite a copy further down"
+fi
+
+# (c) same-level headings still close a section ---------------------------------
+# A no-regression pin, not a fix proof: the old rule already closed at a sibling
+# "### ", and widening the comparison to "shallower only" (RLENGTH < depth rather
+# than <=) would silently drop that. Every assertion above is a presence check, so
+# an over-wide section only ever gains content and all of them stay green — this
+# is the one case that reads the loss. Step 5 must not see Step 6's needle; under
+# a shallower-only rule Step 5 runs through Steps 6–10 to the "---" rule and does.
+if doc_section "Step 5" | grep -qF -- "could not verify config.json is token-free"; then
+  no "boundary (c): a section still closes at the next same-level '### ' heading"
+else
+  ok "boundary (c): a section still closes at the next same-level '### ' heading"
+fi
 
 echo ""
 echo "passed: $PASS  failed: $FAIL"

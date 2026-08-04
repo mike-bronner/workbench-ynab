@@ -4,13 +4,13 @@
   "title": "workbench-ynab config.json",
   "description": "User configuration for the workbench-ynab plugin. Lives OUTSIDE the repo at $HOME/.claude/plugins/data/workbench-ynab-claude-workbench/config.json so it survives plugin updates. Read by plugin SKILLS and commands via bin/config.sh — never by the vendored MCP launcher. All tax logic is data-driven: any user's situation is one config instance, never a schema constant.",
   "type": "object",
-  "required": ["schema_version", "budgets", "tax_profile", "persona", "report"],
+  "required": ["schema_version", "timezone", "budgets", "tax_profile", "persona", "report"],
   "additionalProperties": false,
   "properties": {
     "schema_version": {
       "type": "integer",
       "const": 2,
-      "description": "Config schema version, for forward migration. This schema describes version 2 (the multi-budget shape, issue #84). Version-1 files (singular `budget`) keep working: bin/config.sh synthesizes a single-entry `budgets` array at read time and leaves the file untouched — re-run /workbench-ynab:setup to upgrade the file itself."
+      "description": "Config schema version, for forward migration. A monotonically increasing integer — increment it when a breaking change to this shape ships, so /workbench-ynab:setup and downstream migration can detect and upgrade an older file. This schema describes version 2 (the multi-budget shape, issue #84). Version-1 files (singular `budget`) keep working: bin/config.sh synthesizes a single-entry `budgets` array at read time and leaves the file untouched — re-run /workbench-ynab:setup to upgrade the file itself."
     },
     "budgets": {
       "type": "array",
@@ -64,7 +64,18 @@
     },
     "default_budget": {
       "type": "string",
-      "description": "Optional. The `label` of the budgets entry to use when a caller needs a single budget and does not specify one — the fallback for single-budget users. When absent, the first budgets entry is the default (bin/config.sh `_cfg_default_budget`)."
+      "description": "Optional. The `label` of the budgets entry to use when a caller needs a single budget and does not specify one — the fallback for single-budget users. When absent, the first budgets entry is the default (bin/config.sh `_cfg_default_budget`). A value matching NO entry's label resolves to nothing — the loader emits empty rather than falling back, so a typo surfaces loudly instead of silently selecting a different budget."
+    },
+    "timezone": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9+_-]+(/[A-Za-z0-9+_-]+)*$",
+      "description": "REQUIRED. The single source of truth for ALL date math (issue #31, design ref GAP-22): the review's 7-day lookback window, carryover boundary, month start/end, quarterly windows, and tax-year resolution all compute against this timezone, never the host clock. An IANA tz identifier — e.g. `America/Phoenix` — mirroring bujo's convention. `/workbench-ynab:setup` resolves your system's zone at setup time and writes it here as an explicit identifier; it is NEVER stored as \"system local\", so scheduled and interactive runs are deterministic. The loader (`bin/config.sh` `_cfg_timezone`) validates it against the tz database at load time and FAILS CLOSED — a descriptive error, never a silent fall-through to the host clock — on a missing or invalid value. This `pattern` is a shape check only; the loader's zoneinfo lookup is the authoritative validity gate — it requires the name to resolve to a compiled TZif zone file (not merely any file of that name), so zoneinfo housekeeping artifacts (leapseconds, +VERSION, tzdata.zi) and the UTC-equivalent pseudo-zones (Factory, posixrules) are rejected. The pseudo-zone rejection is CASE-INSENSITIVE and covers the `right/` and `posix/` leap-second mirror subtrees, so `factory`, `FACTORY`, and `right/Factory` — all of which resolve to the UTC-equivalent Factory zone on a case-insensitive filesystem or a mirror-shipping host — fail closed too."
+    },
+    "tax_year": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 9999,
+      "description": "Optional. Pins the ACTIVE tax year the review reports on, overriding the default calendar-year derivation (issue #17). When ABSENT — the normal case — the tax year is the calendar year of the review date in `timezone`, resolved by `resolveTaxYear` in lib/tax/taxYear.mjs. Set it only when your setup does not follow the calendar year. The budget's display name is NEVER a source: a budget called `Personal 2024` says nothing about the active tax year, and parsing one out of it would keep answering 2024 after a rename. Four digits, because tax years are rendered into `YYYY-MM-DD` due dates that the engine compares lexicographically; a malformed value FAILS CLOSED (a descriptive error, never a silent fall-back to the review date)."
     },
     "business": {
       "type": "object",
@@ -202,11 +213,16 @@
       "properties": {
         "output_dir": {
           "type": "string",
-          "description": "Directory where generated HTML reports are written. Supports ~ and environment-variable expansion at use time. OPTIONAL — when absent or empty the writer (bin/report-writer.sh) applies the shipped default ~/Documents/Claude/Reports, so the loader and tests deliberately exercise the field-absent path. Not marked required here to match that default behaviour."
+          "description": "Directory where generated HTML reports are written. Supports ~ and environment-variable expansion at use time. OPTIONAL — when absent or empty the writer (bin/report-writer.sh) applies the shipped default ~/Documents/Claude/Reports, so the loader and tests deliberately exercise the field-absent path. Not marked required here to match that default behaviour. There is deliberately NO must-be-absolute constraint: a RELATIVE value resolves against the current working directory, identically for the report writer and bin/ynab-prune.sh, so prune always sweeps the directory the writer wrote to. Prefer an absolute path anyway — a relative one makes the report location depend on where the review happened to run. This value lives outside the repo (as the whole config.json does) and therefore survives plugin updates: it is the single, update-stable source of truth for where reports are saved."
         },
         "template_path": {
           "type": ["string", "null"],
           "description": "Path to the frozen HTML report template. When null, the plugin's bundled template under assets/ is used. The bundled template is frozen in Sprint 3 (issue #42)."
+        },
+        "retention_days": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum age, in days, a generated report is kept before bin/ynab-prune.sh treats it as a pruning candidate. OPTIONAL — when absent the prune tool applies the shipped default of 30 days. Reports are unencrypted plaintext financial records (issue #65), so this bounds how much history accumulates on disk. See SECURITY.md → Generated Artifacts."
         }
       }
     },

@@ -8,6 +8,11 @@
 #     nested markdown (assets/tax/README.md, docs/decisions/*.md, …) pass
 #     silently — and keep covering the root README.md (issue #71), whose
 #     links to the docs/ set would otherwise sit in a link-check blind spot;
+#   * the same globs keep covering the AGENT-FACING markdown, 'skills/**/*.md'
+#     and 'commands/**/*.md' (issue #260) — those 26 files carried 95 relative
+#     links with no gate at all, and a dangling path there is a live defect,
+#     not a reading annoyance: a skill-following agent is instructed to open
+#     the file and finds nothing;
 #   * lycheeverse/lychee-action — the repo's first third-party action — stays
 #     pinned to a full commit SHA with a trailing version comment, never a
 #     mutable tag a publisher could repoint;
@@ -37,8 +42,42 @@ ci_doc=$(cat "$CI_DOC")
 
 test_docs_links_globs_are_recursive() {
   assert_contains "$ci_yml" \
-    "args: --offline --include-fragments --no-progress 'assets/**/*.md' 'docs/**/*.md' 'README.md'" \
-    "docs-links must scan assets/ and docs/ recursively (issue #191) plus the root README.md (issue #71)"
+    "args: --offline --include-fragments --no-progress 'assets/**/*.md' 'docs/**/*.md' 'README.md' 'skills/**/*.md' 'commands/**/*.md'" \
+    "docs-links must scan assets/, docs/ (issue #191), skills/ and commands/ (issue #260) recursively, plus the root README.md (issue #71)"
+}
+
+# Each directory gets its own assertion as well as the exact-args one above:
+# dropping a single glob is the realistic regression (a "tidy up the args line"
+# edit), and a per-directory failure names which coverage was lost instead of
+# only reporting that a long string stopped matching.
+test_docs_links_covers_each_directory() {
+  failed=0
+  for glob in "'assets/**/*.md'" "'docs/**/*.md'" "'README.md'" \
+              "'skills/**/*.md'" "'commands/**/*.md'"; do
+    if ! printf '%s\n' "$ci_yml" | grep -qF -- "$glob"; then
+      echo "  docs-links no longer passes the $glob input to lychee" >&2
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
+# The agent-facing half of the markdown set is the whole point of issue #260 —
+# assert it separately from the loop above so a revert that keeps the docs/
+# globs but drops skills/ or commands/ fails with the issue named.
+test_docs_links_covers_the_agent_facing_markdown() {
+  args_line=$(printf '%s\n' "$ci_yml" | grep -F 'args: --offline --include-fragments')
+  failed=0
+  for glob in "'skills/**/*.md'" "'commands/**/*.md'"; do
+    case "$args_line" in
+      *"$glob"*) ;;
+      *)
+        echo "  the docs-links args line dropped $glob — agent-facing links are unguarded again (issue #260)" >&2
+        failed=1
+        ;;
+    esac
+  done
+  return "$failed"
 }
 
 test_docs_links_old_nonrecursive_globs_are_gone() {
@@ -111,9 +150,64 @@ test_lint_json_check_still_passes_with_tracked_json() {
 
 # --- docs/ci.md stays in sync --------------------------------------------------
 
-test_ci_doc_documents_recursive_globs() {
-  assert_contains "$ci_doc" "assets/**/*.md" "docs/ci.md must document the recursive assets glob"
-  assert_contains "$ci_doc" "docs/**/*.md" "docs/ci.md must document the recursive docs glob"
+# Both glob checks below are SCOPED to the passage they name. A whole-document
+# `assert_contains` would be satisfied by the copy-paste recipe near the end of
+# the file, which already lists every glob — so it would stay green even if the
+# job table and the prose both went stale, which is the drift that misleads a
+# reader.
+
+# The docs-links row of the CI job table. Matched on the row shape (first cell
+# names the job, second cell is the runner) rather than on the literal
+# backticked cell text, which keeps the pattern free of shell metacharacters.
+docs_links_table_row() {
+  printf '%s\n' "$ci_doc" | grep -E '^\|[^|]*docs-links[^|]*\| ubuntu \|'
+}
+
+# The "offline and recursive" prose paragraph, heading line through the next
+# blank line.
+docs_links_recursive_prose() {
+  printf '%s\n' "$ci_doc" \
+    | awk '/^\*\*The link check is offline and recursive\.\*\*/ { p = 1 } p && /^$/ { exit } p'
+}
+
+test_ci_doc_job_table_lists_every_glob() {
+  row=$(docs_links_table_row)
+  [ -n "$row" ] || { echo "  docs/ci.md has no docs-links row in the CI job table" >&2; return 1; }
+  failed=0
+  for glob in 'assets/**/*.md' 'docs/**/*.md' 'skills/**/*.md' 'commands/**/*.md' 'README.md'; do
+    case "$row" in
+      *"$glob"*) ;;
+      *) echo "  docs/ci.md's docs-links job-table row no longer names $glob" >&2; failed=1 ;;
+    esac
+  done
+  return "$failed"
+}
+
+test_ci_doc_recursive_prose_lists_every_recursive_glob() {
+  prose=$(docs_links_recursive_prose)
+  [ -n "$prose" ] || { echo "  docs/ci.md lost the 'offline and recursive' paragraph" >&2; return 1; }
+  failed=0
+  for glob in 'assets/**/*.md' 'docs/**/*.md' 'skills/**/*.md' 'commands/**/*.md'; do
+    case "$prose" in
+      *"$glob"*) ;;
+      *) echo "  docs/ci.md's 'offline and recursive' paragraph no longer names $glob" >&2; failed=1 ;;
+    esac
+  done
+  return "$failed"
+}
+
+# docs/ci.md's "run the gates locally" block is a copy-paste recipe — if it
+# drifts from the workflow's args line, someone reproduces a narrower check
+# locally, sees green, and pushes a link the real gate rejects.
+test_ci_doc_local_lychee_recipe_matches_the_workflow_args() {
+  workflow_args=$(printf '%s\n' "$ci_yml" | grep -F 'args: --offline --include-fragments' \
+    | sed -e 's/^ *args: //')
+  # Anchored: the job table earlier in the doc mentions the same command
+  # inline, but only the copy-paste recipe starts a line with `lychee `.
+  doc_args=$(printf '%s\n' "$ci_doc" | grep -E '^lychee --offline --include-fragments' \
+    | sed -e 's/^lychee //')
+  assert_eq "$workflow_args" "$doc_args" \
+    "docs/ci.md's local lychee recipe must pass exactly the flags and globs the workflow does"
 }
 
 test_ci_doc_records_the_sha_pin_policy() {

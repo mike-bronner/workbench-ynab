@@ -77,8 +77,10 @@ a monitor alert, a review dispatch, and a report badge.
 ### `dedupe_key` — the fired-alert ledger key
 
 Format: **`{type}:{account_or_category}:{period}`** — e.g.
-`large_transaction:acct-1:2026-06` or `budget_overrun:Groceries:2026-07`. Build
-it with the exported `dedupeKey(type, accountOrCategory, period)` helper.
+`budget_overrun:Groceries:2026-07` or `bill_due:sched-1:2026-06-15`. Build
+it with the exported `dedupeKey(type, accountOrCategory, period)` helper. (Point-event
+keys such as `large_txn:{transaction_id}` are two-part and built inline, not via
+this three-part helper.)
 
 The key feeds the **M6-1 fired-alert ledger** — the `firedAlerts` field of
 `monitor-state.json` ([`lib/monitor/state.mjs`](../lib/monitor/state.mjs)
@@ -183,14 +185,42 @@ top 5** (`MAX_FINDINGS`, matching the review dispatch's fixed five):
   enum value (`CHANNELS` in the module + the JSON Schema) and a new branch in
   `dispatchAlerts` — **detector code never changes**.
 
+## Path containment — the config read and alert-log write are allowlisted (issues #169 → #206 → #244)
+
+Both filesystem seams are guarded by the shared path-containment check
+([`lib/containment.mjs`](../lib/containment.mjs)), exactly as the confidence
+config ([`loadThresholds`](../lib/tax/confidence.mjs)) and the monitor state
+store ([`writeState`](../lib/monitor/state.mjs)) are:
+
+- **`loadAlertsConfig`** canonicalizes the resolved `configFile` and refuses to
+  read it when it escapes the data-dir root — throwing a structured
+  `containment` error before `readFileSync`. A missing/unreadable/malformed but
+  *contained* file still degrades to the defaults (the zero-config guarantee is
+  unchanged); only an escaping **path** throws.
+- **`appendAlertLog`** does the same for the log write (verb `'write'`),
+  refusing an escaping path before any `mkdirSync` / `appendFileSync` — nothing
+  is created outside the root.
+- **`dispatchAlerts` never surfaces that throw.** Its NEVER-throws contract
+  holds: a `configFile` that escapes the root degrades to the same no-dispatch
+  result as a disabled config (diagnostic to stderr), so a hostile or
+  misconfigured `YNAB_CONFIG_FILE` can never crash an unattended monitor pass.
+
+The **allowlist root** is the resolved data dir — `options.dataDir` → env
+`YNAB_DATA_DIR` → the canonical plugin-data dir. Naming a root is an
+embedding-level trust decision: an explicit `dataDir` joins the allowlist
+without widening the default no-options surface, and an explicit
+`configFile` / `logPath` never vouches for itself. This is how the test harness
+points the module at a `mkdtemp` dir (`{ dataDir: TMP, configFile: … }`).
+
 ## Test-harness seams
 
 Mirroring the monitor state store: `options.configFile` → env
 `YNAB_CONFIG_FILE` for the config read, and `options.logPath` → env
 `YNAB_ALERT_LOG_FILE` → `YNAB_DATA_DIR` for the alert log. `options.dataDir` →
 env `YNAB_DATA_DIR` names the **containment root** both paths must resolve
-under (an explicit `configFile`/`logPath` never vouches for itself), so a test
-pointing at a temp file passes `dataDir` alongside it — exactly as the
-confidence/state suites do. The notification path stubs via `options.platform`
-/ `options.spawnImpl`, so the suite passes on non-darwin CI. See
+under (an explicit `configFile`/`logPath` never vouches for itself — see the
+**Path containment** section above), so a test pointing at a temp file passes
+`dataDir` alongside it — exactly as the confidence/state suites do. The
+notification path stubs via `options.platform` / `options.spawnImpl`, so the
+suite passes on non-darwin CI. See
 [`tests/unit/monitor-alerts.test.mjs`](../tests/unit/monitor-alerts.test.mjs).

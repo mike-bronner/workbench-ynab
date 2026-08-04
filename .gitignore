@@ -23,6 +23,10 @@ run/
 # Generated test diagnostics (written only on a failing offline-boot run, #14)
 tests/integration/offline-boot-failure.txt
 
+# NUL positive-control sentinel — planted in the repo root by the guard self-test
+# and removed on every exit path; only a SIGKILL mid-run can leave one behind (#216)
+.nul-selftest-sentinel.*
+
 # Secrets — never commit. The YNAB token lives in macOS Keychain, never on disk.
 # .env* (not just .env) so every dotenv variant — .env.local, .env.production,
 # .env.test, etc. — is blocked, not only the exact filename.

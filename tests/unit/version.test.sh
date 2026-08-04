@@ -8,9 +8,9 @@
 #
 # Locks in the version invariants so release automation (issue #74 / M5-5) has
 # exactly one bump target and no hidden ones can creep back in:
-#   - the plugin's own version is 0.1.0 in .claude-plugin/plugin.json
+#   - the plugin's own version is 0.1.1 in .claude-plugin/plugin.json
 #   - the vendored YNAB MCP version is frozen, provenance-only in
-#     vendor/ynab-mcp/vendored.json (@dizzlkheinz/ynab-mcpb@0.26.10)
+#     vendor/ynab-mcp/vendored.json (@dizzlkheinz/ynab-mcpb@0.27.1)
 #   - no other manifest in the repo carries a standalone `version` field
 #   - the README documents the model and names the sole bump target
 
@@ -64,17 +64,20 @@ assert_contains() {
 
 command -v jq >/dev/null 2>&1 || { echo "jq is required to run this test; install jq"; exit 1; }
 
-echo "plugin version is 0.1.0:"
-# The literal acceptance-criterion check from issue #75.
-assert_ok "jq -e '.version == \"0.1.0\"' .claude-plugin/plugin.json exits 0" \
-  jq -e '.version == "0.1.0"' "$PLUGIN_MANIFEST"
+echo "plugin version is 0.1.1:"
+# The literal acceptance-criterion check from issue #75, re-pinned on each bump.
+# The pin stays hardcoded on purpose: reading the expected value out of the file
+# under test would assert nothing. It must be updated with every version bump —
+# that is the point, so a bump is always deliberate and reviewed.
+assert_ok "jq -e '.version == \"0.1.1\"' .claude-plugin/plugin.json exits 0" \
+  jq -e '.version == "0.1.1"' "$PLUGIN_MANIFEST"
 
 echo "vendored YNAB MCP version is frozen provenance:"
 if [ -f "$VENDORED" ]; then
   assert_eq "vendored.json name is @dizzlkheinz/ynab-mcpb" \
     "@dizzlkheinz/ynab-mcpb" "$(jq -r '.name' "$VENDORED")"
-  assert_eq "vendored.json version is 0.26.10" \
-    "0.26.10" "$(jq -r '.version' "$VENDORED")"
+  assert_eq "vendored.json version is 0.27.1" \
+    "0.27.1" "$(jq -r '.version' "$VENDORED")"
 else
   FAIL=$((FAIL + 1)); echo "  ❌ vendor/ynab-mcp/vendored.json not found at $VENDORED"
 fi
