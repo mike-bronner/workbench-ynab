@@ -295,8 +295,21 @@ fi
 # never even reaches the completeness gate. Guard it here: the count of raw
 # `<!-- SLOT:` openers must equal the count of well-formed `<!-- SLOT:name -->`
 # markers, or the template is malformed and we refuse loudly (exit 2, no file).
-raw_slot_openers="$(grep -oE '<!-- SLOT:' "$template" | wc -l | tr -d '[:space:]')"
-wellformed_slots="$(grep -oE '<!-- SLOT:[a-z0-9-]+ -->' "$template" | wc -l | tr -d '[:space:]')"
+#
+# LC_ALL=C on all three slot scans (issue #270): under a UTF-8 locale an invalid
+# UTF-8 byte anywhere on a line makes grep silently skip that line — measured on
+# BSD grep 2.6.0-FreeBSD under C.UTF-8 and en_US.UTF-8, which is the macOS
+# runner this writer's suite gates on. That is not merely a miscount here. A
+# skipped line drops the SAME slot from both counts below, so the malformed-
+# template gate still balances and passes, and the slot also vanishes from
+# `required_slots` — so the completeness gate never demands it, the fill loop
+# re-emits its marker verbatim, and the writer produces an exit-0 report with a
+# raw `<!-- SLOT:name -->` in it. Byte-wise matching is what a marker scan wants.
+# GNU grep 3.12 (the ubuntu lanes) is NOT affected on these `-o` scans, so the
+# macOS lane is the only place a lost pin here would be caught — which is why
+# tests/unit/grep-locale-pin.test.sh is a member of it.
+raw_slot_openers="$(LC_ALL=C grep -oE '<!-- SLOT:' "$template" | wc -l | tr -d '[:space:]')"
+wellformed_slots="$(LC_ALL=C grep -oE '<!-- SLOT:[a-z0-9-]+ -->' "$template" | wc -l | tr -d '[:space:]')"
 if [ "$raw_slot_openers" != "$wellformed_slots" ]; then
   usage_err "malformed <!-- SLOT: --> marker in template — every slot marker must match '<!-- SLOT:name -->' (name: lowercase letters, digits, hyphen): $template"
 fi
@@ -307,7 +320,7 @@ fi
 required_slots=()
 while IFS= read -r name; do
   [ -n "$name" ] && required_slots+=("$name")
-done < <(grep -oE '<!-- SLOT:[a-z0-9-]+ -->' "$template" \
+done < <(LC_ALL=C grep -oE '<!-- SLOT:[a-z0-9-]+ -->' "$template" \
            | sed -E 's/^<!-- SLOT:([a-z0-9-]+) -->$/\1/' | sort -u)
 
 if [ "${#required_slots[@]}" -eq 0 ]; then

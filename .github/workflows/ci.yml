@@ -143,7 +143,7 @@ jobs:
       # this list disagree in either direction. To add a file: write the marker,
       # then add it here. To remove one: delete both. See docs/ci.md.
       - name: Run the bash-3.2-targeted suites under bash 3.2
-        run: bash scripts/test.sh tests/persona-loader.test.sh tests/secret-scan.test.sh tests/unit/html-escape.test.sh tests/unit/report-writer.test.sh tests/unit/watchdog.test.sh tests/unit/ynab-prune.test.sh
+        run: bash scripts/test.sh tests/persona-loader.test.sh tests/secret-scan.test.sh tests/unit/grep-locale-pin.test.sh tests/unit/html-escape.test.sh tests/unit/report-writer.test.sh tests/unit/watchdog.test.sh tests/unit/ynab-prune.test.sh
 
   # The assets/ change-set integration suites (M4) exercise the real apply
   # executor and the Ajv-backed validator end to end (assets/test/*.test.js),

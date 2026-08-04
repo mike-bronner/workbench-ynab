@@ -39,22 +39,94 @@ or file left at a looser mode is tightened rather than silently trusted — `mkd
 
 | | JSONL (append one line) | One growing JSON array |
 |---|---|---|
-| Append cost | `>>` one line — no read, no parse | read-modify-**write** the whole file (O(n)) |
-| Crash safety | each record is appended in one atomic, newline-terminated write — a crash leaves either the whole record or nothing, **never a partial line** | a truncated rewrite can lose the **entire** history |
+| Append cost | one line appended — no read, no parse | read-modify-**write** the whole file (O(n)) |
+| Crash safety | each record is appended in one atomic, newline-terminated write **and fsync'd before the writer returns** — a crash leaves either the whole record or nothing, **never a partial line**, and never loses an already-returned record | a truncated rewrite can lose the **entire** history |
 | Rewrites existing data? | **never** | every append |
 
 Append-only integrity is the entire point of an audit log, so JSONL is the
-correct shape. The writer only ever `>>`-appends — it never rewrites,
+correct shape. The writer only ever appends — it never rewrites,
 truncates, or seeks. Each record is one compact line (`jq -c`, no interior
 newlines), so the writer emits it plus its terminating newline in a **single
-atomic `write(2)`** to an `O_APPEND` file descriptor: a regular-file write of a
+atomic `write(2)`** to an `O_APPEND` file descriptor, then **`fsync(2)`s that
+descriptor before returning** (see [The durability
+guarantee](#the-durability-guarantee)): a regular-file write of a
 sub-page buffer is copied to the page cache uninterruptibly, so a crash leaves
 either the whole newline-terminated record or nothing — **never a partial,
-truncated line**. As belt-and-suspenders the writer also refuses to **fuse** a new
+truncated line** — and the flush means a returned record survives a power cut,
+not just a process crash. As belt-and-suspenders the writer also refuses to **fuse** a new
 record onto a pre-existing dangling fragment (one left by an out-of-band
 truncation, not by this writer): if the file does not already end in a newline it
 prepends one, isolating the fragment on its own line — still strictly append-only,
 adding bytes only at EOF.
+
+## The durability guarantee
+
+**When `_audit_append` returns `0`, the record is on stable storage.** Not merely
+in the page cache — the writer `fsync(2)`s the file before it returns, once per
+record ([#275](https://github.com/mike-bronner/workbench-ynab/issues/275)). Two
+distinct properties hold together, on the same descriptor, in the same process:
+
+| Property | What it defeats | How |
+|---|---|---|
+| **One atomic `write(2)`** to an `O_APPEND` fd | a **torn** record — half a line on disk | the record is one compact line (`jq -c`), written whole in a single `write(2)`; `O_APPEND` also positions every write at EOF atomically, so concurrent appenders never interleave |
+| **`fsync(2)` before returning** | a **lost** record — a returned append still only in the page cache when the power cuts | the same fd is flushed to disk before the writer reports success |
+
+Atomicity alone was never enough. The audit log is the forensic record of every
+money mutation this plugin makes, and "we lost the last N records to a power cut"
+is a materially worse outcome than a resume recomputing them.
+
+**Fail-closed.** If the flush cannot happen, the append **fails** (non-zero,
+diagnostic on `STDERR`) rather than reporting a success it cannot back:
+
+- `python3` missing from `PATH` → refused before anything is created; **neither
+  the record file nor the audit directory appears**. There is no fallback to an
+  unflushed `>>`.
+- the shim cannot open the file, or the write comes up short → non-zero, and the
+  writer reports `append failed`. A short write is never fsync'd and called a
+  success; the next append's no-fuse guard isolates the fragment on its own line.
+
+### Why `python3`, not `dd conv=fsync`
+
+Bash has no builtin that flushes a file to disk, so the append is delegated to a
+small inline `python3 -c` program (`_audit_fsync_append_program`). `dd` was the
+other candidate and **cannot do an fsync'd append on BSD/macOS**, which this
+plugin targets — all three formulations fail there:
+
+| Formulation | Result on BSD/macOS |
+|---|---|
+| `dd conv=fsync oflag=append of=FILE` | `dd: unknown open flag append` — `oflag=` is a GNU coreutils extension |
+| `dd conv=fsync >> FILE` | `dd: fsyncing stdout: Invalid argument` — BSD `dd` won't fsync a descriptor it didn't open, so the write lands **unflushed** |
+| `dd conv=fsync of=FILE` | **truncates** the audit log |
+
+Even where `oflag=append` exists, `dd` copies block-wise and would split a record
+larger than its block size across several `write(2)` calls, breaking the
+single-atomic-write property above. `python3`'s `os.write` issues exactly one.
+
+This adds `python3` to the plugin's runtime tools — `bash`, `node`, `jq`,
+`security`, and now `python3` — all system binaries. No third-party package is
+installed, and the no-`node_modules` guarantee in
+[`docs/testing.md`](testing.md) is untouched.
+
+### Throughput cost
+
+Measured on macOS (APFS on NVMe), 200 sequential `_audit_append` calls, best of
+three runs:
+
+| | ms per record |
+|---|---|
+| Before (`>>`, no flush) | ~18–20 |
+| After (single `write(2)` + `fsync(2)`) | ~47 |
+| — of which: `python3` interpreter startup | ~25 |
+| — of which: the `fsync(2)` itself | **~0.4** |
+
+**Verdict: keep the flush per record; do not batch at run boundaries.** The
+durability itself is nearly free (~0.4 ms). Essentially all of the +28 ms is
+`python3` process startup, which batching *fsyncs* would not remove — only
+batching *writes* would, and that trades away both the per-record trail and the
+atomic-write property this design rests on. In context the cost is noise: every
+audited operation is gated on a YNAB API round-trip measured in hundreds of
+milliseconds, so ~28 ms of shim overhead per record sits below the noise floor of
+a real apply run.
 
 The read helpers stay defensively lenient regardless: a partial, unterminated
 **trailing** line (all an out-of-band truncation could leave) is **skipped** and
@@ -70,9 +142,11 @@ A **pure function of its three inputs**: it reads no external state and never
 touches a YNAB API, so it is unit-testable in isolation
 (`tests/unit/audit-log.test.sh`). Its only side effect is appending one record;
 the audit dir and monthly file are created on first write if absent. Each record
-is written as a single atomic, newline-terminated append, so a crash never leaves
-a partial line and a new record is never fused onto a pre-existing dangling
-fragment (see [Why JSONL](#why-jsonl-one-object-per-line-not-a-single-json-array)).
+is written as a single atomic, newline-terminated append **and flushed to stable
+storage before the function returns**, so a crash never leaves a partial line, a
+power cut never loses a record the writer already reported as written, and a new
+record is never fused onto a pre-existing dangling fragment (see
+[The durability guarantee](#the-durability-guarantee)).
 
 | Argument | Shape | Notes |
 |---|---|---|

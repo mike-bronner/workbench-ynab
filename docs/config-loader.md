@@ -47,8 +47,10 @@ resolves to the canonical plugin-data path above.
 
 Echoes the value at a `jq` path, or **nothing** when the file is missing, `jq` is
 unavailable, or the field is absent/null. It is exactly `jq -r '<path> // empty'`,
-guarded on file existence and `jq` availability — the same shape as
-`mcp-memory.sh`.
+guarded on file existence, `jq` availability, and — since issue #283 — on the
+file actually parsing as JSON (see
+[Malformed-config behaviour](#malformed-config-behaviour-fail-closed) below).
+Apart from that guard it is the same shape as `mcp-memory.sh`.
 
 ```bash
 persona_name="$(_cfg '.persona.name')"
@@ -66,9 +68,10 @@ output_dir="${output_dir:-$HOME/Documents/Claude/Reports}"   # caller's default
 ## Missing-config behaviour: `_require_config`
 
 Call `_require_config` once, before reading any fields, in any skill/command that
-**cannot proceed** without configuration. When the file is absent (or `jq` is
-unavailable) it prints a clear, actionable message to **stderr** and returns a
-**non-zero** exit code:
+**cannot proceed** without configuration. It runs three checks in order — the
+file exists, `jq` is on `PATH`, the file parses as JSON — and on any failure
+prints a clear, actionable message to **stderr** and returns a **non-zero** exit
+code. Each failure has its own wording, so the message names the right repair:
 
 ```text
 workbench-ynab: config not found at <path>
@@ -80,9 +83,51 @@ source "${CLAUDE_PLUGIN_ROOT}/bin/config.sh"
 _require_config || exit 1     # fail fast, pointing the user at /workbench-ynab:setup
 ```
 
-`_cfg` on its own is **tolerant** — it returns empty rather than erroring, so a
-skill that has its own defaults can read optional fields without the guard. Use
-`_require_config` when a missing config is a hard stop.
+`_cfg` on its own is **tolerant of an absent value** — it returns empty rather
+than erroring for the three legitimate empties (file missing, `jq` unavailable,
+field absent/null), so a skill that has its own defaults can read optional fields
+without the guard. Use `_require_config` when a missing config is a hard stop.
+
+## Malformed-config behaviour: fail closed
+
+A `config.json` that is **present but does not parse** — a hand-edit typo, a
+trailing comma, a truncated write, a zero-byte file — is **not** treated as "no
+fields set" (issue #283). Every read path in the loader fails closed on it:
+
+| Function | On a config file that does not parse |
+|---|---|
+| `_cfg` | Prints the message below to **stderr**, emits **nothing** on stdout, returns **non-zero**. |
+| `_require_config` | Same message, returns **non-zero** — after its file-exists and `jq`-available checks pass. |
+| `_cfg_timezone`, `_cfg_tax_year` | Propagate `_cfg`'s non-zero status verbatim, so neither reports its own field as "missing" or "not overridden" when the real fault is the file. |
+| `_migrate_config`, `_cfg_budgets`, `_cfg_budget_field`, `_cfg_default_budget` | Same message, emit **nothing**, return **non-zero** — `_migrate_config` is a second read path into the same file and carries the guard itself. |
+
+```text
+workbench-ynab: config at <path> is not valid JSON and could not be parsed.
+workbench-ynab: repair the file, or re-run /workbench-ynab:setup to recreate it.
+```
+
+**Why it matters.** Without this guard a corrupt file made `jq` exit non-zero,
+the error was discarded, and every reader saw the same empty output an absent key
+produces — so *every* setting at once silently reverted to its caller's default,
+with no signal. A key whose whole purpose is to override a default (`tax_year`,
+`timezone`, `report.output_dir`) would be dropped exactly when the user most
+needs it honoured.
+
+**The three legitimate empties are unchanged**, and that is what makes a non-zero
+return meaningful: config file missing, `jq` unavailable, and field absent/null
+each still produce empty stdout, a **zero** return, and **nothing** on stderr. So
+a non-zero status from any function above means one thing only — the file is
+there and does not parse. Readers that must not proceed on a corrupt file
+propagate it:
+
+```bash
+value="$(_cfg '.some.key')" || exit 1
+```
+
+> **Callers with their own shell options.** The budget helpers **capture**
+> `_migrate_config`'s output instead of piping it, because a pipeline reports
+> only its last command's status. A caller must not have to set `pipefail` for
+> these helpers to fail closed.
 
 ## The timezone helpers (issue #31)
 
@@ -94,8 +139,8 @@ command computes a date from the host clock.
 | Helper | Behaviour |
 |---|---|
 | `_is_valid_timezone TZ` | Pure predicate — returns 0 iff `TZ` is a syntactically-safe, real IANA zone. Prints nothing. **Fails closed**: rejects empty, an absolute path, a `..` traversal, a trailing slash, any character outside `[A-Za-z0-9_+/-]`, the non-selectable TZif pseudo-zones `Factory`/`posixrules` (they resolve to a UTC-equivalent date) — matched **case-insensitively** and including the `right/`/`posix/` leap-second mirror subtrees, so `factory`, `FACTORY`, and `right/Factory` fail closed too — and any name under `$TZ_DB_DIR` (default `/usr/share/zoneinfo`, honouring `$TZDIR`) that is missing or is a housekeeping file rather than a compiled zone — the final gate requires the `TZif` magic (RFC 8536), so text artifacts like `leapseconds`, `+VERSION`, and `tzdata.zi` are rejected, not a bare `-f` existence check. Nested zones like `America/Argentina/Buenos_Aires` are accepted. |
-| `_cfg_timezone` | The **load-time timezone gate**. Reads `.timezone`; echoes it on stdout when valid. On a **missing or invalid** value it prints a descriptive error to **stderr** and returns **non-zero** — it **never** falls back to the host clock. Resolve it as a hard stop: `tz="$(_cfg_timezone)" \|\| exit 1`. |
-| `_cfg_tax_year` | The **optional** active-tax-year override (`.tax_year`). Echoes nothing and returns **zero** when the key is **absent or `null`** — that is the default, and the caller derives the year from the review date. On any other value that is not a JSON **number** of exactly four digits it prints a descriptive error to **stderr** and returns **non-zero**; it never ignores a malformed value. "Is the key set?" is decided from the JSON **type**, never the rendered text, so the falsy values `false` and `""` fail closed as malformed instead of reading as unset. Resolve it as a hard stop: `tax_year="$(_cfg_tax_year)" \|\| exit 1`. |
+| `_cfg_timezone` | The **load-time timezone gate**. Reads `.timezone`; echoes it on stdout when valid. On a **missing or invalid** value it prints a descriptive error to **stderr** and returns **non-zero** — it **never** falls back to the host clock. A config file that does not parse propagates `_cfg`'s status and message rather than being reported as a missing zone. Resolve it as a hard stop: `tz="$(_cfg_timezone)" \|\| exit 1`. |
+| `_cfg_tax_year` | The **optional** active-tax-year override (`.tax_year`). Echoes nothing and returns **zero** when the key is **absent or `null`** — that is the default, and the caller derives the year from the review date. On any other value that is not a JSON **number** of exactly four digits it prints a descriptive error to **stderr** and returns **non-zero**; it never ignores a malformed value. "Is the key set?" is decided from the JSON **type**, never the rendered text, so the falsy values `false` and `""` fail closed as malformed instead of reading as unset. A config file that does not parse propagates `_cfg`'s status, so a corrupt file can never read as "no override set". Resolve it as a hard stop: `tax_year="$(_cfg_tax_year)" \|\| exit 1`. |
 | `_today_in_tz TZ [EPOCH]` | Echoes today's ISO-8601 date (`YYYY-MM-DD`) in zone `TZ` — the single source of "today" for the review router and the four ad-hoc tier commands, so a scheduled run and an interactive run at the same instant agree on the window and tax-year label. `EPOCH` (Unix seconds; or the `$YNAB_NOW_EPOCH` env var) overrides "now" — the deterministic test seam, mirroring `lib/monitor/alerts.mjs`'s `options.now`. Portable across GNU (`date -d @…`) and BSD (`date -r …`). Assumes `TZ` is already validated. |
 
 ```bash
@@ -116,8 +161,9 @@ a hard stop — the review must not run in the wrong zone.
 Skills resolve their target budget set through three helpers instead of reading
 a singular budget path. All three apply the **legacy migration at read time**
 (below), emit compact one-line JSON (or plain text for a single field), and
-emit **nothing** when unconfigured — same tolerance as `_cfg`. No budget name
-is ever hardcoded in the loader.
+emit **nothing** when unconfigured — same tolerance as `_cfg`, and the same
+[fail-closed behaviour](#malformed-config-behaviour-fail-closed) on a config
+file that does not parse. No budget name is ever hardcoded in the loader.
 
 | Helper | Emits |
 |---|---|
@@ -188,11 +234,17 @@ filters) — they are passed straight through to `jq`.
 
 `tests/unit/config.test.sh` sources `bin/config.sh` against a sandbox config (via
 the `YNAB_CONFIG_FILE` seam) and asserts: a present field reads back correctly, an
-absent field returns empty, and the missing-config guard emits the expected error
-text and a non-zero exit. `tests/unit/config-budgets.test.sh` covers the
-multi-budget helpers the same way: two-budget isolation, per-label field reads
-(including boolean-`false` readback), the read-time legacy migration (file
-untouched, `schema_version` stays 1), and the `default_budget` fallback rules.
+absent field returns empty, the missing-config guard emits the expected error
+text and a non-zero exit, and — for the malformed-config guard — four unparseable
+fixtures (truncated, trailing comma, not JSON at all, zero-byte) each fail closed
+through `_cfg`, `_require_config`, `_cfg_timezone`, and `_cfg_tax_year`, while the
+three legitimate empties keep their zero exit and silent stderr.
+`tests/unit/config-budgets.test.sh` covers the multi-budget helpers the same way:
+two-budget isolation, per-label field reads (including boolean-`false` readback),
+the read-time legacy migration (file untouched, `schema_version` stays 1), the
+`default_budget` fallback rules, and the malformed-config guard asserted with
+`pipefail` **off**, so it pins the helpers' own exit status rather than the test
+harness's shell options.
 `tests/unit/timezone.test.sh` covers the timezone helpers: `_is_valid_timezone`
 accept/reject cases, `_cfg_timezone`'s fail-closed behaviour on a missing or
 invalid zone, and `_today_in_tz`'s boundary scenarios (near-midnight, month

@@ -62,12 +62,23 @@ const LEDGER_ONLY_OP_TYPES = Object.freeze([
  * time. Adding a tool requires editing only this constant.
  *
  * AUTHORITATIVE INVENTORY — `ALLOWED_TOOLS` ∪ `DENIED_TOOLS` is the single
- * source of truth for which YNAB verbs mutate. `scripts/check-readonly.sh`'s
- * `WRITE_VERBS` deny-list is pinned against this union by
- * `tests/check-readonly.test.sh`, which parses these two array literals and
- * fails on any divergence. Adding or removing a verb here therefore requires
- * the same change to `WRITE_VERBS`, or the build breaks — deliberately, so the
- * M2 read-only guard can never fall behind the write surface it guards.
+ * source of truth for which YNAB verbs mutate. Every mirror of it is pinned
+ * against these two array literals, each test parsing them at runtime through
+ * `tests/lib/mutating-inventory.sh` and failing on any divergence:
+ *
+ *   - `scripts/check-readonly.sh`'s `WRITE_VERBS` deny-list, by
+ *     `tests/check-readonly.test.sh` (#254);
+ *   - `docs/write-back-safety.md`'s per-verb verdict table, by
+ *     `tests/unit/docs-set.test.sh` (#257);
+ *   - `skills/write-safety-guardrail.md`'s §2/§3 bullet lists, by
+ *     `tests/unit/write-safety-guardrail-doc.test.sh` (#257);
+ *   - `vendor/ynab-mcp/index.cjs`, by
+ *     `tests/unit/tool-name-ssot-coverage.test.sh` (#257) — every verb named
+ *     here must be a tool the vendored bundle really registers.
+ *
+ * Adding or removing a verb here therefore requires the same change to every
+ * mirror, or the build breaks — deliberately, so no surface that documents or
+ * guards the write boundary can fall behind it.
  * @type {readonly string[]}
  */
 const ALLOWED_TOOLS = Object.freeze([
@@ -91,7 +102,7 @@ const ALLOWED_TOOLS = Object.freeze([
  * or deleting one is money movement on a delay — it belongs here. The allow-list
  * is fail-closed and would already block them; naming them keeps
  * `ALLOWED_TOOLS ∪ DENIED_TOOLS` a true inventory of the bundle's mutating verbs,
- * which is what `scripts/check-readonly.sh`'s `WRITE_VERBS` is pinned against.
+ * which is what every mirror listed above is pinned against.
  * @type {readonly string[]}
  */
 const DENIED_TOOLS = Object.freeze([

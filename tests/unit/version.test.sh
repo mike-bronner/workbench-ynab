@@ -65,9 +65,10 @@ assert_contains() {
 command -v jq >/dev/null 2>&1 || { echo "jq is required to run this test; install jq"; exit 1; }
 
 echo "plugin version is 0.1.1:"
-# The literal acceptance-criterion check from issue #75, tracking the current
-# release. `.claude-plugin/plugin.json` is the sole bump target (see README's
-# Versioning section), so this pin follows it on every bump — issue #294.
+# The literal acceptance-criterion check from issue #75, re-pinned on each bump.
+# The pin stays hardcoded on purpose: reading the expected value out of the file
+# under test would assert nothing. It must be updated with every version bump —
+# that is the point, so a bump is always deliberate and reviewed.
 assert_ok "jq -e '.version == \"0.1.1\"' .claude-plugin/plugin.json exits 0" \
   jq -e '.version == "0.1.1"' "$PLUGIN_MANIFEST"
 

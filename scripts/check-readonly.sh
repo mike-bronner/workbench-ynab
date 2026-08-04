@@ -137,8 +137,27 @@ fi
 
 status=0
 
+# Both invariant scans below pin LC_ALL=C (issue #270). Under a UTF-8 locale grep
+# decodes input as UTF-8, and an invalid UTF-8 byte on a line hides that line from
+# the scan. One stray 0x80 ahead of a callable write verb therefore leaves
+# write_hits/bare_hits EMPTY, the `[ -n … ]` tests below both fall through, and
+# this gate prints "✓ no callable write verb" on a real read-only-boundary
+# violation. A guard that cannot decode its input must fail closed, not green.
+#
+# Unlike the repo's other scanning greps, BOTH platforms are affected here, by two
+# different mechanisms — measured, not assumed:
+#   * BSD grep 2.6.0-FreeBSD (macOS lane): no match at all, exit 1.
+#   * GNU grep 3.12 (ubuntu lanes): the improperly-encoded file is classified
+#     BINARY, so the hit never reaches stdout in usable form — `-nE` diverts a
+#     "binary file matches" note to stderr, which `2>/dev/null` discards, and
+#     `-nF` exits 0 with empty stdout. Either way the capture is empty.
+# bin/check-tool-name-sources.sh escapes the GNU half only because it passes
+# --binary-files=text; these scans carry no such flag, so the pin is load-bearing
+# on every runner. Same pin the repo already applies in bin/secret-scan.sh,
+# bin/html-escape.sh and bin/persona.sh.
+#
 # ── Invariant 1: no callable write verb ────────────────────────────────────────
-write_hits="$(grep -nE "$CALLABLE_WRITE_RE" "${surfaces[@]}" 2>/dev/null || true)"
+write_hits="$(LC_ALL=C grep -nE "$CALLABLE_WRITE_RE" "${surfaces[@]}" 2>/dev/null || true)"
 if [ -n "$write_hits" ]; then
   {
     echo "✖ read-only guardrail: a YNAB WRITE tool is callable from an M2 read-only surface:"
@@ -151,7 +170,7 @@ if [ -n "$write_hits" ]; then
 fi
 
 # ── Invariant 2: every YNAB tool reference is namespaced ────────────────────────
-bare_hits="$(grep -nF "$BARE_NS" "${surfaces[@]}" 2>/dev/null || true)"
+bare_hits="$(LC_ALL=C grep -nF "$BARE_NS" "${surfaces[@]}" 2>/dev/null || true)"
 if [ -n "$bare_hits" ]; then
   {
     echo "✖ read-only guardrail: a bare, non-resolving '${BARE_NS}' reference was found:"

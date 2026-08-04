@@ -36,6 +36,10 @@ The harness needs only what the plugin already requires:
 - **system `node`** (current LTS) — the Node suite uses the **built-in
   `node:test`** runner.
 - **`jq`** — JSON validation in the bash suite.
+- **`python3`** — the audit log's fsync shim
+  ([`docs/audit-log.md`](audit-log.md)), so `tests/unit/audit-log.test.sh`
+  exercises the real writer. A system interpreter; nothing is installed and no
+  package is imported beyond `os`/`sys`.
 - **`security(1)`** — only for tests that read the Keychain (none yet; the
   offline-boot test uses a sentinel env var, not the Keychain).
 
