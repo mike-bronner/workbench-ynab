@@ -84,10 +84,12 @@ Setup added the read-tool names to `permissions.allow`. Remove only the entries
 carrying the plugin prefix, and leave every other entry and key alone:
 
 ```bash
-jq --arg p "$TOOL_PREFIX" \
-  '.permissions.allow |= map(select((type == "string" and startswith($p)) | not))' \
-  "$SETTINGS" > "$SETTINGS.tmp" \
+SETTINGS_MODE="$(stat -L -c '%a' "$SETTINGS" 2>/dev/null || stat -L -f '%Lp' "$SETTINGS" 2>/dev/null)" \
+  && ( umask 077; jq --arg p "$TOOL_PREFIX" \
+    '.permissions.allow |= map(select((type == "string" and startswith($p)) | not))' \
+    "$SETTINGS" > "$SETTINGS.tmp" ) \
   && jq -e . "$SETTINGS.tmp" >/dev/null \
+  && chmod "$SETTINGS_MODE" "$SETTINGS.tmp" \
   && mv "$SETTINGS.tmp" "$SETTINGS" \
   || { rm -f "$SETTINGS.tmp"; echo "settings.json left untouched — fix it by hand"; }
 ```
@@ -96,6 +98,23 @@ The `&&` chain is what keeps this safe: the rewrite is staged in a temp file and
 re-validated as JSON before it replaces the original, so a failure anywhere
 leaves `settings.json` exactly as it was. If no entry matches, the filter is a
 no-op and the file is rewritten identically.
+
+The chain also preserves the file's **permission mode**. `mv` on one filesystem
+is a `rename(2)`, so the published file carries the *staged* file's mode, not the
+original's — staging under the ambient umask would reset a `settings.json` you
+hardened to `600` back to the umask default (commonly `644`, world-readable).
+`stat` reads the mode first (GNU `-c '%a'`, BSD/macOS `-f '%Lp'`), the `umask
+077` subshell keeps the staged copy owner-only while it exists, and `chmod`
+restores your mode before the swap. A failure at any of those links — including
+a mode that cannot be read — drops the temp file and leaves `settings.json`
+alone.
+
+`stat -L` follows symlinks on purpose. If your `settings.json` is a symlink into
+a dotfiles repo (chezmoi, Stow, dotbot), the mode that matters is the *target's*
+— without `-L` you would read the link's own mode instead (`755` on macOS, a
+fixed `777` on Linux) and hand that to `chmod`, widening the file you hardened.
+Note that `mv` still replaces the link with a regular file, so re-link it from
+your dotfiles repo afterwards.
 
 ## 5. Decide on the data directory
 

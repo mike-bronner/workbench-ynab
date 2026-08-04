@@ -127,8 +127,19 @@ in the file — byte-for-byte alone.
 The filter is surgical in both directions: `map(select(...))` rewrites only the
 `permissions.allow` array, and the `type == "string"` test means a non-string
 element is preserved rather than crashing the filter. Every gate fails **closed**
-— a file that cannot be parsed or rewritten is left untouched and reported,
-never overwritten.
+— a file that cannot be parsed, rewritten, re-moded, or published is left
+untouched and reported, never overwritten.
+
+The rewrite also preserves the file's **permission mode** (issue #280). `mv` on
+one filesystem is a `rename(2)`: it replaces the destination inode outright, so
+the published file carries the *staged* file's mode. Staging under the ambient
+umask would silently reset a settings.json the user hardened to `600` back to
+the umask default (commonly `644`, world-readable). So the mode is captured
+before staging and re-applied to the `.tmp` before the swap, and the `.tmp`
+itself is born owner-only so the pending rewrite never sits world-readable. The
+capture dereferences symlinks (`stat -L`): a settings.json symlinked into a
+dotfiles repo would otherwise report the *link's* mode (`755` on macOS, `777` on
+Linux) and publish that over the hardened target.
 
 ```bash
 SETTINGS_RESULT="skipped"
@@ -140,11 +151,21 @@ elif ! jq -e . "$SETTINGS" >/dev/null 2>&1; then
 else
   MATCHED="$(jq -r --arg p "$TOOL_PREFIX" \
     '[.permissions.allow // [] | .[] | select(type == "string" and startswith($p))] | length' "$SETTINGS")"
+  # GNU `stat -c '%a'` is probed FIRST: on GNU, `stat -f` means "filesystem
+  # status" and prints something unrelated instead of erroring. BSD/macOS
+  # `stat -f '%Lp'` is the fallback. `-L` (accepted by both dialects) follows the
+  # symlink: without it the read returns the LINK's own mode (0755 on macOS, a
+  # fixed 0777 on GNU), which the `chmod` below would publish over a target the
+  # user hardened — settings.json symlinked into a dotfiles repo is common.
+  SETTINGS_MODE="$(stat -L -c '%a' "$SETTINGS" 2>/dev/null || stat -L -f '%Lp' "$SETTINGS" 2>/dev/null || true)"
   if [ "$MATCHED" -eq 0 ]; then
     echo "✅ glob not present — skipping (already clean)"
-  elif ! jq --arg p "$TOOL_PREFIX" \
+  elif [ -z "$SETTINGS_MODE" ]; then
+    SETTINGS_RESULT="manual"
+    echo "❌ Could not read the permission mode of $SETTINGS — refusing to rewrite it, because the swap would reset the mode. Remove the $TOOL_PREFIX entries by hand." >&2
+  elif ! ( umask 077; jq --arg p "$TOOL_PREFIX" \
       '.permissions.allow |= map(select((type == "string" and startswith($p)) | not))' \
-      "$SETTINGS" > "$SETTINGS.tmp"; then
+      "$SETTINGS" > "$SETTINGS.tmp" ); then
     rm -f "$SETTINGS.tmp"
     SETTINGS_RESULT="manual"
     echo "❌ jq rewrite failed — $SETTINGS left untouched. Remove the $TOOL_PREFIX entries by hand." >&2
@@ -152,8 +173,15 @@ else
     rm -f "$SETTINGS.tmp"
     SETTINGS_RESULT="manual"
     echo "❌ Rewritten settings is empty or invalid JSON — $SETTINGS left untouched. Remove the $TOOL_PREFIX entries by hand." >&2
+  elif ! chmod "$SETTINGS_MODE" "$SETTINGS.tmp"; then
+    rm -f "$SETTINGS.tmp"
+    SETTINGS_RESULT="manual"
+    echo "❌ Could not restore mode $SETTINGS_MODE on the staged settings — $SETTINGS left untouched. Remove the $TOOL_PREFIX entries by hand." >&2
+  elif ! mv "$SETTINGS.tmp" "$SETTINGS"; then
+    rm -f "$SETTINGS.tmp"
+    SETTINGS_RESULT="manual"
+    echo "❌ Could not publish the rewritten settings — $SETTINGS left untouched. Remove the $TOOL_PREFIX entries by hand." >&2
   else
-    mv "$SETTINGS.tmp" "$SETTINGS"
     SETTINGS_RESULT="removed"
     echo "✅ Removed $MATCHED workbench-ynab pre-approval entries from $SETTINGS — all other entries untouched"
   fi

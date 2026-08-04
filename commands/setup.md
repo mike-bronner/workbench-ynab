@@ -425,17 +425,103 @@ duplicates (mirrors the bujo-setup pre-approval snippet):
 ```bash
 SETTINGS="$HOME/.claude/settings.json"
 mkdir -p "$(dirname "$SETTINGS")"
-[ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
+# A settings.json this command brings into existence is born owner-only: the
+# `( umask 077; … )` subshell applies AT CREATION TIME, so there is never a
+# window in which the new file is world-readable (the same creation-time pattern
+# Step 4 uses for config.json). Claude Code's settings.json can carry `env`,
+# `hooks`, and `mcpServers` blocks that in common practice hold inline secrets,
+# so the ambient-umask default (commonly 0644) is the wrong mode for a file we
+# create ourselves.
+[ -f "$SETTINGS" ] || ( umask 077; echo '{}' > "$SETTINGS" )
 
-while IFS= read -r tool; do
-  [ -z "$tool" ] && continue
-  jq --arg p "$tool" '
-    .permissions //= {} |
-    .permissions.allow //= [] |
-    if .permissions.allow | index($p) then . else .permissions.allow += [$p] end
-  ' "$SETTINGS" > "$SETTINGS.tmp" && mv "$SETTINGS.tmp" "$SETTINGS"
-done <<< "$READ_TOOLS"
-echo "✅ Read-only YNAB tools pre-approved (write tools remain gated until Sprint 4)"
+# Capture the mode the user chose BEFORE any rewrite (issue #280). `mv` on one
+# filesystem is a rename(2): it replaces the destination inode outright, so the
+# published file's mode is the STAGED file's mode, never the original's. Without
+# this capture, a settings.json a user hardened to 0600 comes back at the ambient
+# umask default (commonly 0644, world-readable) after the first pre-approval is
+# added. settings.json is Claude Code's own shared config — not a plugin-owned
+# artifact in SECURITY.md's inventory — so preserve the mode the user chose
+# rather than impose one of ours.
+#
+# GNU `stat -c '%a'` is probed FIRST: on GNU, `stat -f` means "filesystem status"
+# and prints something unrelated instead of erroring. BSD/macOS `stat -f '%Lp'`
+# is the fallback.
+#
+# `-L` (accepted by BOTH dialects) makes the read follow the symlink. Without it
+# `stat` reports the LINK's own mode, never the target's — 0755 on macOS, a fixed
+# 0777 on GNU regardless of the target. A settings.json symlinked into a dotfiles
+# repo (chezmoi, Stow, dotbot) is the common shape for this file, so an lstat read
+# would capture 0755/0777, `chmod` that onto the staged file, and publish it —
+# widening a target the user hardened to 0600 while reporting success.
+SETTINGS_MODE="$(stat -L -c '%a' "$SETTINGS" 2>/dev/null || stat -L -f '%Lp' "$SETTINGS" 2>/dev/null || true)"
+
+# Every gate below fails CLOSED, mirroring Step 4's config-write gates: any
+# failure drops the staged .tmp, leaves the real settings.json byte-for-byte
+# untouched, and reports. Pre-approval is a convenience — a failure stops THIS
+# step and withholds the ✅, rather than aborting setup (Steps 6-7 do not depend
+# on it), matching the SSoT-unreadable degrade above.
+SETTINGS_OK=1
+if [ -z "$SETTINGS_MODE" ]; then
+  SETTINGS_OK=0
+  echo "❌ Could not read the permission mode of $SETTINGS — skipping pre-approval, because publishing the rewrite would reset the mode to the ambient umask." >&2
+else
+  while IFS= read -r tool; do
+    [ -z "$tool" ] && continue
+    # `( umask 077; … )` stages the .tmp owner-only at creation, so the pending
+    # rewrite is never world-readable while it sits beside the real file.
+    if ! ( umask 077; jq --arg p "$tool" '
+      .permissions //= {} |
+      .permissions.allow //= [] |
+      if .permissions.allow | index($p) then . else .permissions.allow += [$p] end
+    ' "$SETTINGS" > "$SETTINGS.tmp" ); then
+      rm -f "$SETTINGS.tmp"
+      SETTINGS_OK=0
+      echo "❌ jq rewrite failed — $SETTINGS left untouched. Pre-approval is incomplete: any tool already added stays, the rest were not." >&2
+      break
+    fi
+    # The staged file must be non-empty, valid JSON before it is eligible to
+    # publish — the exit-code gate above is not enough on its own. jq treats a
+    # 0-byte input as ZERO JSON values in the stream: the filter never runs, jq
+    # exits 0, and nothing is written. So a settings.json that pre-exists empty
+    # (a crashed editor, a `touch`, a truncated write by an unrelated tool — the
+    # `[ -f ]` creation guard above only covers the MISSING-file case) would sail
+    # through the exit-code check and `mv` an empty .tmp over the real file,
+    # wiping the user's permissions/hooks/env/mcpServers while printing the ✅.
+    # (`jq -e .` rejects an empty file; `jq empty` would wave it through.) Same
+    # gate as Step 4's config write and commands/uninstall.md Step 4.
+    if ! jq -e . "$SETTINGS.tmp" >/dev/null 2>&1; then
+      rm -f "$SETTINGS.tmp"
+      SETTINGS_OK=0
+      echo "❌ Rewritten settings is empty or invalid JSON — $SETTINGS left untouched. Pre-approval is incomplete: any tool already added stays, the rest were not." >&2
+      break
+    fi
+    # Re-apply the ORIGINAL mode to the staged file BEFORE the swap, so the
+    # rename(2) carries the user's mode onto the real path instead of the
+    # umask's. Fail closed: a mode we cannot restore is a mode we must not
+    # publish over.
+    if ! chmod "$SETTINGS_MODE" "$SETTINGS.tmp"; then
+      rm -f "$SETTINGS.tmp"
+      SETTINGS_OK=0
+      echo "❌ Could not restore mode $SETTINGS_MODE on the staged settings — $SETTINGS left untouched. Pre-approval is incomplete: any tool already added stays, the rest were not." >&2
+      break
+    fi
+    # The publish itself is a gate too. `mv` can fail (ENOSPC on the rename's
+    # directory-entry write, a permission race, an immutable flag), and an
+    # unguarded one is silent: SETTINGS_OK stays 1, the ✅ prints, and the staged
+    # .tmp is orphaned beside a real file that never received the rewrite —
+    # reporting success for work that did not happen. The by-hand mirror in
+    # docs/uninstall.md gets this free from its `&&`/`||` chain; an imperative
+    # transcription has to say it.
+    if ! mv "$SETTINGS.tmp" "$SETTINGS"; then
+      rm -f "$SETTINGS.tmp"
+      SETTINGS_OK=0
+      echo "❌ Could not publish the rewritten settings — $SETTINGS left untouched. Pre-approval is incomplete: any tool already added stays, the rest were not." >&2
+      break
+    fi
+  done <<< "$READ_TOOLS"
+fi
+[ "$SETTINGS_OK" -eq 1 ] \
+  && echo "✅ Read-only YNAB tools pre-approved (write tools remain gated until Sprint 4)"
 ```
 
 On **No**, skip silently — the user can re-run setup later to enable it.
