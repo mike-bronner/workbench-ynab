@@ -78,7 +78,23 @@ ALLOWLIST=(
 # an unhardened write-tool resolution site from this guard and from three
 # `ALLOWED_TOOLS.find(` sweeps (issue #216). Scanning as text closes the class at
 # the root; -l prints filenames only, so binary content never reaches stdout.
-all_hits="$(grep -rlE --binary-files=text "$PATTERN" . \
+#
+# LC_ALL=C is the second half of that same hardening (issue #270). Under a UTF-8
+# locale grep decodes input as UTF-8, and a byte sequence that is not valid UTF-8
+# — a lone continuation byte like 0x80, a bare 0xFF, a truncated multibyte lead —
+# makes grep silently fail to match ON THAT LINE: no error, no warning, just a
+# tool name this guard never sees. Measured on BSD grep 2.6.0-FreeBSD, any
+# invalid byte earlier on the line defeats this scan under C.UTF-8 and
+# en_US.UTF-8 alike, and passes under LC_ALL=C.
+#
+# GNU grep 3.12 tolerates it HERE, but only by accident of the flag above:
+# --binary-files=text is what stops GNU classifying the improperly-encoded file
+# as binary, and that classification is precisely how the same defect fails
+# scripts/check-readonly.sh's unflagged scans on GNU. Relying on one flag to
+# cover a second, unrelated defect is how a guard quietly stops guarding — so
+# pin the locale explicitly rather than stay correct by coincidence.
+# LC_ALL=C makes grep operate byte-wise, which is what a byte-pattern guard wants.
+all_hits="$(LC_ALL=C grep -rlE --binary-files=text "$PATTERN" . \
   --exclude-dir=.git \
   --exclude-dir=vendor \
   --exclude-dir=node_modules \
