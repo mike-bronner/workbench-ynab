@@ -99,3 +99,44 @@ test('surfacing thresholds are config-overridable: near-amount tolerance and dat
   const signs = [txn('y1', -10000, '2026-06-01'), txn('y2', 10000, '2026-06-01')];
   assert.deepEqual(surfaceDuplicateCandidates(signs, { amountToleranceMilliunits: 20000 }), []);
 });
+
+// The date guard (#263). `Date.parse` rolled an impossible-but-well-shaped date
+// over onto a real one — '2026-02-30' became March 2 — so the proximity window
+// compared against a date the caller never supplied and surfaced (or hid) a pair
+// on it. Every case below is a date the calendar does not have, so the pair must
+// NOT surface; the control at the end proves the fixture is otherwise a perfect
+// match and the nulls are this guard biting, not a broken pair.
+test('an impossible-but-well-shaped date never matches — it fails closed instead of rolling over', () => {
+  const txn = (id, date) => ({
+    id, amount: -10000, date, payee_name: 'Cafe', transfer_account_id: null, transfer_transaction_id: null, deleted: false,
+  });
+
+  // The exact rollover: Date.parse('2026-02-30') is 2026-03-02, so before the
+  // guard this pair read as ZERO days apart and surfaced as a duplicate.
+  assert.deepEqual(surfaceDuplicateCandidates([txn('r1', '2026-03-02'), txn('r2', '2026-02-30')]), []);
+
+  for (const bad of ['2026-13-45', '2026-02-30', '0000-00-00', '2026-04-31', '2025-02-29']) {
+    assert.deepEqual(
+      surfaceDuplicateCandidates([txn('a', bad), txn('b', bad)]),
+      [],
+      `expected no candidates for ${bad}`,
+    );
+  }
+
+  // Shapes other than a bare YYYY-MM-DD are refused too: YNAB's `date` is
+  // date-only, so anything else is a caller error, not a date to guess at.
+  for (const bad of ['2026-6-1', '06/01/2026', '2026-06-01T00:00:00Z', '2026-06-011']) {
+    assert.deepEqual(
+      surfaceDuplicateCandidates([txn('a', bad), txn('b', bad)]),
+      [],
+      `expected no candidates for ${bad}`,
+    );
+  }
+
+  // CONTROL: the same pair on the real date the rollover pointed at DOES
+  // surface, so the refusals above are the date guard and not a dead fixture.
+  assert.deepEqual(
+    surfaceDuplicateCandidates([txn('c1', '2026-03-02'), txn('c2', '2026-03-02')]).map((c) => c.transaction.id),
+    ['c1', 'c2'],
+  );
+});
