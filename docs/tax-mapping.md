@@ -71,7 +71,7 @@ The engine is composed of five modules behind one facade
 | [`lib/tax/classifyTransaction.mjs`](../lib/tax/classifyTransaction.mjs) | #23 (M3-4) | Map one transaction to a suggested tax line. |
 | [`lib/tax/confidence.mjs`](../lib/tax/confidence.mjs) | #19 | Turn a confidence score into a routing band. |
 | [`lib/tax/estimatedTax.mjs`](../lib/tax/estimatedTax.mjs) | #25/#82 (M3-6) | Threshold math and quarterly estimated-tax dates. |
-| [`lib/tax/civilDate.mjs`](../lib/tax/civilDate.mjs) | #240 | Parse a `YYYY-MM-DD` civil date, rejecting dates the calendar doesn't have. |
+| [`lib/tax/civilDate.mjs`](../lib/tax/civilDate.mjs) | #240/#263 | The **one** strict `YYYY-MM-DD` parser every date seam routes through, rejecting dates the calendar doesn't have. |
 
 ## 2. Schema reference
 

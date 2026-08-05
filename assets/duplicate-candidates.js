@@ -51,11 +51,35 @@ const MS_PER_DAY = 86400000;
 
 const nonEmptyString = (v) => typeof v === 'string' && v.length > 0;
 
-/** Epoch ms for an ISO `YYYY-MM-DD` date, or null when absent/unparseable. */
+/**
+ * Epoch ms for an ISO `YYYY-MM-DD` date, or null when absent or not a date the
+ * calendar has (#263).
+ *
+ * `Date.parse` was not enough: it ROLLS OVER an impossible-but-well-shaped date
+ * instead of refusing it — `Date.parse('2025-02-30')` yields March 2 — so a
+ * malformed date silently became a real one two days from where it read, and
+ * the proximity window below then answered plausibly but WRONGLY. Same defect
+ * class as the lib/tax date seams; here the check fails closed instead.
+ *
+ * lib/tax/civilDate.mjs is the shared parser for that check, but it is ESM and
+ * this module is CommonJS with a documented no-dependencies contract, so the
+ * calendar check is the equivalent `Date.UTC` round-trip the AC allows: every
+ * out-of-range component normalizes onto a DIFFERENT real date, so comparing
+ * the components back rejects them all.
+ */
 function dateMs(v) {
   if (!nonEmptyString(v)) return null;
-  const ms = Date.parse(v);
-  return Number.isNaN(ms) ? null : ms;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const ms = Date.UTC(year, month - 1, day);
+  const back = new Date(ms);
+  if (back.getUTCFullYear() !== year || back.getUTCMonth() !== month - 1 || back.getUTCDate() !== day) {
+    return null;
+  }
+  return ms;
 }
 
 /**

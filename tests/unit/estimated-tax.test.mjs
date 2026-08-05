@@ -148,6 +148,54 @@ test('quarterForPaymentDate attributes payments by the DUE-DATE schedule, not th
   assert.equal(quarterForPaymentDate('2025-04-15', []), null); // no schedule → null
 });
 
+// --- Impossible-but-well-shaped dates (#263) ---------------------------------
+//
+// The tests above cover wrong-SHAPE input ('not-a-date'). These cover input with
+// the RIGHT shape and an impossible calendar date — the case the old shape-only
+// /^(\d{4})-(\d{2})-(\d{2})/ regexes accepted, letting a garbage month/day flow
+// into the arithmetic and produce a plausible-looking but WRONG quarter. Both
+// seams now route through the one shared strict parser (lib/tax/civilDate.mjs)
+// and must fail closed with null.
+
+const IMPOSSIBLE_DATES = ['2025-13-45', '2025-02-30', '0000-00-00'];
+
+test('quarterForDate returns null for impossible-but-well-shaped dates instead of guessing a quarter', () => {
+  for (const bad of IMPOSSIBLE_DATES) {
+    assert.equal(quarterForDate(bad, DUE_DATES), null, `expected null for ${bad}`);
+  }
+  // The regression that motivated #263: with only a shape check, '2025-13-45'
+  // fell past the boundary loop into the standard month mapping (month <= 8 ? 3 : 4)
+  // and silently answered Q4 on a schedule with NO income-attribution boundaries.
+  const bare = [{ quarter: 1, month: 4, day: 15 }];
+  for (const bad of IMPOSSIBLE_DATES) {
+    assert.equal(quarterForDate(bad, bare), null, `expected null for ${bad} on a boundary-less schedule`);
+  }
+});
+
+test('quarterForPaymentDate returns null for impossible-but-well-shaped dates instead of attributing a quarter', () => {
+  for (const bad of IMPOSSIBLE_DATES) {
+    assert.equal(quarterForPaymentDate(bad, DUE_DATES), null, `expected null for ${bad}`);
+  }
+});
+
+test('detectPayments drops a transaction whose date is impossible rather than booking it to a quarter', () => {
+  // attributePaymentDate is module-private; detectPayments is its live caller
+  // (it is fed tx.date), so this is the seam that would mis-book real money.
+  const matchers = { payeeKeywords: ['IRS'] };
+  const txns = IMPOSSIBLE_DATES.map((date, i) => ({
+    id: `tx-bad-${i}`,
+    date,
+    amount: -1000000,
+    payee_name: 'IRS',
+  }));
+  assert.deepEqual(detectPayments(txns, matchers, DUE_DATES), []);
+  // Control: the same transaction with a REAL date is still detected, proving
+  // the assertion above is the date guard biting and not a broken fixture.
+  const good = detectPayments([{ ...txns[0], date: '2025-04-10' }], matchers, DUE_DATES);
+  assert.equal(good.length, 1);
+  assert.equal(good[0].quarter, 1);
+});
+
 // --- Business activity summarization (reuses the mapping engine) -------------
 
 const summarizeProfile = {

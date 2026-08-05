@@ -236,6 +236,32 @@ test('calendarDaysBetween counts civil days and returns null on bad input', () =
   assert.equal(calendarDaysBetween('2024-02-29', '2024-03-01'), 1);
 });
 
+test('calendarDaysBetween still rejects impossible civil dates after the parser promotion (#263)', () => {
+  // epochDay's calendar check moved out to the shared lib/tax/civilDate.mjs
+  // parser. It must still bite here: an impossible due date has to fail closed
+  // (null → no reminder) rather than roll over into a real day and shift the
+  // lead-time window onto the wrong date.
+  assert.equal(calendarDaysBetween('2026-09-15', '2026-02-30'), null);
+  assert.equal(calendarDaysBetween('2026-13-45', '2026-09-15'), null);
+  assert.equal(calendarDaysBetween('0000-00-00', '2026-09-15'), null);
+  assert.equal(calendarDaysBetween(undefined, '2026-09-15'), null);
+});
+
+test('computeQuarterlyTaxReminders fails closed on an impossible today or due date (#263)', () => {
+  const Q3impossible = { quarter: 3, date: '2026-02-30', taxYear: 2026 };
+  // Impossible `today` → no nudge at all, even with a perfectly good due date.
+  assert.deepEqual(
+    computeQuarterlyTaxReminders({ ...base, today: '2026-02-30' }),
+    [],
+  );
+  // Impossible DUE date → that quarter is skipped rather than reminded on a
+  // silently-rolled-over day.
+  assert.deepEqual(
+    computeQuarterlyTaxReminders({ ...base, dueDates: [Q3impossible], today: '2026-03-02' }),
+    [],
+  );
+});
+
 // --- resolveCandidateDueDates (the January prior-year Q4 rollover) -----------
 
 test('resolveCandidateDueDates surfaces the prior tax year Q4 for a January today', () => {
